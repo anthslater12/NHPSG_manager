@@ -4662,12 +4662,21 @@ def shift_care_task_record(shift_id, care_task_id):
         return "Care task not found", 404
 
     if request.method == "POST":
-        status = request.form["status"]
+        status = request.form.get("status", "")
         comment = request.form.get("comment", "").strip()
 
         error = None
 
-        if (
+        valid_outcomes = [
+            "Completed",
+            "Attempted",
+            "Not Completed",
+        ]
+
+        if status not in valid_outcomes:
+            error = "Please select a valid outcome."
+
+        elif (
             status == "Attempted"
             and task["comment_required_attempted"] == 1
             and not comment
@@ -4800,12 +4809,26 @@ def shift_care_task_entry_edit(shift_id, entry_id):
         return "Care task entry not found", 404
 
     if request.method == "POST":
-        outcome = request.form["status"]
+        outcome = request.form.get("status", "")
         comment = request.form.get("comment", "").strip()
 
         error = None
 
-        if (
+        valid_outcomes = [
+            "Completed",
+            "Attempted",
+            "Not Completed",
+        ]
+
+        legacy_outcome_unchanged = (
+            entry["outcome"] == "Not Applicable"
+            and outcome == "Not Applicable"
+        )
+
+        if outcome not in valid_outcomes and not legacy_outcome_unchanged:
+            error = "Please select a valid outcome."
+
+        elif (
             outcome == "Attempted"
             and entry["comment_required_attempted"] == 1
             and not comment
@@ -5684,12 +5707,21 @@ def shift_housekeeping_task_record(
 
     if request.method == "POST":
 
-        status = request.form["status"]
+        status = request.form.get("status", "")
         comment = request.form.get("comment", "").strip()
 
         error = None
 
-        if (
+        valid_outcomes = [
+            "Completed",
+            "Attempted",
+            "Not Completed",
+        ]
+
+        if status not in valid_outcomes:
+            error = "Please select a valid outcome."
+
+        elif (
             status == "Attempted"
             and task["comment_required_attempted"] == 1
             and not comment
@@ -5849,12 +5881,26 @@ def shift_housekeeping_task_entry_edit(
 
     if request.method == "POST":
 
-        outcome = request.form["status"]
+        outcome = request.form.get("status", "")
         comment = request.form.get("comment", "").strip()
 
         error = None
 
-        if (
+        valid_outcomes = [
+            "Completed",
+            "Attempted",
+            "Not Completed",
+        ]
+
+        legacy_outcome_unchanged = (
+            entry["outcome"] == "Not Applicable"
+            and outcome == "Not Applicable"
+        )
+
+        if outcome not in valid_outcomes and not legacy_outcome_unchanged:
+            error = "Please select a valid outcome."
+
+        elif (
             outcome == "Attempted"
             and entry["comment_required_attempted"] == 1
             and not comment
