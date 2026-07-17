@@ -10,7 +10,7 @@
     </div>
 {% endif %}
 
-<form method="post">
+<form method="post" action="{{ url_for('housekeeping_task_category_edit', category_id=category.category_id, status=status_filter) }}">
 
     <p>
         <label>Category Name</label><br>
@@ -29,7 +29,7 @@
             Save Changes
         </button>
 
-        <a href="{{ url_for('housekeeping_task_categories') }}">
+        <a href="{{ url_for('housekeeping_task_categories', status=status_filter) }}">
             Cancel
         </a>
     </p>

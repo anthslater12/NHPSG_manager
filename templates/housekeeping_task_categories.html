@@ -65,7 +65,8 @@
 				<td>
 					<a href="{{ url_for(
         'housekeeping_task_category_edit',
-        category_id=category.category_id
+        category_id=category.category_id,
+        status=status_filter
     ) }}">
         Edit
     </a>
@@ -75,14 +76,16 @@
     {% if category.active %}
         <a href="{{ url_for(
             'housekeeping_task_category_deactivate',
-            category_id=category.category_id
+            category_id=category.category_id,
+            status=status_filter
         ) }}">
             Deactivate
         </a>
     {% else %}
         <a href="{{ url_for(
             'housekeeping_task_category_reactivate',
-            category_id=category.category_id
+            category_id=category.category_id,
+            status=status_filter
         ) }}">
             Reactivate
         </a>

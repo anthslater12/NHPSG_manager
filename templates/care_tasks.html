@@ -121,7 +121,8 @@
                         <td>
                             <a href="{{ url_for(
                                 'care_task_edit',
-                                care_task_id=task.care_task_id
+                                care_task_id=task.care_task_id,
+                                status=status_filter
                             ) }}">
                                 Edit
                             </a>
@@ -131,14 +132,16 @@
                             {% if task.active %}
                                 <a href="{{ url_for(
                                     'care_task_deactivate',
-                                    care_task_id=task.care_task_id
+                                    care_task_id=task.care_task_id,
+                                    status=status_filter
                                 ) }}">
                                     Deactivate
                                 </a>
                             {% else %}
                                 <a href="{{ url_for(
                                     'care_task_reactivate',
-                                    care_task_id=task.care_task_id
+                                    care_task_id=task.care_task_id,
+                                    status=status_filter
                                 ) }}">
                                     Reactivate
                                 </a>

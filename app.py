@@ -501,6 +501,14 @@ def reset_user_password(user_id):
     if not user_can_reset_password():
         return "Access denied", 403
 
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
+
     conn = get_db()
 
     user = conn.execute(
@@ -555,14 +563,15 @@ def reset_user_password(user_id):
             conn.commit()
             conn.close()
 
-            return redirect(url_for("users"))
+            return redirect(url_for("users", status=status_filter))
 
     conn.close()
 
     return render_template(
         "user_reset_password.html",
         user=user,
-        error=error
+        error=error,
+        status_filter=status_filter
     )
 
 #####################################################################
@@ -804,6 +813,14 @@ def user_edit(user_id):
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
 
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
+
     conn = get_db()
 
     user = conn.execute("""
@@ -862,14 +879,19 @@ def user_edit(user_id):
                 conn.commit()
                 conn.close()
 
-                return redirect(url_for("users"))
+                return redirect(url_for("users", status=status_filter))
 
             except sqlite3.IntegrityError:
                 error = "That username already exists."
 
     conn.close()
 
-    return render_template("user_edit.html", user=user, error=error)
+    return render_template(
+        "user_edit.html",
+        user=user,
+        error=error,
+        status_filter=status_filter
+    )
 
 #####################################################################
 # CLIENT MANAGEMENT
@@ -4072,6 +4094,14 @@ def care_task_edit(care_task_id):
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
 
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
+
     conn = get_db()
 
     task = conn.execute("""
@@ -4172,7 +4202,7 @@ def care_task_edit(care_task_id):
             conn.commit()
             conn.close()
 
-            return redirect(url_for("care_tasks"))
+            return redirect(url_for("care_tasks", status=status_filter))
 
     conn.close()
 
@@ -4180,7 +4210,8 @@ def care_task_edit(care_task_id):
         "care_task_edit.html",
         task=task,
         categories=categories,
-        error=error
+        error=error,
+        status_filter=status_filter
     )
 
 @app.route("/care-task/deactivate/<int:care_task_id>")
@@ -4191,6 +4222,14 @@ def care_task_deactivate(care_task_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -4220,7 +4259,7 @@ def care_task_deactivate(care_task_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("care_tasks"))
+    return redirect(url_for("care_tasks", status=status_filter))
 
 @app.route("/care-task/reactivate/<int:care_task_id>")
 def care_task_reactivate(care_task_id):
@@ -4230,6 +4269,14 @@ def care_task_reactivate(care_task_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -4261,7 +4308,7 @@ def care_task_reactivate(care_task_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("care_tasks"))
+    return redirect(url_for("care_tasks", status=status_filter))
 
 @app.route("/care-task-categories")
 def care_task_categories():
@@ -4381,6 +4428,14 @@ def care_task_category_edit(category_id):
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
 
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
+
     conn = get_db()
 
     category = conn.execute("""
@@ -4443,14 +4498,17 @@ def care_task_category_edit(category_id):
                 conn.commit()
                 conn.close()
 
-                return redirect(url_for("care_task_categories"))
+                return redirect(
+                    url_for("care_task_categories", status=status_filter)
+                )
 
     conn.close()
 
     return render_template(
         "care_task_category_edit.html",
         category=category,
-        error=error
+        error=error,
+        status_filter=status_filter
     )
 
 @app.route("/care-task-category/deactivate/<int:category_id>")
@@ -4461,6 +4519,14 @@ def care_task_category_deactivate(category_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -4511,7 +4577,9 @@ def care_task_category_deactivate(category_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("care_task_categories"))
+    return redirect(
+        url_for("care_task_categories", status=status_filter)
+    )
 
 @app.route("/care-task-category/reactivate/<int:category_id>")
 def care_task_category_reactivate(category_id):
@@ -4521,6 +4589,14 @@ def care_task_category_reactivate(category_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -4554,7 +4630,9 @@ def care_task_category_reactivate(category_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("care_task_categories"))
+    return redirect(
+        url_for("care_task_categories", status=status_filter)
+    )
 
 @app.route("/shift/<int:shift_id>/care-task/<int:care_task_id>/record", methods=["GET", "POST"])
 def shift_care_task_record(shift_id, care_task_id):
@@ -4945,6 +5023,14 @@ def housekeeping_task_category_edit(category_id):
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
 
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
+
     conn = get_db()
 
     category = conn.execute("""
@@ -5007,7 +5093,10 @@ def housekeeping_task_category_edit(category_id):
                 conn.close()
 
                 return redirect(
-                    url_for("housekeeping_task_categories")
+                    url_for(
+                        "housekeeping_task_categories",
+                        status=status_filter
+                    )
                 )
 
     conn.close()
@@ -5015,7 +5104,8 @@ def housekeeping_task_category_edit(category_id):
     return render_template(
         "housekeeping_task_category_edit.html",
         category=category,
-        error=error
+        error=error,
+        status_filter=status_filter
     )
 
 @app.route("/housekeeping-task-category/deactivate/<int:category_id>")
@@ -5026,6 +5116,14 @@ def housekeeping_task_category_deactivate(category_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -5079,7 +5177,9 @@ def housekeeping_task_category_deactivate(category_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("housekeeping_task_categories"))
+    return redirect(
+        url_for("housekeeping_task_categories", status=status_filter)
+    )
 
 @app.route("/housekeeping-task-category/reactivate/<int:category_id>")
 def housekeeping_task_category_reactivate(category_id):
@@ -5089,6 +5189,14 @@ def housekeeping_task_category_reactivate(category_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -5122,7 +5230,9 @@ def housekeeping_task_category_reactivate(category_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("housekeeping_task_categories"))
+    return redirect(
+        url_for("housekeeping_task_categories", status=status_filter)
+    )
 
 #
 # Task Administration
@@ -5308,6 +5418,14 @@ def housekeeping_task_edit(housekeeping_task_id):
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
 
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
+
     conn = get_db()
 
     task = conn.execute("""
@@ -5405,7 +5523,9 @@ def housekeeping_task_edit(housekeeping_task_id):
             conn.commit()
             conn.close()
 
-            return redirect(url_for("housekeeping_tasks"))
+            return redirect(
+                url_for("housekeeping_tasks", status=status_filter)
+            )
 
     conn.close()
 
@@ -5413,7 +5533,8 @@ def housekeeping_task_edit(housekeeping_task_id):
         "housekeeping_task_edit.html",
         task=task,
         categories=categories,
-        error=error
+        error=error,
+        status_filter=status_filter
     )
 
 @app.route(
@@ -5426,6 +5547,14 @@ def housekeeping_task_deactivate(housekeeping_task_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -5459,7 +5588,7 @@ def housekeeping_task_deactivate(housekeeping_task_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("housekeeping_tasks"))
+    return redirect(url_for("housekeeping_tasks", status=status_filter))
 
 @app.route(
     "/housekeeping-task/reactivate/<int:housekeeping_task_id>"
@@ -5471,6 +5600,14 @@ def housekeeping_task_reactivate(housekeeping_task_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -5504,7 +5641,7 @@ def housekeeping_task_reactivate(housekeeping_task_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("housekeeping_tasks"))
+    return redirect(url_for("housekeeping_tasks", status=status_filter))
 
 #
 # Shift Housekeeping Operations

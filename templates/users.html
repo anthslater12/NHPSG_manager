@@ -57,9 +57,9 @@
                 {% endif %}
             </td>
             <td>
-                <a href="/user/edit/{{ user.user_id }}">Edit</a>
+				<a href="{{ url_for('user_edit', user_id=user.user_id, status=status_filter) }}">Edit</a>
 				{% if session.role in ["Admin", "Director", "Program Manager"] %}
-					| <a href="/user/reset-password/{{ user.user_id }}">Reset Password</a>
+					| <a href="{{ url_for('reset_user_password', user_id=user.user_id, status=status_filter) }}">Reset Password</a>
 				{% endif %}
             </td>
         </tr>
