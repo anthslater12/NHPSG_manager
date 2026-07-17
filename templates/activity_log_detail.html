@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Activity Detail</h2>
+
+    <p><a href="/activity-log">Back to Activity Log</a></p>
+
+    <table>
+        <tr>
+            <th>Date/Time</th>
+            <td>{{ log.activity_datetime }}</td>
+        </tr>
+        <tr>
+            <th>User</th>
+            <td>{{ log.full_name or "" }}</td>
+        </tr>
+        <tr>
+            <th>Client</th>
+            <td>{{ log.client_name or "" }}</td>
+        </tr>
+        <tr>
+            <th>Shift</th>
+            <td>
+                {% if log.shift_id %}
+                    {{ log.shift_type }} - {{ log.shift_date }}
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <th>Class</th>
+            <td>{{ log.activity_class }}</td>
+        </tr>
+        <tr>
+            <th>Activity Type</th>
+            <td>{{ log.activity_type }}</td>
+        </tr>
+        <tr>
+            <th>Summary</th>
+            <td>{{ log.summary }}</td>
+        </tr>
+        <tr>
+            <th>Details</th>
+            <td>{{ log.details or "" }}</td>
+        </tr>
+        <tr>
+            <th>Related Table</th>
+            <td>{{ log.related_table or "" }}</td>
+        </tr>
+        <tr>
+            <th>Related ID</th>
+            <td>{{ log.related_id or "" }}</td>
+        </tr>
+        <tr>
+            <th>Success</th>
+            <td>{% if log.success %}Yes{% else %}No{% endif %}</td>
+        </tr>
+    </table>
+</div>
+
+{% endblock %}

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Edit Care Task Record</h2>
+
+    {% if error %}
+        <div class="error-message">
+            {{ error }}
+        </div>
+    {% endif %}
+
+    <form method="post">
+        <label>Status</label>
+
+        <select name="status" required>
+            <option value="Completed"
+                {% if selected_status == "Completed" %}selected{% endif %}>
+                Completed
+            </option>
+
+            <option value="Attempted"
+                {% if selected_status == "Attempted" %}selected{% endif %}>
+                Attempted
+            </option>
+
+            <option value="Not Completed"
+                {% if selected_status == "Not Completed" %}selected{% endif %}>
+                Not Completed
+            </option>
+
+            <option value="Not Applicable"
+                {% if selected_status == "Not Applicable" %}selected{% endif %}>
+                Not Applicable
+            </option>
+        </select>
+
+        <label>Comment</label>
+
+        <textarea
+            name="comment"
+            rows="4"
+        >{{ comment or "" }}</textarea>
+
+        <br><br>
+
+        <button type="submit">Save Changes</button>
+
+        <a href="/shift/{{ shift_id }}">Cancel</a>
+    </form>
+</div>
+
+{% endblock %}

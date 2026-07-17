@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Management Review</h2>
+
+    <p>
+        Select an operational area to review records,
+        add management notes, and manage follow-up actions.
+    </p>
+
+    <div class="management-review-grid">
+
+        <div class="card">
+
+            <h3>Care Routine</h3>
+
+            <p>
+                Review recorded Care Routine entries,
+                add management notes, and create linked Actions.
+            </p>
+
+            <a href="{{ url_for('care_review_list') }}">
+                Open Care Review
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h3>Housekeeping</h3>
+
+            <p>
+                Review recorded Housekeeping entries,
+                add management notes, and create linked Actions.
+            </p>
+
+            <a href="{{ url_for('housekeeping_review_list') }}">
+                Open Housekeeping Review
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h3>Shift Notes</h3>
+
+            <p>
+                Review Shift Notes and management follow-up.
+            </p>
+
+            <a href="{{ url_for('shift_notes') }}">
+                Open Shift Notes
+            </a>
+
+        </div>
+
+        <div class="card">
+
+            <h3>Incidents</h3>
+
+            <p>
+                Review Incident Reports and management follow-up.
+            </p>
+
+            <a href="{{ url_for('incident_list') }}">
+                Open Incidents
+            </a>
+
+        </div>
+
+    </div>
+
+</div>
+
+{% endblock %}

@@ -1,0 +1,230 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Add Care Task</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+
+        <label>Category</label>
+
+        <select name="category_id" required>
+            <option value="">Select a category</option>
+
+            {% for category in categories %}
+                <option
+                    value="{{ category.category_id }}"
+                    {% if form_data.get("category_id") == category.category_id|string %}
+                        selected
+                    {% endif %}
+                >
+                    {{ category.category_name }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <p style="margin-top: 6px;">
+            <a href="{{ url_for('care_task_category_new') }}">
+                + Add New Category
+            </a>
+        </p>
+
+        <label>Task Name</label>
+
+        <input
+            type="text"
+            name="task_name"
+            value="{{ form_data.get('task_name', '') }}"
+            required
+        >
+
+        <label>Instructions</label>
+
+        <textarea
+            name="instructions"
+            rows="4"
+        >{{ form_data.get("instructions", "") }}</textarea>
+
+        <label>Schedule</label>
+
+        {% set selected_schedule = form_data.get("schedule_type", "Every Shift") %}
+
+        <select name="schedule_type" required>
+            <option value="Every Shift"
+                {% if selected_schedule == "Every Shift" %}selected{% endif %}>
+                Every Shift
+            </option>
+
+            <option value="Daily"
+                {% if selected_schedule == "Daily" %}selected{% endif %}>
+                Daily
+            </option>
+
+            <option value="Weekly"
+                {% if selected_schedule == "Weekly" %}selected{% endif %}>
+                Weekly
+            </option>
+
+            <option value="Specific Days"
+                {% if selected_schedule == "Specific Days" %}selected{% endif %}>
+                Specific Days
+            </option>
+
+            <option value="As Needed"
+                {% if selected_schedule == "As Needed" %}selected{% endif %}>
+                As Needed
+            </option>
+        </select>
+
+        <label>Applies to Shift(s)</label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="occurs"
+                value="Day"
+                style="width:auto;"
+                {% if "Day" in form_data.getlist("occurs") %}checked{% endif %}
+            >
+            Day
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="occurs"
+                value="Afternoon"
+                style="width:auto;"
+                {% if "Afternoon" in form_data.getlist("occurs") %}checked{% endif %}
+            >
+            Afternoon
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="occurs"
+                value="Overnight"
+                style="width:auto;"
+                {% if "Overnight" in form_data.getlist("occurs") %}checked{% endif %}
+            >
+            Overnight
+        </label>
+
+        <label>Timing</label>
+
+        {% set selected_timing = form_data.get("timing_type", "Anytime") %}
+
+        <select name="timing_type" required>
+            <option value="Anytime"
+                {% if selected_timing == "Anytime" %}selected{% endif %}>
+                Anytime
+            </option>
+
+            <option value="Specific Time"
+                {% if selected_timing == "Specific Time" %}selected{% endif %}>
+                Specific Time
+            </option>
+
+            <option value="Before Time"
+                {% if selected_timing == "Before Time" %}selected{% endif %}>
+                Before Time
+            </option>
+        </select>
+
+        <label>Time, if applicable</label>
+
+        <input
+            type="time"
+            name="due_time"
+            value="{{ form_data.get('due_time', '') }}"
+        >
+
+        <label>Days of Week, if applicable</label>
+
+        {% for day in [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday"
+        ] %}
+
+            <label>
+                <input
+                    type="checkbox"
+                    name="days_of_week"
+                    value="{{ day }}"
+                    style="width:auto;"
+                    {% if day in form_data.getlist("days_of_week") %}checked{% endif %}
+                >
+                {{ day }}
+            </label>
+
+        {% endfor %}
+
+        <br>
+
+        <label>
+            <input
+                type="checkbox"
+                name="required"
+                style="width:auto;"
+                {% if not is_post or "required" in form_data %}checked{% endif %}
+            >
+            Required
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="comment_required_attempted"
+                style="width:auto;"
+                {% if not is_post or "comment_required_attempted" in form_data %}checked{% endif %}
+            >
+            Require comment if attempted but not completed
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="comment_required_not_completed"
+                style="width:auto;"
+                {% if not is_post or "comment_required_not_completed" in form_data %}checked{% endif %}
+            >
+            Require comment if not completed
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="active"
+                style="width:auto;"
+                {% if not is_post or "active" in form_data %}checked{% endif %}
+            >
+            Active
+        </label>
+
+        <br><br>
+
+        <button type="submit">
+            Save Care Task
+        </button>
+
+    </form>
+
+    <p>
+        <a href="{{ url_for('care_tasks') }}">
+            Back to Care Tasks
+        </a>
+    </p>
+</div>
+
+{% endblock %}

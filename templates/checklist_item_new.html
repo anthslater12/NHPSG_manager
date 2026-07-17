@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Add Checklist Item</h2>
+
+    <p><strong>{{ template.template_name }}</strong></p>
+
+    <form method="post">
+        <label>Checklist Item</label>
+        <input type="text" name="item_text" required>
+
+        <label>Timing</label>
+        <select name="timing_type" required>
+            <option value="Anytime">Anytime during shift</option>
+            <option value="Specific Time">At a specific time</option>
+            <option value="Before Time">Before a specific time</option>
+            <option value="As Needed">As needed</option>
+        </select>
+
+        <label>Time, if applicable</label>
+        <input type="time" name="due_time">
+
+        <label>
+            <input type="checkbox" name="required" checked style="width:auto;">
+            Required
+        </label>
+
+        <br><br>
+
+        <button type="submit">Save Item</button>
+    </form>
+
+    <p><a href="/checklist-template/{{ template.template_id }}">Back</a></p>
+</div>
+
+{% endblock %}

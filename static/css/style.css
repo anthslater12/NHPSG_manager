@@ -1,0 +1,603 @@
+body {
+
+    font-family: Arial, Helvetica, sans-serif;
+    margin:0;
+    background:#f5f7fa;
+
+}
+
+.header{
+
+    background:#004b87;
+    color:white;
+
+    padding:15px;
+
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+
+}
+
+.title{
+
+    font-size:28px;
+    font-weight:bold;
+
+}
+
+.user{
+
+    font-size:14px;
+
+}
+
+.nav{
+
+    background:#0066b3;
+
+    padding:10px;
+
+}
+
+.nav a{
+
+    color:white;
+
+    text-decoration:none;
+
+    margin-right:20px;
+
+    font-weight:bold;
+
+}
+
+.nav a:hover{
+
+    text-decoration:underline;
+
+}
+
+.container{
+
+    width:95%;
+    margin:auto;
+
+    margin-top:20px;
+
+}
+
+.card{
+
+    background:white;
+
+    padding:20px;
+
+    border-radius:8px;
+
+    box-shadow:0px 0px 8px rgba(0,0,0,0.1);
+
+    margin-bottom:20px;
+
+}
+
+button{
+
+    background:#004b87;
+
+    color:white;
+
+    border:none;
+
+    padding:10px 20px;
+
+    cursor:pointer;
+
+    border-radius:5px;
+
+}
+
+button:hover{
+
+    background:#00315a;
+
+}
+
+.inline-form {
+    display: inline;
+    margin: 0;
+    padding: 0;
+}
+
+.link-button {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+
+    color: #0000ee;
+    text-decoration: underline;
+
+    font: inherit;
+    cursor: pointer;
+}
+
+.link-button:visited {
+    color: #551a8b;
+}
+
+.link-button:hover {
+    background: none;
+    color: #0000ee;
+    text-decoration: underline;
+}
+
+.link-button:active {
+    background: none;
+    color: #0000ee;
+}
+
+.link-button:focus-visible {
+    outline: 2px solid #004b87;
+    outline-offset: 2px;
+    border-radius: 3px;
+}
+
+.link-button:focus:not(:focus-visible) {
+    outline: none;
+}
+
+
+
+input,
+select,
+textarea{
+
+    width:100%;
+    padding:8px;
+
+    margin-top:5px;
+
+    margin-bottom:15px;
+
+    box-sizing:border-box;
+
+}
+
+table{
+
+    width:100%;
+    border-collapse:collapse;
+
+}
+
+th{
+
+    background:#004b87;
+    color:white;
+
+}
+
+td,th{
+
+    padding:10px;
+    border:1px solid #cccccc;
+
+}
+
+.table-scroll {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.table-scroll table {
+    width: 100%;
+    min-width: 1200px;
+    border-collapse: collapse;
+}
+
+.table-scroll th,
+.table-scroll td {
+    vertical-align: top;
+    word-break: normal;
+    overflow-wrap: anywhere;
+}
+
+/* ===========================
+   Management Detail Tables
+   =========================== */
+
+.management-detail-table {
+    width: 100%;
+    table-layout: fixed;
+}
+
+.management-detail-table th {
+    width: 220px;
+}
+
+.footer{
+
+    margin-top:40px;
+
+    padding:15px;
+
+    background:#eeeeee;
+
+    text-align:center;
+
+    font-size:12px;
+
+}
+
+.quick-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.quick-button {
+    display: block;
+    background: #004b87;
+    color: white;
+    padding: 18px;
+    border-radius: 8px;
+    text-align: center;
+    text-decoration: none;
+    font-weight: bold;
+}
+
+.quick-button:hover {
+    background: #00315a;
+}
+
+.care-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+}
+
+.care-card {
+    border-left: 6px solid #0b5ea8;
+    min-height: 260px;
+
+    padding: 18px;
+    border-radius: 8px;
+
+    display: flex;
+    flex-direction: column;
+}
+
+.care-card h3 {
+    margin-top: 0;
+    margin-bottom: 12px;
+
+    font-size: 22px;
+    color: #0b5ea8;
+}
+
+.care-instructions {
+    margin-top: 8px;
+    margin-bottom: 18px;
+    line-height: 1.4;
+}
+
+.care-footer {
+    margin-top: auto;
+}
+
+.button-small {
+
+    display: inline-block;
+
+    padding: 8px 16px;
+
+    background: #0b5ea8;
+    color: white;
+
+    text-decoration: none;
+
+    border-radius: 5px;
+
+    font-size: 14px;
+}
+
+.progress-container {
+    width: 100%;
+    background: #e5e5e5;
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 10px 0 6px 0;
+    height: 12px;
+}
+
+.progress-bar {
+    height: 100%;
+    background: #28a745;
+}
+
+.progress-text {
+    font-size: 14px;
+    color: #555;
+    margin-bottom: 20px;
+}
+
+.care-completed {
+    background-color: #f2fbf4;
+    border-left-color: #28a745;
+}
+
+.care-pending {
+    background-color: #ffffff;
+    border-left-color: #0b5ea8;
+}
+
+.care-attempted {
+    background-color: #fffdf2;
+    border-left-color: #ffc107;
+}
+
+.care-not-completed {
+    background-color: #fff5f5;
+    border-left-color: #dc3545;
+}
+
+.care-not-applicable {
+    background-color: #f7f7f7;
+    border-left-color: #6c757d;
+}
+
+/* ===========================
+   Administration Dashboard
+   =========================== */
+
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+    margin-top: 20px;
+}
+
+.dashboard-grid .card {
+    min-height: 180px;
+}
+
+.dashboard-grid h1 {
+    font-size: 54px;
+    margin: 20px 0;
+    color: #0b5fa5;
+}
+
+.dashboard-grid h3 {
+    margin-top: 0;
+}
+
+.dashboard-grid a {
+    text-decoration: none;
+    font-weight: bold;
+}
+
+.inbox-section {
+    border-top: 1px solid #ddd;
+    padding-top: 20px;
+    margin-top: 20px;
+}
+
+.inbox-section h3 {
+    color: #004b87;
+    margin-bottom: 10px;
+}
+
+.inbox-section ul {
+    list-style: none;
+    padding-left: 0;
+}
+
+.inbox-section li {
+    padding: 8px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.dashboard-list {
+    margin-top: 15px;
+    padding-left: 18px;
+}
+
+.dashboard-list li {
+    margin-bottom: 8px;
+    line-height: 1.4em;
+}
+
+.manager-alerts {
+    border-left: 6px solid #dc3545;
+}
+
+.manager-alert {
+    border: 1px solid #ddd;
+    border-left: 5px solid #dc3545;
+    padding: 12px;
+    margin: 12px 0;
+    background: #fff8f8;
+}
+
+.manager-alert p {
+    margin: 8px 0;
+}
+
+.manager-alert-danger {
+    border-left-color: #dc3545;
+    background: #fff5f5;
+}
+
+.manager-alert-warning {
+    border-left-color: #ffc107;
+    background: #fffbea;
+}
+
+.manager-alert-info {
+    border-left-color: #0d6efd;
+    background: #f2f7ff;
+}
+
+.checkbox-group {
+    margin: 16px 0;
+    padding: 14px;
+}
+
+.checkbox-group .checkbox-option {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    width: fit-content !important;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.checkbox-group .checkbox-option input[type="checkbox"] {
+    width: auto !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    flex: 0 0 auto !important;
+    order: 1;
+}
+
+.checkbox-group .checkbox-option span {
+    display: inline-block !important;
+    width: auto !important;
+    margin: 0 !important;
+    order: 2;
+}
+
+/* ===========================
+   Standard Message Styles
+   =========================== */
+
+.success-message {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 6px;
+    font-weight: bold;
+}
+
+.warning-message {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeeba;
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 6px;
+    font-weight: bold;
+}
+
+.info-message {
+    background: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 6px;
+    font-weight: bold;
+}
+
+.error-message {
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 6px;
+    font-weight: bold;
+}
+
+/* ===========================
+   Session Timeout Warning
+   =========================== */
+
+.session-timeout-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    padding: 20px;
+
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.session-timeout-overlay[hidden] {
+    display: none;
+}
+
+.session-timeout-dialog {
+    width: 100%;
+    max-width: 460px;
+
+    background: white;
+
+    padding: 28px;
+
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+
+    text-align: center;
+}
+
+.session-timeout-dialog h2 {
+    margin-top: 0;
+    color: #004b87;
+}
+
+.session-timeout-dialog p {
+    line-height: 1.5;
+}
+
+.session-timeout-actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+
+    margin-top: 24px;
+}
+
+.session-timeout-actions button {
+    min-width: 140px;
+}
+
+/* ===========================
+   Administration List Status
+   =========================== */
+
+.status-active {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    background: #d4edda;
+    color: #155724;
+    font-weight: bold;
+    font-size: 0.9em;
+}
+
+.status-inactive {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    background: #e2e3e5;
+    color: #495057;
+    font-weight: bold;
+    font-size: 0.9em;
+}
+
+.row-active {
+    background-color: #cfeecf;
+}
+
+.row-inactive {
+    background-color: #f8f9fa;
+}

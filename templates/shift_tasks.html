@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Shift Tasks</h2>
+
+    <p><a href="/shift-task/new">+ Add Shift Task</a></p>
+
+    <p>
+        Show:
+
+        {% if status_filter == "all" %}
+            <strong>All</strong>
+        {% else %}
+            <a href="{{ url_for('shift_tasks', status='all') }}">
+                All
+            </a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "active" %}
+            <strong>Active</strong>
+        {% else %}
+            <a href="{{ url_for('shift_tasks', status='active') }}">
+                Active
+            </a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "inactive" %}
+            <strong>Inactive</strong>
+        {% else %}
+            <a href="{{ url_for('shift_tasks', status='inactive') }}">
+                Inactive
+            </a>
+        {% endif %}
+    </p>
+
+    {% if tasks %}
+        <table>
+            <tr>
+                <th>Stage</th>
+                <th>Task</th>
+                <th>Instructions</th>
+                <th>Required</th>
+                <th>Status</th>
+				<th>Action</th>
+            </tr>
+
+            {% for task in tasks %}
+			<tr class="{% if task.active %}row-active{% else %}row-inactive{% endif %}">
+				<td>{{ task.task_stage }}</td>
+				<td>{{ task.task_name }}</td>
+				<td>{{ task.instructions }}</td>
+				<td>{% if task.required %}Yes{% else %}No{% endif %}</td>
+				<td>
+    				{% if task.active %}
+        				<span class="status-active">🟢 Active</span>
+    				{% else %}
+        				<span class="status-inactive">⚪ Inactive</span>
+    				{% endif %}
+				</td>
+
+				<td>
+					<a href="/shift-task/edit/{{ task.shift_task_id }}">Edit</a>
+
+					{% if task.active %}
+						| <a href="/shift-task/deactivate/{{ task.shift_task_id }}">Deactivate</a>
+					{% else %}
+						| <a href="/shift-task/reactivate/{{ task.shift_task_id }}">Reactivate</a>
+					{% endif %}
+				</td>
+			</tr>
+			{% endfor %}
+        </table>
+    {% else %}
+
+        {% if status_filter == "active" %}
+            <p>No active shift tasks were found.</p>
+        {% elif status_filter == "inactive" %}
+            <p>No inactive shift tasks were found.</p>
+        {% else %}
+            <p>No shift tasks have been added yet.</p>
+        {% endif %}
+
+    {% endif %}
+</div>
+
+{% endblock %}

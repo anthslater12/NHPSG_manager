@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Incident Reports</h2>
+
+    <p>
+        <a href="{{ url_for('incident_new') }}">Add New Incident Report</a>
+    </p>
+
+    {% if incidents %}
+
+        <table>
+
+            <tr>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Client</th>
+                <th>Type</th>
+                <th>Location</th>
+                <th>Reported By</th>
+                <th>Follow-up</th>
+                <th>Reviewed</th>
+            </tr>
+
+            {% for incident in incidents %}
+
+            <tr>
+
+                <td>{{ incident.incident_date }}</td>
+                <td>{{ incident.incident_time }}</td>
+                <td>{{ incident.client_name }}</td>
+                <td>{{ incident.incident_type }}</td>
+                <td>{{ incident.location }}</td>
+                <td>{{ incident.full_name }}</td>
+
+                <td>
+                    {% if incident.follow_up_required %}
+                        Yes
+                    {% else %}
+                        No
+                    {% endif %}
+                </td>
+
+                <td>
+
+                    {% if reviews_by_incident.get(incident.incident_id) %}
+
+                        {% for review in reviews_by_incident[incident.incident_id] %}
+
+                            🟢 {{ review.reviewed_by }}<br>
+                            <small>{{ review.acknowledged_at }}</small><br>
+
+                        {% endfor %}
+
+                        {% if incident.incident_id not in reviewed_by_current_user %}
+
+                            <br>
+
+                            <a href="{{ url_for('review_incident',
+                                                incident_id=incident.incident_id) }}">
+                                Add Review
+                            </a>
+
+                        {% endif %}
+
+                    {% else %}
+
+                        <a href="{{ url_for('review_incident',
+                                            incident_id=incident.incident_id) }}">
+                            Review
+                        </a>
+
+                    {% endif %}
+
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
+
+    {% else %}
+
+        <p>No incident reports yet.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}

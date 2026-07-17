@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Beginning of Shift</h2>
+
+    <p><strong>{{ shift.shift_type }} Shift</strong></p>
+    <p><strong>Date:</strong> {{ shift.shift_date }}</p>
+
+    <p>Welcome. Please complete these quick checks before starting your shift.</p>
+
+    <form method="post">
+        {% if shift_tasks %}
+			{% for task in shift_tasks %}
+				<label>
+					<input type="checkbox" required style="width:auto;">
+					<strong>{{ task.task_name }}</strong>
+
+					{% if task.instructions %}
+						<br>
+						<small>{{ task.instructions }}</small>
+					{% endif %}
+					
+					{% if task.requires_input %}
+						<br><br>
+						<label>{{ task.input_label }}</label>
+						<input type="{{ task.input_type }}" name="shift_task_input_{{ task.shift_task_id }}" required>
+					{% endif %}
+										
+				</label>
+
+				<br><br>
+			{% endfor %}
+		{% else %}
+			<p>No beginning-of-shift tasks configured.</p>
+		{% endif %}
+
+        <br><br>
+
+        <button type="submit">Continue to Shift</button>
+    </form>
+</div>
+
+{% endblock %}

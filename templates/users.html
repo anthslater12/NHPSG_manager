@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Staff / Users</h2>
+
+    <p><a href="/user/new">+ Add Staff Member</a></p>
+
+    <p>
+        Show:
+
+        {% if status_filter == "all" %}
+            <strong>All</strong>
+        {% else %}
+            <a href="{{ url_for('users', status='all') }}">All</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "active" %}
+            <strong>Active</strong>
+        {% else %}
+            <a href="{{ url_for('users', status='active') }}">Active</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "inactive" %}
+            <strong>Inactive</strong>
+        {% else %}
+            <a href="{{ url_for('users', status='inactive') }}">Inactive</a>
+        {% endif %}
+    </p>
+
+    {% if users %}
+
+    <table>
+        <tr>
+            <th>Name</th>
+            <th>Username</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th>Action</th>
+        </tr>
+
+        {% for user in users %}
+        <tr class="{% if user.active %}row-active{% else %}row-inactive{% endif %}">
+            <td>{{ user.full_name }}</td>
+            <td>{{ user.username }}</td>
+            <td>{{ user.role }}</td>
+            <td>
+                {% if user.active %}
+                    <span class="status-active">🟢 Active</span>
+                {% else %}
+                    <span class="status-inactive">⚪ Inactive</span>
+                {% endif %}
+            </td>
+            <td>
+                <a href="/user/edit/{{ user.user_id }}">Edit</a>
+				{% if session.role in ["Admin", "Director", "Program Manager"] %}
+					| <a href="/user/reset-password/{{ user.user_id }}">Reset Password</a>
+				{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    {% else %}
+
+        {% if status_filter == "active" %}
+            <p>No active users were found.</p>
+        {% elif status_filter == "inactive" %}
+            <p>No inactive users were found.</p>
+        {% else %}
+            <p>No users have been added yet.</p>
+        {% endif %}
+
+    {% endif %}
+
+</div>
+
+{% endblock %}

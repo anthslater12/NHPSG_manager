@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Action Detail</h2>
+
+    <p>
+        <a href="/actions">← Back to Actions</a>
+    </p>
+
+    <table>
+
+        <tr>
+            <th>Title</th>
+            <td>{{ action.title }}</td>
+        </tr>
+
+        <tr>
+            <th>Description</th>
+            <td>{{ action.description or "" }}</td>
+        </tr>
+
+        <tr>
+            <th>Status</th>
+            <td>{{ action.status }}</td>
+        </tr>
+
+        <tr>
+            <th>Priority</th>
+            <td>{{ action.priority }}</td>
+        </tr>
+
+        <tr>
+            <th>Created</th>
+            <td>{{ action.created_at }}</td>
+        </tr>
+
+        <tr>
+            <th>Created By</th>
+            <td>{{ action.created_by or "" }}</td>
+        </tr>
+
+        <tr>
+            <th>Assigned To</th>
+            <td>{{ action.assigned_to or "Not Assigned" }}</td>
+        </tr>
+
+        <tr>
+            <th>Due Date</th>
+            <td>{{ action.due_date or "" }}</td>
+        </tr>
+
+        <tr>
+            <th>Source</th>
+            <td>
+                {{ action.source_table }}
+                {% if action.source_id %}
+                    #{{ action.source_id }}
+                {% endif %}
+            </td>
+        </tr>
+
+        <tr>
+            <th>Shift</th>
+            <td>
+                {% if action.shift_id %}
+                    {{ action.shift_type }} Shift<br>
+                    <small>{{ action.shift_date }}</small>
+                {% endif %}
+            </td>
+        </tr>
+
+    </table>
+
+    <hr>
+
+    <h3>Action Comments</h3>
+
+    {% if comments %}
+
+        {% for comment in comments %}
+
+            <div class="card" style="margin-bottom:15px;">
+                <strong>{{ comment.full_name }}</strong><br>
+                <small>{{ comment.created_at }}</small>
+
+                <p>{{ comment.comment }}</p>
+            </div>
+
+        {% endfor %}
+
+    {% else %}
+
+        <p>No comments yet.</p>
+
+    {% endif %}
+
+    <hr>
+
+    <h3>Add Comment</h3>
+
+    <form method="post">
+
+        <input type="hidden" name="form_type" value="comment">
+
+        <textarea
+            name="comment"
+            rows="5"
+            style="width:100%;"
+            placeholder="Enter your comment here..."
+            required></textarea>
+
+        <br><br>
+
+        <button type="submit">
+            Add Comment
+        </button>
+
+    </form>
+
+    <hr>
+
+    <h3>Update Action</h3>
+
+    <form method="post">
+
+        <input type="hidden" name="form_type" value="update">
+
+        <label>Status</label>
+        <select name="status">
+            <option value="Open" {% if action.status == "Open" %}selected{% endif %}>Open</option>
+            <option value="Acknowledged" {% if action.status == "Acknowledged" %}selected{% endif %}>Acknowledged</option>
+            <option value="In Progress" {% if action.status == "In Progress" %}selected{% endif %}>In Progress</option>
+            <option value="Waiting" {% if action.status == "Waiting" %}selected{% endif %}>Waiting</option>
+            <option value="Completed" {% if action.status == "Completed" %}selected{% endif %}>Completed</option>
+            <option value="Closed" {% if action.status == "Closed" %}selected{% endif %}>Closed</option>
+        </select>
+
+        <label>Priority</label>
+        <select name="priority">
+            <option value="High" {% if action.priority == "High" %}selected{% endif %}>High</option>
+            <option value="Medium" {% if action.priority == "Medium" %}selected{% endif %}>Medium</option>
+            <option value="Low" {% if action.priority == "Low" %}selected{% endif %}>Low</option>
+        </select>
+
+        <label>Assign To</label>
+        <select name="assigned_to_user_id">
+            <option value="">Not Assigned</option>
+
+            {% for user in users %}
+                <option value="{{ user.user_id }}"
+                    {% if action.assigned_to_user_id == user.user_id %}selected{% endif %}>
+                    {{ user.full_name }} — {{ user.role }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <br><br>
+
+        <button type="submit">
+            Update Action
+        </button>
+
+    </form>
+	
+	<hr>
+
+	<h3>Action History</h3>
+
+	{% if history %}
+
+		<table>
+			<tr>
+				<th>Date/Time</th>
+				<th>User</th>
+				<th>Activity</th>
+				<th>Details</th>
+			</tr>
+
+			{% for item in history %}
+			<tr>
+				<td>{{ item.activity_datetime }}</td>
+				<td>{{ item.full_name or "" }}</td>
+				<td>{{ item.summary }}</td>
+				<td>{{ item.details or "" }}</td>
+			</tr>
+			{% endfor %}
+		</table>
+
+	{% else %}
+
+    <p>No history found.</p>
+
+{% endif %}
+
+</div>
+
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Add Client</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <label>Client Name</label>
+        <input type="text" name="client_name" required>
+
+        <button type="submit">Create Client</button>
+    </form>
+
+    <p><a href="/clients">Back to Clients</a></p>
+</div>
+
+{% endblock %}

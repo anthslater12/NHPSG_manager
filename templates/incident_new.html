@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>New Incident Report</h2>
+
+    <form method="post">
+
+        <!-- Top Row -->
+
+        <div style="display:flex; gap:15px; align-items:flex-end; margin-bottom:20px;">
+
+            <div style="width:160px;">
+                <label>Date of Incident</label>
+                <input
+                    type="date"
+                    name="incident_date"
+                    value="{{ today }}"
+                    required>
+            </div>
+
+            <div style="width:140px;">
+                <label>Time of Incident</label>
+                <input
+                    type="time"
+                    name="incident_time"
+                    value="{{ current_time }}"
+                    required>
+            </div>
+
+            <div style="width:240px;">
+                <label>Incident Type</label>
+
+                <select
+                    name="incident_type"
+                    required>
+
+                    <option value="">Select type</option>
+
+                    <option>Aggression</option>
+                    <option>Self Injury</option>
+                    <option>Property Damage</option>
+                    <option>Medical</option>
+                    <option>Behaviour</option>
+                    <option>Other</option>
+
+                </select>
+
+            </div>
+
+            <div style="flex:1;">
+                <label>Location</label>
+
+                <input
+                    type="text"
+                    name="location">
+            </div>
+
+        </div>
+
+        <label>What occurred?</label>
+
+        <textarea
+            name="description"
+            rows="6"
+            required></textarea>
+
+        <br><br>
+
+        <label>Actions Taken</label>
+
+        <textarea
+            name="actions_taken"
+            rows="5"></textarea>
+
+        <br><br>
+
+        <label>Witnesses</label>
+
+        <input
+            type="text"
+            name="witnesses">
+
+        <br><br>
+
+        <label>
+
+            <input
+                type="checkbox"
+                name="injury">
+
+            Was anyone injured?
+
+        </label>
+
+        <br><br>
+
+        <label>Injury Details</label>
+
+        <textarea
+            name="injury_details"
+            rows="4"></textarea>
+
+        <br><br>
+
+        <button type="submit">
+            Save Incident
+        </button>
+
+        <a href="{{ url_for('incident_list') }}"
+           class="button-secondary">
+            Cancel
+        </a>
+
+    </form>
+
+</div>
+
+{% endblock %}

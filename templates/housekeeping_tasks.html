@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+<div class="page-header">
+    <div>
+        <h2>Housekeeping Tasks</h2>
+        <p>Manage the housekeeping tasks available for shifts.</p>
+    </div>
+
+    <div>
+        <a href="{{ url_for('housekeeping_task_new') }}"
+           class="button">
+            Add Task
+        </a>
+    </div>
+</div>
+
+    <p>
+        Show:
+
+        {% if status_filter == "all" %}
+            <strong>All</strong>
+        {% else %}
+            <a href="{{ url_for('housekeeping_tasks', status='all') }}">All</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "active" %}
+            <strong>Active</strong>
+        {% else %}
+            <a href="{{ url_for('housekeeping_tasks', status='active') }}">Active</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "inactive" %}
+            <strong>Inactive</strong>
+        {% else %}
+            <a href="{{ url_for('housekeeping_tasks', status='inactive') }}">Inactive</a>
+        {% endif %}
+    </p>
+
+    {% if tasks %}
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Task</th>
+                    <th>Category</th>
+                    <th>Instructions</th>
+                    <th>Schedule</th>
+                    <th>Occurs</th>
+                    <th>Timing</th>
+                    <th>Required</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                {% for task in tasks %}
+
+                    <tr class="{% if task.active %}row-active{% else %}row-inactive{% endif %}">
+
+                        <td>
+                            {{ task.task_name }}
+                        </td>
+
+                        <td>
+                            {{ task.category_name or "Uncategorized" }}
+                        </td>
+
+                        <td>
+                            {% if task.instructions %}
+                                {{ task.instructions[:50] }}
+                                {% if task.instructions|length > 50 %}
+                                    ...
+                                {% endif %}
+                            {% endif %}
+                        </td>
+
+                        <td>
+                            {{ task.schedule_type }}
+                        </td>
+
+                        <td>
+                            {% if task.occurs %}
+                                {{ task.occurs | replace(",", ", ") }}
+                            {% else %}
+                                Anytime
+                            {% endif %}
+                        </td>
+
+                        <td>
+                            {{ task.timing_type }}
+
+                            {% if task.due_time %}
+                                {{ task.due_time }}
+                            {% endif %}
+                        </td>
+
+                        <td>
+                            {% if task.required %}
+                                Yes
+                            {% else %}
+                                No
+                            {% endif %}
+                        </td>
+
+                        <td>
+                            {% if task.active %}
+                                <span class="status-active">🟢 Active</span>
+                            {% else %}
+                                <span class="status-inactive">⚪ Inactive</span>
+                            {% endif %}
+                        </td>
+
+                        <td>
+
+                            <a href="{{ url_for(
+                                'housekeeping_task_edit',
+                                housekeeping_task_id=task.housekeeping_task_id
+                            ) }}">
+                                Edit
+                            </a>
+
+                            |
+
+                            {% if task.active %}
+
+                                <a href="{{ url_for(
+                                    'housekeeping_task_deactivate',
+                                    housekeeping_task_id=task.housekeeping_task_id
+                                ) }}">
+                                    Deactivate
+                                </a>
+
+                            {% else %}
+
+                                <a href="{{ url_for(
+                                    'housekeeping_task_reactivate',
+                                    housekeeping_task_id=task.housekeeping_task_id
+                                ) }}">
+                                    Reactivate
+                                </a>
+
+                            {% endif %}
+
+                        </td>
+
+                    </tr>
+
+                {% endfor %}
+
+            </tbody>
+
+        </table>
+
+    {% else %}
+
+        {% if status_filter == "active" %}
+            <p>No active housekeeping tasks were found.</p>
+        {% elif status_filter == "inactive" %}
+            <p>No inactive housekeeping tasks were found.</p>
+        {% else %}
+            <p>No housekeeping tasks have been created.</p>
+        {% endif %}
+
+    {% endif %}
+
+</div>
+
+{% endblock %}

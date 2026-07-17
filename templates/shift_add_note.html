@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Add Staff Note</h2>
+
+    <p>
+        <strong>{{ shift.shift_type }} Shift</strong><br>
+        {{ shift.shift_date }}
+    </p>
+
+    <form method="post">
+        <label>Note</label>
+        <textarea name="note_text" rows="8" required></textarea>
+
+        <label>
+            <input type="checkbox" name="follow_up_required" style="width:auto;">
+            Follow-up required
+        </label>
+
+        <br><br>
+
+        <button type="submit">Save Note</button>
+    </form>
+
+    <p><a href="/shift/{{ shift.shift_id }}">Back to Shift</a></p>
+</div>
+
+{% endblock %}

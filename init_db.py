@@ -1,0 +1,59 @@
+import sqlite3
+from werkzeug.security import generate_password_hash
+
+conn = sqlite3.connect("nhpsg.db")
+cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS clients (
+    client_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS shift_notes (
+    note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    shift_date TEXT NOT NULL,
+    shift_type TEXT NOT NULL,
+    note_text TEXT NOT NULL,
+    follow_up_required INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cur.execute("""
+INSERT OR IGNORE INTO users (username, password_hash, full_name, role)
+VALUES (?, ?, ?, ?)
+""", (
+    "admin",
+    generate_password_hash("admin123"),
+    "Administrator",
+    "Admin"
+))
+
+cur.execute("""
+INSERT OR IGNORE INTO clients (client_id, client_name, active)
+VALUES (1, 'Neville', 1)
+""")
+
+conn.commit()
+conn.close()
+
+print("Database created.")
+print("Login: admin")
+print("Password: admin123")

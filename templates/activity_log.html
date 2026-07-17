@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Activity Log</h2>
+
+    <p>Showing the most recent 200 activity records.</p>
+
+    {% if logs %}
+        <table>
+            <tr>
+                <th>Date/Time</th>
+                <th>User</th>
+                <th>Shift</th>
+				<th>Class</th>
+                <th>Summary</th>
+				<th>Success</th>
+            </tr>
+
+            {% for log in logs %}
+            <tr>
+				<td>{{ log.activity_datetime }}</td>
+
+				<td>{{ log.full_name or "" }}</td>
+
+				<td>
+					{% if log.shift_id %}
+						{{ log.shift_type }}<br>
+						<small>{{ log.shift_date }}</small>
+					{% endif %}
+				</td>
+
+				<td>
+					{% if log.activity_class == "LOGIN" %}
+						Login
+					{% elif log.activity_class == "SHIFT" %}
+						Shift
+					{% elif log.activity_class == "SHIFT_TASK" %}
+						Shift Task
+					{% elif log.activity_class == "CARE" %}
+						Care Routine
+					{% elif log.activity_class == "NOTE" %}
+						Staff Note
+					{% elif log.activity_class == "INCIDENT" %}
+						Incident
+					{% elif log.activity_class == "ADMIN" %}
+						Administration
+					{% else %}
+						{{ log.activity_class }}
+					{% endif %}
+				</td>
+
+				<td>
+					<a href="/activity-log/{{ log.activity_id }}">
+						{{ log.summary }}
+					</a>
+				</td>
+
+				<td>
+					{% if log.success %}
+						🟢 Success
+					{% else %}
+						🔴 Failed
+					{% endif %}
+				</td>
+
+			</tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No activity records found.</p>
+    {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Care Manager Review</h2>
+
+    {% if care_entries %}
+
+    <div class="table-scroll">
+
+        <table>
+
+        <tr>
+            <th>Date</th>
+            <th>Shift</th>
+            <th>Client</th>
+            <th>Task</th>
+            <th>Outcome</th>
+            <th>Completed By</th>
+            <th>Completed</th>
+            <th>Comment</th>
+            <th>Reviewed</th>
+            <th>View</th>
+        </tr>
+
+        {% for entry in care_entries %}
+
+        <tr id="care-entry-{{ entry.entry_id }}">
+
+            <td>{{ entry.shift_date }}</td>
+
+            <td>{{ entry.shift_type }}</td>
+
+            <td>{{ entry.client_name }}</td>
+
+            <td>{{ entry.task_name }}</td>
+
+            <td>{{ entry.outcome }}</td>
+
+            <td>{{ entry.completed_by }}</td>
+
+            <td>{{ entry.completed_at }}</td>
+
+            <td>{{ entry.comment }}</td>
+
+            <td>
+
+                {% if reviews_by_entry.get(entry.entry_id) %}
+
+                    {% for review in reviews_by_entry[entry.entry_id] %}
+
+                        🟢 {{ review.reviewed_by }}<br>
+                        <small>{{ review.acknowledged_at }}</small><br>
+
+                    {% endfor %}
+
+                    {% if entry.entry_id not in reviewed_by_current_user %}
+
+                        <br>
+
+                        <form
+                            method="post"
+                            action="{{ url_for(
+                                'review_care_entry',
+                                entry_id=entry.entry_id
+                            ) }}"
+                            class="inline-form preserve-review-position"
+                        >
+                            <button type="submit" class="link-button">
+                                Add Review
+                            </button>
+                        </form>
+
+                    {% endif %}
+
+                {% else %}
+
+                    <form
+                        method="post"
+                        action="{{ url_for(
+                            'review_care_entry',
+                            entry_id=entry.entry_id
+                        ) }}"
+                        class="inline-form preserve-review-position"
+                    >
+                        <button type="submit" class="link-button">
+                            Review
+                        </button>
+                    </form>
+
+                {% endif %}
+
+            </td>
+
+            <td>
+
+                <a href="{{ url_for(
+                    'care_review_detail',
+                    entry_id=entry.entry_id
+                ) }}">
+                    View
+                </a>
+
+            </td>
+
+        </tr>
+
+        {% endfor %}
+
+        </table>
+
+    </div>
+
+    {% else %}
+
+        <p>No Care entries have been recorded.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}

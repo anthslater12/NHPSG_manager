@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+    <title>NHPSG Manager</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+
+</head>
+
+<body>
+
+<div class="header">
+
+    <div class="title">
+
+        NHPSG Manager
+
+    </div>
+
+    <div class="user">
+
+        {% if session.full_name %}
+
+            {{ session.full_name }}
+
+            <br>
+
+            {{ session.role }}
+
+        {% endif %}
+
+    </div>
+
+</div>
+
+{% if session.user_id %}
+
+<div class="nav">
+
+    <a href="{{ url_for('dashboard') }}">
+        Current Shift
+    </a>
+
+    <a href="{{ url_for('shift_notes') }}">
+        View Notes
+    </a>
+
+    <a href="{{ url_for('incident_list') }}">
+        Incidents
+    </a>
+
+    {% if session.role in ["Admin", "Program Manager", "Director"] %}
+
+        <a href="{{ url_for('manager_review_hub') }}">
+            Management Review
+        </a>
+
+        <a href="{{ url_for('users') }}">
+            Users
+        </a>
+
+        <a href="{{ url_for('clients') }}">
+            Clients
+        </a>
+
+        <a href="{{ url_for('care_tasks') }}">
+            Care Routine
+        </a>
+
+        <a href="{{ url_for('housekeeping_tasks') }}">
+            Housekeeping
+        </a>
+
+        <a href="{{ url_for('shift_tasks') }}">
+            Shift Tasks
+        </a>
+
+        <a href="{{ url_for('actions') }}">
+            Actions
+        </a>
+
+        <a href="{{ url_for('activity_log') }}">
+            Activity Log
+        </a>
+
+    {% endif %}
+
+    <a href="{{ url_for('logout') }}">
+        Logout
+    </a>
+
+</div>
+
+{% endif %}
+
+<div class="container">
+
+{% block content %}
+
+{% endblock %}
+
+</div>
+
+<div class="footer">
+
+    NHPSG Manager
+
+    Version 1
+
+</div>
+
+{% if session.get("user_id") %}
+
+<div
+    id="sessionTimeoutOverlay"
+    class="session-timeout-overlay"
+    hidden
+>
+    <div
+        class="session-timeout-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sessionTimeoutTitle"
+    >
+
+        <h2 id="sessionTimeoutTitle">
+            Session Expiring
+        </h2>
+
+        <p>
+            You will be logged out in
+            <strong>
+                <span id="sessionTimeoutCountdown">
+                    {{ session_warning_seconds }}
+                </span>
+                seconds
+            </strong>
+            due to inactivity.
+        </p>
+
+        <div class="session-timeout-actions">
+
+            <button
+                type="button"
+                id="stayLoggedInButton"
+            >
+                Stay Logged In
+            </button>
+
+            <button
+                type="button"
+                id="logOutNowButton"
+            >
+                Log Out
+            </button>
+
+        </div>
+
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    var timeoutSeconds =
+        {{ session_timeout_seconds | int }};
+
+    var warningSeconds =
+        {{ session_warning_seconds | int }};
+
+    var warningDelayMilliseconds =
+        (timeoutSeconds - warningSeconds) * 1000;
+
+    var warningTimer = null;
+    var logoutTimer = null;
+    var countdownTimer = null;
+
+    var countdownValue = warningSeconds;
+    var warningVisible = false;
+
+    var lastKeepAliveSent = Date.now();
+    var keepAliveThrottleMilliseconds = 60000;
+
+    var overlay =
+        document.getElementById('sessionTimeoutOverlay');
+
+    var countdownDisplay =
+        document.getElementById('sessionTimeoutCountdown');
+
+    var stayLoggedInButton =
+        document.getElementById('stayLoggedInButton');
+
+    var logOutNowButton =
+        document.getElementById('logOutNowButton');
+
+
+    function sendKeepAlive() {
+
+        return fetch(
+            '{{ url_for("session_keep_alive") }}',
+            {
+                method: 'POST',
+                credentials: 'same-origin'
+            }
+        );
+    }
+
+
+    function hideWarning() {
+
+        warningVisible = false;
+        overlay.hidden = true;
+
+        clearInterval(countdownTimer);
+        clearTimeout(logoutTimer);
+
+        countdownValue = warningSeconds;
+        countdownDisplay.textContent = countdownValue;
+
+    }
+
+
+    function performTimeoutLogout() {
+
+        clearTimeout(warningTimer);
+        clearTimeout(logoutTimer);
+        clearInterval(countdownTimer);
+
+        fetch(
+            '{{ url_for("session_timeout") }}',
+            {
+                method: 'POST',
+                credentials: 'same-origin'
+            }
+        )
+        .then(function(response) {
+            return response.json();
+        })
+        .then(function(result) {
+
+            window.location.href =
+                result.redirect_url ||
+                '{{ url_for("login", timeout=1) }}';
+
+        })
+        .catch(function() {
+
+            window.location.href =
+                '{{ url_for("login", timeout=1) }}';
+
+        });
+
+    }
+
+
+    function showWarning() {
+
+        warningVisible = true;
+        overlay.hidden = false;
+
+        countdownValue = warningSeconds;
+        countdownDisplay.textContent = countdownValue;
+
+        stayLoggedInButton.focus();
+
+        countdownTimer = setInterval(function() {
+
+            countdownValue -= 1;
+            countdownDisplay.textContent = countdownValue;
+
+            if (countdownValue <= 0) {
+                clearInterval(countdownTimer);
+            }
+
+        }, 1000);
+
+        logoutTimer = setTimeout(
+            performTimeoutLogout,
+            warningSeconds * 1000
+        );
+
+    }
+
+
+    function restartInactivityTimer() {
+
+        clearTimeout(warningTimer);
+
+        warningTimer = setTimeout(
+            showWarning,
+            warningDelayMilliseconds
+        );
+
+    }
+
+
+    function recordUserActivity() {
+
+        if (warningVisible) {
+            return;
+        }
+
+        restartInactivityTimer();
+
+        var currentTime = Date.now();
+
+        if (
+            currentTime - lastKeepAliveSent >=
+            keepAliveThrottleMilliseconds
+        ) {
+
+            lastKeepAliveSent = currentTime;
+
+            sendKeepAlive().catch(function() {
+                // Server-side timeout remains the final authority.
+            });
+
+        }
+
+    }
+
+
+    stayLoggedInButton.addEventListener(
+        'click',
+        function() {
+
+            sendKeepAlive()
+                .then(function(response) {
+
+                    if (!response.ok) {
+                        throw new Error(
+                            'Session could not be renewed.'
+                        );
+                    }
+
+                    lastKeepAliveSent = Date.now();
+
+                    hideWarning();
+                    restartInactivityTimer();
+
+                })
+                .catch(function() {
+
+                    window.location.href =
+                        '{{ url_for("login", timeout=1) }}';
+
+                });
+
+        }
+    );
+
+
+    logOutNowButton.addEventListener(
+        'click',
+        function() {
+
+            window.location.href =
+                '{{ url_for("logout") }}';
+
+        }
+    );
+
+
+    [
+        'click',
+        'keydown',
+        'mousemove',
+        'touchstart',
+        'scroll',
+        'change'
+    ].forEach(function(eventName) {
+
+        document.addEventListener(
+            eventName,
+            recordUserActivity,
+            {
+                passive: true
+            }
+        );
+
+    });
+
+
+    restartInactivityTimer();
+
+});
+</script>
+
+{% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    var storageKey = 'management-review-row-position';
+    var savedPosition = sessionStorage.getItem(storageKey);
+
+    if (savedPosition) {
+
+        try {
+
+            var positionData = JSON.parse(savedPosition);
+
+            if (positionData.path === window.location.pathname) {
+
+                var targetRow = document.getElementById(
+                    positionData.rowId
+                );
+
+                if (targetRow) {
+
+                    requestAnimationFrame(function() {
+
+                        requestAnimationFrame(function() {
+
+                            var currentTop =
+                                targetRow.getBoundingClientRect().top;
+
+                            var scrollDifference =
+                                currentTop - positionData.viewportTop;
+
+                            window.scrollBy(0, scrollDifference);
+
+                        });
+
+                    });
+
+                }
+
+            }
+
+        } catch (error) {
+
+            console.error(
+                'Could not restore review row position.',
+                error
+            );
+
+        }
+
+        sessionStorage.removeItem(storageKey);
+
+    }
+
+    document.addEventListener('submit', function(event) {
+
+        var form = event.target.closest(
+            '.preserve-review-position'
+        );
+
+        if (!form) {
+            return;
+        }
+
+        var row = form.closest('tr[id]');
+
+        if (!row) {
+            return;
+        }
+
+        var positionData = {
+            path: window.location.pathname,
+            rowId: row.id,
+            viewportTop: row.getBoundingClientRect().top
+        };
+
+        sessionStorage.setItem(
+            storageKey,
+            JSON.stringify(positionData)
+        );
+
+    });
+
+});
+</script>
+
+</body>
+
+</html>

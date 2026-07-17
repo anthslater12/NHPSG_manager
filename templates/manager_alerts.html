@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Manager Alerts</h2>
+
+    <p>
+        <a href="{{ url_for('dashboard') }}">← Back to Dashboard</a>
+    </p>
+
+    {% if alerts %}
+        <table>
+            <tr>
+                <th>Alert</th>
+                <th>Message</th>
+                <th>Action</th>
+            </tr>
+
+            {% for alert in alerts %}
+            <tr>
+                <td><strong>{{ alert.title }}</strong></td>
+                <td>{{ alert.message }}</td>
+                <td>
+                    {% if alert.shift_staff_id %}
+                        <a href="{{ url_for('manager_sign_off',
+                                            shift_staff_id=alert.shift_staff_id) }}">
+                            Manager Sign Off
+                        </a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No manager alerts.</p>
+    {% endif %}
+</div>
+
+{% endblock %}

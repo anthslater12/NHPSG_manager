@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Edit Housekeeping Task</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+
+        <label>Category</label>
+
+        <select name="category_id" required>
+            <option value="">Select a category</option>
+
+            {% for category in categories %}
+                <option
+                    value="{{ category.category_id }}"
+                    {% if category.category_id == task.category_id %}
+                        selected
+                    {% endif %}
+                >
+                    {{ category.category_name }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <p style="margin-top: 6px;">
+            <a href="{{ url_for('housekeeping_task_category_new') }}">
+                + Add New Category
+            </a>
+        </p>
+
+        <label>Task Name</label>
+
+        <input
+            type="text"
+            name="task_name"
+            value="{{ task.task_name }}"
+            required
+        >
+
+        <label>Instructions</label>
+
+        <textarea
+            name="instructions"
+            rows="4"
+        >{{ task.instructions or "" }}</textarea>
+
+        <label>Schedule</label>
+
+        <select name="schedule_type" required>
+            <option value="Every Shift"
+                {% if task.schedule_type == "Every Shift" %}selected{% endif %}>
+                Every Shift
+            </option>
+
+            <option value="Daily"
+                {% if task.schedule_type == "Daily" %}selected{% endif %}>
+                Daily
+            </option>
+
+            <option value="Weekly"
+                {% if task.schedule_type == "Weekly" %}selected{% endif %}>
+                Weekly
+            </option>
+
+            <option value="Specific Days"
+                {% if task.schedule_type == "Specific Days" %}selected{% endif %}>
+                Specific Days
+            </option>
+
+            <option value="As Needed"
+                {% if task.schedule_type == "As Needed" %}selected{% endif %}>
+                As Needed
+            </option>
+        </select>
+
+        <label>Applies to Shift(s)</label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="occurs"
+                value="Day"
+                style="width:auto;"
+                {% if task.occurs and "Day" in task.occurs %}checked{% endif %}
+            >
+            Day
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="occurs"
+                value="Afternoon"
+                style="width:auto;"
+                {% if task.occurs and "Afternoon" in task.occurs %}checked{% endif %}
+            >
+            Afternoon
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="occurs"
+                value="Overnight"
+                style="width:auto;"
+                {% if task.occurs and "Overnight" in task.occurs %}checked{% endif %}
+            >
+            Overnight
+        </label>
+
+        <label>Timing</label>
+
+        <select name="timing_type" required>
+            <option value="Anytime"
+                {% if task.timing_type == "Anytime" %}selected{% endif %}>
+                Anytime
+            </option>
+
+            <option value="Specific Time"
+                {% if task.timing_type == "Specific Time" %}selected{% endif %}>
+                Specific Time
+            </option>
+
+            <option value="Before Time"
+                {% if task.timing_type == "Before Time" %}selected{% endif %}>
+                Before Time
+            </option>
+        </select>
+
+        <label>Time, if applicable</label>
+
+        <input
+            type="time"
+            name="due_time"
+            value="{{ task.due_time or '' }}"
+        >
+
+        <label>Days of Week, if applicable</label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="days_of_week"
+                value="Monday"
+                style="width:auto;"
+                {% if task.days_of_week and "Monday" in task.days_of_week %}checked{% endif %}
+            >
+            Monday
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="days_of_week"
+                value="Tuesday"
+                style="width:auto;"
+                {% if task.days_of_week and "Tuesday" in task.days_of_week %}checked{% endif %}
+            >
+            Tuesday
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="days_of_week"
+                value="Wednesday"
+                style="width:auto;"
+                {% if task.days_of_week and "Wednesday" in task.days_of_week %}checked{% endif %}
+            >
+            Wednesday
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="days_of_week"
+                value="Thursday"
+                style="width:auto;"
+                {% if task.days_of_week and "Thursday" in task.days_of_week %}checked{% endif %}
+            >
+            Thursday
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="days_of_week"
+                value="Friday"
+                style="width:auto;"
+                {% if task.days_of_week and "Friday" in task.days_of_week %}checked{% endif %}
+            >
+            Friday
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="days_of_week"
+                value="Saturday"
+                style="width:auto;"
+                {% if task.days_of_week and "Saturday" in task.days_of_week %}checked{% endif %}
+            >
+            Saturday
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="days_of_week"
+                value="Sunday"
+                style="width:auto;"
+                {% if task.days_of_week and "Sunday" in task.days_of_week %}checked{% endif %}
+            >
+            Sunday
+        </label>
+
+        <br>
+
+        <label>
+            <input
+                type="checkbox"
+                name="required"
+                style="width:auto;"
+                {% if task.required %}checked{% endif %}
+            >
+            Required
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="comment_required_attempted"
+                style="width:auto;"
+                {% if task.comment_required_attempted %}checked{% endif %}
+            >
+            Require comment if attempted but not completed
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="comment_required_not_completed"
+                style="width:auto;"
+                {% if task.comment_required_not_completed %}checked{% endif %}
+            >
+            Require comment if not completed
+        </label>
+
+        <label>
+            <input
+                type="checkbox"
+                name="active"
+                style="width:auto;"
+                {% if task.active %}checked{% endif %}
+            >
+            Active
+        </label>
+
+        <br><br>
+
+        <button type="submit">
+            Save Changes
+        </button>
+
+    </form>
+
+    <p>
+        <a href="{{ url_for('housekeeping_tasks') }}">
+            Back to Housekeeping Tasks
+        </a>
+    </p>
+</div>
+
+{% endblock %}

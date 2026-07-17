@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+<div class="page-header">
+    <div>
+        <h2>Care Task Categories</h2>
+        <p>Manage the categories used for care tasks.</p>
+    </div>
+
+    <div>
+        <a href="{{ url_for('care_task_category_new') }}"
+           class="button">
+            Add Category
+        </a>
+    </div>
+</div>
+
+    <p>
+        Show:
+
+        {% if status_filter == "all" %}
+            <strong>All</strong>
+        {% else %}
+            <a href="{{ url_for('care_task_categories', status='all') }}">All</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "active" %}
+            <strong>Active</strong>
+        {% else %}
+            <a href="{{ url_for('care_task_categories', status='active') }}">Active</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "inactive" %}
+            <strong>Inactive</strong>
+        {% else %}
+            <a href="{{ url_for('care_task_categories', status='inactive') }}">Inactive</a>
+        {% endif %}
+    </p>
+
+    {% if categories %}
+
+        <table>
+
+            <thead>
+                <tr>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                {% for category in categories %}
+
+                    <tr class="{% if category.active %}row-active{% else %}row-inactive{% endif %}">
+
+                        <td>
+                            {{ category.category_name }}
+                        </td>
+
+                        <td>
+                            {% if category.active %}
+                                <span class="status-active">🟢 Active</span>
+                            {% else %}
+                                <span class="status-inactive">⚪ Inactive</span>
+                            {% endif %}
+                        </td>
+
+                        <td>
+
+                            <a href="{{ url_for(
+                                'care_task_category_edit',
+                                category_id=category.category_id
+                            ) }}">
+                                Edit
+                            </a>
+
+                            |
+
+                            {% if category.active %}
+
+                                <a href="{{ url_for(
+                                    'care_task_category_deactivate',
+                                    category_id=category.category_id
+                                ) }}">
+                                    Deactivate
+                                </a>
+
+                            {% else %}
+
+                                <a href="{{ url_for(
+                                    'care_task_category_reactivate',
+                                    category_id=category.category_id
+                                ) }}">
+                                    Reactivate
+                                </a>
+
+                            {% endif %}
+
+                        </td>
+
+                    </tr>
+
+                {% endfor %}
+
+            </tbody>
+
+        </table>
+
+    {% else %}
+
+        {% if status_filter == "active" %}
+            <p>No active care task categories were found.</p>
+        {% elif status_filter == "inactive" %}
+            <p>No inactive care task categories were found.</p>
+        {% else %}
+            <p>No care task categories have been created.</p>
+        {% endif %}
+
+    {% endif %}
+
+</div>
+
+{% endblock %}

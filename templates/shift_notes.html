@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Shift Notes</h2>
+
+    {% if notes %}
+        <table>
+            <tr>
+                <th>Date</th>
+                <th>Shift</th>
+                <th>Client</th>
+                <th>Staff</th>
+                <th>Follow-up</th>
+                <th>Created</th>
+                <th>Note</th>
+				<th>Reviewed</th>
+            </tr>
+
+            {% for note in notes %}
+            <tr id="shift-note-{{ note.note_id }}">
+            
+				<td>{{ note.shift_date }}</td>
+				<td>{{ note.shift_type }}</td>
+				<td>{{ note.client_name }}</td>
+				<td>{{ note.full_name }}</td>
+				<td>{% if note.follow_up_required %}Yes{% else %}No{% endif %}</td>
+				<td>{{ note.created_at }}</td>
+				<td>{{ note.note_text }}</td>
+
+				<td>
+
+					{% if reviews_by_note.get(note.note_id) %}
+
+						{% for review in reviews_by_note[note.note_id] %}
+
+							🟢 {{ review.reviewed_by }}<br>
+							<small>{{ review.acknowledged_at }}</small><br>
+
+						{% endfor %}
+
+						{% if note.note_id not in reviewed_by_current_user %}
+
+							<br>
+
+							<form
+								method="post"
+								action="{{ url_for(
+									'acknowledge_shift_note',
+									note_id=note.note_id
+								) }}"
+								class="inline-form preserve-review-position"
+							>
+								<button type="submit" class="link-button">
+									Add Review
+								</button>
+							</form>
+
+						{% endif %}
+
+					{% else %}
+
+						<form
+							method="post"
+							action="{{ url_for(
+								'acknowledge_shift_note',
+								note_id=note.note_id
+							) }}"
+							class="inline-form preserve-review-position"
+						>
+							<button type="submit" class="link-button">
+								Review
+							</button>
+						</form>
+
+					{% endif %}
+
+				</td>
+
+		
+            </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No shift notes yet.</p>
+    {% endif %}
+</div>
+
+{% endblock %}

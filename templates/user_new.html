@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Add Staff Member</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <label>Full Name</label>
+        <input type="text" name="full_name" required>
+
+        <label>Username</label>
+        <input type="text" name="username" required>
+
+        <label>Role</label>
+        <select name="role" required>
+            <option value="Support Worker">Support Worker</option>
+            <option value="Program Manager">Program Manager</option>
+            <option value="Director">Director</option>
+            <option value="Behaviour Consultant">Behaviour Consultant</option>
+            <option value="Admin">Admin</option>
+        </select>
+
+        <label>Temporary Password</label>
+        <input type="password" name="password" required>
+
+        <button type="submit">Create User</button>
+    </form>
+
+    <p><a href="/users">Back to Users</a></p>
+</div>
+
+{% endblock %}

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Edit Shift Task</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <label>Task Name</label>
+        <input type="text" name="task_name" value="{{ task.task_name }}" required>
+
+        <label>Instructions</label>
+        <textarea name="instructions" rows="4">{{ task.instructions }}</textarea>
+
+        <label>Stage</label>
+        <select name="task_stage" required>
+            <option value="BEGIN_SHIFT" {% if task.task_stage == "BEGIN_SHIFT" %}selected{% endif %}>Beginning of Shift</option>
+            <option value="END_SHIFT" {% if task.task_stage == "END_SHIFT" %}selected{% endif %}>End of Shift</option>
+        </select>
+
+        <label>
+            <input type="checkbox" name="required" style="width:auto;" {% if task.required %}checked{% endif %}>
+            Required
+        </label>
+
+        <label>
+            <input type="checkbox" name="active" style="width:auto;" {% if task.active %}checked{% endif %}>
+            Active
+        </label>
+
+		<label>
+			<input type="checkbox" name="requires_input" style="width:auto;" {% if task.requires_input %}checked{% endif %}>
+			Requires staff input
+		</label>
+
+		<label>Input Label</label>
+		<input type="text" name="input_label" value="{{ task.input_label or '' }}" placeholder="Example: Radio number">
+
+		<label>Input Type</label>
+		<select name="input_type">
+			<option value="text" {% if task.input_type == "text" %}selected{% endif %}>Text</option>
+			<option value="number" {% if task.input_type == "number" %}selected{% endif %}>Number</option>
+		</select>
+
+        <br><br>
+
+        <button type="submit">Save Changes</button>
+    </form>
+
+    <p><a href="/shift-tasks">Back to Shift Tasks</a></p>
+</div>
+
+{% endblock %}

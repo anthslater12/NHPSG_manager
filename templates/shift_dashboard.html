@@ -1,0 +1,425 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>{{ shift.shift_type }} Shift</h2>
+
+    <p><strong>Date:</strong> {{ shift.shift_date }}</p>
+    <p><strong>Status:</strong> {{ shift.status }}</p>
+</div>
+
+<div class="card">
+    <h3>Staff Currently on Shift</h3>
+
+    {% if staff %}
+        <table>
+            <tr>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Actual Start</th>
+                <th>Signed On At</th>
+                <th>Status</th>
+            </tr>
+
+            {% for person in staff %}
+            <tr>
+                <td>{{ person.full_name }}</td>
+                <td>{{ person.role }}</td>
+                <td>{{ person.actual_start_time }}</td>
+                <td>{{ person.sign_on_at }}</td>
+                <td>{% if person.active %}Signed On{% else %}Signed Off{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No staff signed on yet.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>Quick Entry</h3>
+
+    <div class="quick-grid">
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/note">+ Staff Note</a>
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/bm">+ BM</a>
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/urination">+ Urination</a>
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/medication">+ Medication</a>
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/meal">+ Meal</a>
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/activity">+ Activity</a>
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
+        <a class="quick-button" href="/incident/new">+ Incident</a>
+    </div>
+</div>
+
+<div class="card">
+    <h3>Care Routine</h3>
+	
+	<p>
+		<strong>Completed:</strong>
+		{{ completed_care_tasks }} of {{ total_care_tasks }}
+		&nbsp;&nbsp;&nbsp;
+		<strong>Remaining:</strong>
+		{{ remaining_care_tasks }}
+	</p>
+	
+	{% if total_care_tasks > 0 %}
+		{% set percent_complete = (completed_care_tasks / total_care_tasks * 100) | round(0, 'floor') %}
+
+		<div class="progress-container">
+			<div class="progress-bar" style="width: {{ percent_complete }}%;"></div>
+		</div>
+
+		<div class="progress-text">
+			{{ percent_complete }}% complete
+		</div>
+		
+	{% endif %}
+
+    {% if care_tasks %}
+	
+
+		
+<div class="care-grid">		
+{% for task in care_tasks %}
+
+<div class="card care-card
+{% if task.care_task_id in care_task_lookup %}
+    {% set entry = care_task_lookup[task.care_task_id] %}
+
+    {% if entry.outcome == "Completed" %}
+        care-completed
+    {% elif entry.outcome == "Attempted" %}
+        care-attempted
+    {% elif entry.outcome == "Not Completed" %}
+        care-not-completed
+    {% elif entry.outcome == "Not Applicable" %}
+        care-not-applicable
+    {% endif %}
+
+{% else %}
+    care-pending
+{% endif %}
+">
+
+    <h3>{{ task.task_name }}</h3>
+
+		<p class="care-instructions">
+			{{ task.instructions }}
+		</p>
+
+    <hr>
+
+    {% if task.care_task_id in care_task_lookup %}
+
+        {% set entry = care_task_lookup[task.care_task_id] %}
+
+        <p>
+            <strong>Status:</strong>
+			
+            {% if entry.outcome == "Completed" %}
+				<span style="background:#d4edda; padding:6px 10px; border-radius:6px;">✅ Completed</span>
+			{% elif entry.outcome == "Attempted" %}
+				<span style="background:#fff3cd; padding:6px 10px; border-radius:6px;">🟡 Attempted</span>
+			{% elif entry.outcome == "Not Completed" %}
+				<span style="background:#f8d7da; padding:6px 10px; border-radius:6px;">🔴 Not Completed</span>
+			{% elif entry.outcome == "Not Applicable" %}
+				<span style="background:#e2e3e5; padding:6px 10px; border-radius:6px;">⚪ Not Applicable</span>
+			{% else %}
+				{{ entry.outcome }}
+			{% endif %}
+					
+        </p>
+
+        <p>
+            <strong>Completed by:</strong>
+            {{ entry.full_name }}
+        </p>
+
+        <p>
+            <strong>Completed at:</strong>
+            {{ entry.completed_at }}
+        </p>
+
+        {% if entry.comment %}
+            <p>
+                <strong>Comment:</strong><br>
+                {{ entry.comment }}
+            </p>
+        {% endif %}
+
+				<div class="care-footer">
+
+					<a class="button-small"
+					href="/shift/{{ shift.shift_id }}/care-task-entry/{{ entry.entry_id }}/edit">
+						✏ Edit
+					</a>
+
+</div>
+
+		{% else %}
+
+        <p>
+		<strong>Status:</strong>
+		<span style="background:#e2e3e5; padding:6px 10px; border-radius:6px;">⭕ Pending</span>
+		</p>
+
+        <a class="quick-button"
+           href="/shift/{{ shift.shift_id }}/care-task/{{ task.care_task_id }}/record">
+            Record Task
+        </a>
+
+    {% endif %}
+
+</div>
+
+{% endfor %}	
+</div>
+		
+    {% else %}
+        <p>No active care tasks found.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>Housekeeping</h3>
+
+    <p>
+        <strong>Completed:</strong>
+        {{ completed_housekeeping_tasks }}
+        of {{ total_housekeeping_tasks }}
+
+        &nbsp;&nbsp;&nbsp;
+
+        <strong>Remaining:</strong>
+        {{ remaining_housekeeping_tasks }}
+    </p>
+
+    {% if total_housekeeping_tasks > 0 %}
+
+        {% set housekeeping_percent_complete =
+            (
+                completed_housekeeping_tasks
+                / total_housekeeping_tasks
+                * 100
+            ) | round(0, 'floor')
+        %}
+
+        <div class="progress-container">
+            <div
+                class="progress-bar"
+                style="width: {{ housekeeping_percent_complete }}%;">
+            </div>
+        </div>
+
+        <div class="progress-text">
+            {{ housekeeping_percent_complete }}% complete
+        </div>
+
+    {% endif %}
+
+    {% if housekeeping_tasks %}
+
+        <div class="care-grid">
+
+            {% for task in housekeeping_tasks %}
+
+                <div class="card care-card
+
+                    {% if task.housekeeping_task_id
+                          in housekeeping_task_lookup %}
+
+                        {% set entry =
+                            housekeeping_task_lookup[
+                                task.housekeeping_task_id
+                            ]
+                        %}
+
+                        {% if entry.outcome == "Completed" %}
+                            care-completed
+
+                        {% elif entry.outcome == "Attempted" %}
+                            care-attempted
+
+                        {% elif entry.outcome == "Not Completed" %}
+                            care-not-completed
+
+                        {% elif entry.outcome == "Not Applicable" %}
+                            care-not-applicable
+                        {% endif %}
+
+                    {% else %}
+                        care-pending
+                    {% endif %}
+
+                ">
+
+                    <h3>{{ task.task_name }}</h3>
+
+                    <p class="care-instructions">
+                        {{ task.instructions }}
+                    </p>
+
+                    <hr>
+
+                    {% if task.housekeeping_task_id
+                          in housekeeping_task_lookup %}
+
+                        {% set entry =
+                            housekeeping_task_lookup[
+                                task.housekeeping_task_id
+                            ]
+                        %}
+
+                        <p>
+                            <strong>Status:</strong>
+
+                            {% if entry.outcome == "Completed" %}
+
+                                <span style="
+                                    background:#d4edda;
+                                    padding:6px 10px;
+                                    border-radius:6px;
+                                ">
+                                    ✅ Completed
+                                </span>
+
+                            {% elif entry.outcome == "Attempted" %}
+
+                                <span style="
+                                    background:#fff3cd;
+                                    padding:6px 10px;
+                                    border-radius:6px;
+                                ">
+                                    🟡 Attempted
+                                </span>
+
+                            {% elif entry.outcome == "Not Completed" %}
+
+                                <span style="
+                                    background:#f8d7da;
+                                    padding:6px 10px;
+                                    border-radius:6px;
+                                ">
+                                    🔴 Not Completed
+                                </span>
+
+                            {% elif entry.outcome == "Not Applicable" %}
+
+                                <span style="
+                                    background:#e2e3e5;
+                                    padding:6px 10px;
+                                    border-radius:6px;
+                                ">
+                                    ⚪ Not Applicable
+                                </span>
+
+                            {% else %}
+                                {{ entry.outcome }}
+                            {% endif %}
+                        </p>
+
+                        <p>
+                            <strong>Completed by:</strong>
+                            {{ entry.full_name }}
+                        </p>
+
+                        <p>
+                            <strong>Completed at:</strong>
+                            {{ entry.completed_at }}
+                        </p>
+
+                        {% if entry.comment %}
+                            <p>
+                                <strong>Comment:</strong><br>
+                                {{ entry.comment }}
+                            </p>
+                        {% endif %}
+
+                        <div class="care-footer">
+
+                            <a
+                                class="button-small"
+                                href="/shift/{{ shift.shift_id
+                                    }}/housekeeping-task-entry/{{ entry.entry_id
+                                    }}/edit"
+                            >
+                                ✏ Edit
+                            </a>
+
+                        </div>
+
+                    {% else %}
+
+                        <p>
+                            <strong>Status:</strong>
+
+                            <span style="
+                                background:#e2e3e5;
+                                padding:6px 10px;
+                                border-radius:6px;
+                            ">
+                                ⭕ Pending
+                            </span>
+                        </p>
+
+                        <a
+                            class="quick-button"
+                            href="/shift/{{ shift.shift_id
+                                }}/housekeeping-task/{{ task.housekeeping_task_id
+                                }}/record"
+                        >
+                            Record Task
+                        </a>
+
+                    {% endif %}
+
+                </div>
+
+            {% endfor %}
+
+        </div>
+
+    {% else %}
+
+        <p>No active housekeeping tasks found.</p>
+
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>Staff Notes for this Shift</h3>
+
+    {% if notes %}
+        {% for note in notes %}
+            <div style="border-bottom:1px solid #ccc; padding:10px 0;">
+                <p>
+                    <strong>{{ note.full_name }}</strong>
+                    — {{ note.created_at }}
+                    {% if note.follow_up_required %}
+                        <span style="color:red;"><strong>Follow-up required</strong></span>
+                    {% endif %}
+                </p>
+
+                <p>{{ note.note_text }}</p>
+            </div>
+        {% endfor %}
+    {% else %}
+        <p>No staff notes entered for this shift yet.</p>
+    {% endif %}
+</div>
+
+<hr>
+
+<div style="text-align:center; margin-top:30px;">
+
+    <a class="quick-button"
+       href="/shift/{{ shift.shift_id }}/end-shift">
+
+        End Shift
+
+    </a>
+
+</div>
+
+{% endblock %}

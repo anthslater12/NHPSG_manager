@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+<h2>{{ template.template_name }}</h2>
+
+<p>
+<strong>Shift:</strong>
+{{ template.shift_type }}
+</p>
+
+<p>
+<a href="/checklist-template/{{ template.template_id }}/item/new">
++ Add Checklist Item
+</a>
+</p>
+
+<p>
+Show:
+
+{% if status_filter == "all" %}
+<strong>All</strong>
+{% else %}
+<a href="{{ url_for(
+    'checklist_template',
+    template_id=template.template_id,
+    status='all'
+) }}">All</a>
+{% endif %}
+
+|
+
+{% if status_filter == "active" %}
+<strong>Active</strong>
+{% else %}
+<a href="{{ url_for(
+    'checklist_template',
+    template_id=template.template_id,
+    status='active'
+) }}">Active</a>
+{% endif %}
+
+|
+
+{% if status_filter == "inactive" %}
+<strong>Inactive</strong>
+{% else %}
+<a href="{{ url_for(
+    'checklist_template',
+    template_id=template.template_id,
+    status='inactive'
+) }}">Inactive</a>
+{% endif %}
+</p>
+
+{% if items %}
+
+<table>
+
+<tr>
+    <th>Order</th>
+    <th>Checklist Item</th>
+    <th>Required</th>
+    <th>Status</th>
+</tr>
+
+{% for item in items %}
+
+<tr class="{% if item.active %}row-active{% else %}row-inactive{% endif %}">
+
+<td>{{ item.sort_order }}</td>
+
+<td>{{ item.item_text }}</td>
+
+<td>
+{% if item.required %}
+Yes
+{% else %}
+No
+{% endif %}
+</td>
+
+<td>
+{% if item.active %}
+<span class="status-active">🟢 Active</span>
+{% else %}
+<span class="status-inactive">⚪ Inactive</span>
+{% endif %}
+</td>
+
+</tr>
+
+{% endfor %}
+
+</table>
+
+{% else %}
+
+{% if status_filter == "active" %}
+<p>No active checklist items were found.</p>
+{% elif status_filter == "inactive" %}
+<p>No inactive checklist items were found.</p>
+{% else %}
+<p>No checklist items have been added yet.</p>
+{% endif %}
+
+{% endif %}
+
+<p>
+
+<a href="/checklist-templates">
+
+Back
+
+</a>
+
+</p>
+
+</div>
+
+{% endblock %}

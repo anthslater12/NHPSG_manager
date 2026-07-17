@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Add Shift Task</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <label>Task Name</label>
+        <input type="text" name="task_name" required>
+
+        <label>Instructions</label>
+        <textarea name="instructions" rows="4"></textarea>
+
+        <label>Stage</label>
+        <select name="task_stage" required>
+			<option value="BEGIN_SHIFT">Beginning of Shift</option>
+			<option value="END_SHIFT">End of Shift</option>
+        </select>
+
+        <label>
+            <input type="checkbox" name="required" checked style="width:auto;">
+            Required
+        </label>
+
+        <label>
+            <input type="checkbox" name="active" checked style="width:auto;">
+            Active
+        </label>
+
+		<label>
+			<input type="checkbox" name="requires_input" style="width:auto;">
+			Requires staff input
+		</label>
+
+		<label>Input Label</label>
+		<input type="text" name="input_label" placeholder="Example: Radio number">
+
+		<label>Input Type</label>
+		<select name="input_type">
+			<option value="text">Text</option>
+			<option value="number">Number</option>
+		</select>
+
+        <br><br>
+
+        <button type="submit">Save Shift Task</button>
+    </form>
+
+    <p><a href="/shift-tasks">Back to Shift Tasks</a></p>
+</div>
+
+{% endblock %}

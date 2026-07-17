@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Outstanding Actions</h2>
+
+    {% if actions %}
+
+    <table>
+
+        <tr>
+            <th>Created</th>
+            <th>Priority</th>
+            <th>Status</th>
+			<th>Source</th>
+            <th>Title</th>
+            <th>Assigned To</th>
+            <th></th>
+        </tr>
+
+        {% for action in actions %}
+
+        <tr>
+
+            <td>{{ action.created_at }}</td>
+
+            <td>{{ action.priority }}</td>
+
+            <td>{{ action.status }}</td>
+			
+			<td>
+
+				{% if action.source_table == "shift_notes" %}
+					Shift Note
+				{% elif action.source_table == "incident_reports" %}
+					Incident
+				{% elif action.source_table == "behaviour_entries" %}
+					Behaviour
+				{% elif action.source_table == "medication_entries" %}
+					Medication
+				{% elif action.source_table == "care_entries" %}
+					Care Entry
+				{% else %}
+					{{ action.source_table }}
+				{% endif %}
+
+				{% if action.source_id %}
+					#{{ action.source_id }}
+				{% endif %}
+
+			</td>
+
+            <td>{{ action.title }}</td>
+
+            <td>{{ action.assigned_to or "" }}</td>
+
+            <td>
+                <a href="/action/{{ action.action_id }}">
+                    View
+                </a>
+            </td>
+
+        </tr>
+
+        {% endfor %}
+
+    </table>
+
+    {% else %}
+
+        <p>No actions found.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<h2>New Housekeeping Category</h2>
+
+{% if error %}
+    <div class="error">
+        {{ error }}
+    </div>
+{% endif %}
+
+<form method="post">
+
+    <p>
+        <label>Category Name</label><br>
+        <input
+            type="text"
+            name="category_name"
+            required
+            autofocus
+        >
+    </p>
+
+    <p>
+        <button type="submit">
+            Save Category
+        </button>
+
+        <a href="{{ url_for('housekeeping_task_categories') }}">
+            Cancel
+        </a>
+    </p>
+
+</form>
+
+{% endblock %}

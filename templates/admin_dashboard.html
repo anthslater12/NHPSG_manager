@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<h2>Administration Dashboard</h2>
+
+<div class="dashboard-grid">
+
+    <div class="card">
+        <h3>⚠ Manager Alerts</h3>
+        <h1>{{ manager_alerts|length }}</h1>
+
+        {% if manager_alerts %}
+            <hr>
+            <ul class="dashboard-list">
+                {% for alert in manager_alerts[:3] %}
+                    <li>
+                        <strong>{{ alert.title }}</strong><br>
+                        {{ alert.message }}
+
+                        {% if alert.shift_staff_id %}
+                            <br>
+                            <a href="{{ url_for('manager_sign_off',
+                                                shift_staff_id=alert.shift_staff_id) }}">
+                                Manager Sign Off
+                            </a>
+                        {% endif %}
+                    </li>
+                {% endfor %}
+            </ul>
+
+            {% if manager_alerts|length > 3 %}
+                <p><strong>{{ manager_alerts|length - 3 }}</strong> more alert(s).</p>
+            {% endif %}
+        {% else %}
+            <p>No manager alerts.</p>
+        {% endif %}
+    </div>
+
+<div class="card">
+
+    <h3>Outstanding Actions</h3>
+
+    <h1>{{ outstanding_action_count }}</h1>
+
+    {% if outstanding_actions %}
+
+        <hr>
+
+        <ul class="dashboard-list">
+
+            {% for action in outstanding_actions %}
+
+                <li>
+
+                    <a href="{{ url_for('action_detail',
+                        action_id=action.action_id) }}">
+                        {{ action.title }}
+                    </a>
+
+                    {% if action.priority == "High" %}
+                        🔴
+                    {% elif action.priority == "Medium" %}
+                        🟡
+                    {% else %}
+                        ⚪
+                    {% endif %}
+
+                    <br>
+
+                    <small>
+                        {{ action.assigned_to or "Not Assigned" }}
+                    </small>
+
+                </li>
+
+            {% endfor %}
+
+        </ul>
+
+    {% else %}
+
+        <p>No outstanding actions.</p>
+
+    {% endif %}
+
+    <p>
+        <a href="{{ url_for('actions') }}">
+            View All →
+        </a>
+    </p>
+
+</div>
+
+    <div class="card">
+        <h3>Shift Notes Awaiting Review</h3>
+        <h1>{{ notes_to_review }}</h1>
+
+        {% if notes_to_review_list %}
+            <hr>
+            <ul class="dashboard-list">
+                {% for note in notes_to_review_list %}
+                    <li>
+                        <a href="{{ url_for('shift_notes') }}">
+                            {{ note.shift_date }} — {{ note.shift_type }} Shift — {{ note.full_name }}
+                        </a>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>All notes reviewed.</p>
+        {% endif %}
+
+        <p><a href="{{ url_for('shift_notes') }}">View All →</a></p>
+    </div>
+
+    <div class="card">
+        <h3>Open Incidents</h3>
+        <h1>{{ open_incidents }}</h1>
+
+        {% if recent_incidents %}
+            <hr>
+            <ul class="dashboard-list">
+                {% for i in recent_incidents %}
+                    <li>
+                        <a href="{{ url_for('incident_list') }}">
+                            {{ i.incident_date }} {{ i.incident_time }} — {{ i.incident_type }} — {{ i.client_name }}
+                        </a>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>No open incidents.</p>
+        {% endif %}
+
+        <p><a href="{{ url_for('incident_list') }}">View Incidents →</a></p>
+    </div>
+
+    <div class="card">
+        <h3>Recent Activity</h3>
+        <h1>{{ recent_activity }}</h1>
+
+        {% if recent_activity_list %}
+            <hr>
+            <ul class="dashboard-list">
+                {% for activity in recent_activity_list %}
+                    <li>
+                        {{ activity.activity_datetime }} —
+                        {{ activity.full_name or "System" }} —
+                        {{ activity.summary }}
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>No recent activity.</p>
+        {% endif %}
+
+        <p><a href="{{ url_for('activity_log') }}">Activity Log →</a></p>
+    </div>
+
+    <div class="card">
+        <h3>👥 Support Workers On Shift</h3>
+        <h1>{{ active_staff|length }}</h1>
+
+        {% if active_staff %}
+            <hr>
+            <table>
+                <tr>
+                    <th>Staff</th>
+                    <th>Shift</th>
+                    <th>Signed On</th>
+                    <th></th>
+                </tr>
+
+                {% for staff in active_staff %}
+                <tr>
+                    <td><strong>{{ staff.full_name }}</strong></td>
+                    <td>{{ staff.shift_date }} - {{ staff.shift_type }}</td>
+                    <td>{{ staff.actual_start_time }}</td>
+                    <td>
+                        <a href="{{ url_for('shift_dashboard', shift_id=staff.shift_id) }}">
+                            View Shift
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+        {% else %}
+            <p>No Support Workers currently signed on.</p>
+        {% endif %}
+    </div>
+
+</div>
+
+{% endblock %}

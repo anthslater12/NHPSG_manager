@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Create Housekeeping Action</h2>
+
+    <p>
+        <a href="{{ url_for(
+            'housekeeping_review_detail',
+            entry_id=entry.entry_id
+        ) }}">
+            ← Back to Housekeeping Management
+        </a>
+    </p>
+
+    <h3>Source Record</h3>
+
+    <table class="management-detail-table">
+
+        <tr>
+            <th>Task</th>
+            <td>{{ entry.task_name }}</td>
+        </tr>
+
+        <tr>
+            <th>Date</th>
+            <td>{{ entry.shift_date }}</td>
+        </tr>
+
+        <tr>
+            <th>Shift</th>
+            <td>{{ entry.shift_type }}</td>
+        </tr>
+
+        <tr>
+            <th>Outcome</th>
+            <td>{{ entry.outcome }}</td>
+        </tr>
+
+        <tr>
+            <th>Operational Comment</th>
+            <td>{{ entry.comment or "No comment entered." }}</td>
+        </tr>
+
+    </table>
+
+    {% if error %}
+
+        <p class="error-message">
+            {{ error }}
+        </p>
+
+    {% endif %}
+
+    <form method="POST">
+
+        <p>
+            <label for="title">
+                Action Title
+            </label><br>
+
+            <input
+                type="text"
+                id="title"
+                name="title"
+                value="{{ title }}"
+                required
+            >
+        </p>
+
+        <p>
+            <label for="description">
+                Description
+            </label><br>
+
+            <textarea
+                id="description"
+                name="description"
+                rows="8"
+            >{{ description }}</textarea>
+        </p>
+
+        <p>
+            <label for="priority">
+                Priority
+            </label><br>
+
+            <select
+                id="priority"
+                name="priority"
+            >
+
+                <option
+                    value="High"
+                    {% if priority == "High" %}
+                        selected
+                    {% endif %}
+                >
+                    High
+                </option>
+
+                <option
+                    value="Medium"
+                    {% if priority == "Medium" %}
+                        selected
+                    {% endif %}
+                >
+                    Medium
+                </option>
+
+                <option
+                    value="Low"
+                    {% if priority == "Low" %}
+                        selected
+                    {% endif %}
+                >
+                    Low
+                </option>
+
+            </select>
+        </p>
+
+        <p>
+            <label for="assigned_to_user_id">
+                Assign To
+            </label><br>
+
+            <select
+                id="assigned_to_user_id"
+                name="assigned_to_user_id"
+            >
+
+                <option value="">
+                    Unassigned
+                </option>
+
+                {% for user in active_users %}
+
+                    <option
+                        value="{{ user.user_id }}"
+                        {% if assigned_to_user_id == user.user_id %}
+                            selected
+                        {% endif %}
+                    >
+                        {{ user.full_name }}
+                        — {{ user.role }}
+                    </option>
+
+                {% endfor %}
+
+            </select>
+        </p>
+
+        <button type="submit">
+            Create Action
+        </button>
+
+    </form>
+
+</div>
+
+{% endblock %}

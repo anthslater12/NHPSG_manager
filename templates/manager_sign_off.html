@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Manager Sign Off</h2>
+    
+    <p>
+        You are about to manually sign this staff member off.
+    </p>
+
+    <table>
+        <tr>
+            <th>Staff</th>
+            <td>{{ staff_shift.full_name }}</td>
+        </tr>
+        <tr>
+            <th>Shift</th>
+            <td>
+                {{ staff_shift.shift_type }} Shift<br>
+                <small>{{ staff_shift.shift_date }}</small>
+            </td>
+        </tr>
+        <tr>
+            <th>Signed On</th>
+            <td>{{ staff_shift.actual_start_time }}</td>
+        </tr>
+    </table>
+
+    <hr>
+
+    <form method="post">
+        <label>Reason for manual sign off</label>
+        <textarea 
+            name="reason" 
+            rows="5" 
+            required 
+            placeholder="Example: Staff forgot to sign off at the end of shift."></textarea>
+
+        <br><br>
+
+        <button type="submit">
+            Confirm Manager Sign Off
+        </button>
+    </form>
+
+    <p>
+        <a href="{{ url_for('dashboard') }}">Cancel</a>
+    </p>
+</div>
+
+{% endblock %}

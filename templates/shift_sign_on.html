@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Sign On</h2>
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <label>Shift Date</label>
+        <input type="date" name="shift_date" required>
+
+        <label>Shift Type</label>
+        <select name="shift_type" required>
+            <option value="">Select shift</option>
+            <option value="Day">Day</option>
+            <option value="Afternoon">Afternoon</option>
+            <option value="Overnight">Overnight</option>
+        </select>
+
+        <label>What time did you actually start?</label>
+        <input type="time" name="actual_start_time" required>
+
+        <button type="submit">Sign On</button>
+    </form>
+</div>
+
+{% endblock %}

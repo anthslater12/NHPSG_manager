@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Checklist Templates</h2>
+
+    <p><a href="/checklist-template/new">+ Add Checklist Template</a></p>
+
+    <p>
+        Show:
+
+        {% if status_filter == "all" %}
+            <strong>All</strong>
+        {% else %}
+            <a href="{{ url_for('checklist_templates', status='all') }}">All</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "active" %}
+            <strong>Active</strong>
+        {% else %}
+            <a href="{{ url_for('checklist_templates', status='active') }}">Active</a>
+        {% endif %}
+
+        |
+
+        {% if status_filter == "inactive" %}
+            <strong>Inactive</strong>
+        {% else %}
+            <a href="{{ url_for('checklist_templates', status='inactive') }}">Inactive</a>
+        {% endif %}
+    </p>
+
+    {% if templates %}
+        <table>
+            <tr>
+                <th>Name</th>
+                <th>Shift Type</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+
+            {% for template in templates %}
+            <tr class="{% if template.active %}row-active{% else %}row-inactive{% endif %}">
+                <td>{{ template.template_name }}</td>
+                <td>{{ template.shift_type }}</td>
+                <td>
+                    {% if template.active %}
+                        <span class="status-active">🟢 Active</span>
+                    {% else %}
+                        <span class="status-inactive">⚪ Inactive</span>
+                    {% endif %}
+                </td>
+                <td><a href="/checklist-template/{{ template.template_id }}">Manage Items</a></td>
+            </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+
+        {% if status_filter == "active" %}
+            <p>No active checklist templates were found.</p>
+        {% elif status_filter == "inactive" %}
+            <p>No inactive checklist templates were found.</p>
+        {% else %}
+            <p>No checklist templates yet.</p>
+        {% endif %}
+
+    {% endif %}
+</div>
+
+{% endblock %}
