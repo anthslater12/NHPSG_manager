@@ -1658,6 +1658,14 @@ def shift_task_deactivate(shift_task_id):
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
 
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
+
     conn = get_db()
 
     task = conn.execute("""
@@ -1690,7 +1698,7 @@ def shift_task_deactivate(shift_task_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("shift_tasks"))
+    return redirect(url_for("shift_tasks", status=status_filter))
 
 @app.route("/shift-task/reactivate/<int:shift_task_id>")
 def shift_task_reactivate(shift_task_id):
@@ -1700,6 +1708,14 @@ def shift_task_reactivate(shift_task_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -1733,7 +1749,7 @@ def shift_task_reactivate(shift_task_id):
     conn.commit()
     conn.close()
 
-    return redirect(url_for("shift_tasks"))
+    return redirect(url_for("shift_tasks", status=status_filter))
 
 @app.route("/shift-task/edit/<int:shift_task_id>", methods=["GET", "POST"])
 def shift_task_edit(shift_task_id):
@@ -1743,6 +1759,14 @@ def shift_task_edit(shift_task_id):
 
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
+
+    status_filter = request.args.get(
+        "status",
+        "all"
+    ).strip().lower()
+
+    if status_filter not in ["all", "active", "inactive"]:
+        status_filter = "all"
 
     conn = get_db()
 
@@ -1810,14 +1834,15 @@ def shift_task_edit(shift_task_id):
             conn.commit()
             conn.close()
 
-            return redirect(url_for("shift_tasks"))
+            return redirect(url_for("shift_tasks", status=status_filter))
 
     conn.close()
 
     return render_template(
         "shift_task_edit.html",
         task=task,
-        error=error
+        error=error,
+        status_filter=status_filter
     )
 
 #####################################################################

@@ -65,12 +65,12 @@
 				</td>
 
 				<td>
-					<a href="/shift-task/edit/{{ task.shift_task_id }}">Edit</a>
+					<a href="{{ url_for('shift_task_edit', shift_task_id=task.shift_task_id, status=status_filter) }}">Edit</a>
 
 					{% if task.active %}
-						| <a href="/shift-task/deactivate/{{ task.shift_task_id }}">Deactivate</a>
+						| <a href="{{ url_for('shift_task_deactivate', shift_task_id=task.shift_task_id, status=status_filter) }}">Deactivate</a>
 					{% else %}
-						| <a href="/shift-task/reactivate/{{ task.shift_task_id }}">Reactivate</a>
+						| <a href="{{ url_for('shift_task_reactivate', shift_task_id=task.shift_task_id, status=status_filter) }}">Reactivate</a>
 					{% endif %}
 				</td>
 			</tr>
