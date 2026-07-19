@@ -1267,6 +1267,42 @@ def shift_dashboard(shift_id):
     )
     
 
+# ============================================================
+# BM AND URINATION TRACKER
+# ============================================================
+
+@app.route(
+    "/shift/<int:shift_id>/toileting-event/new",
+    methods=["GET", "POST"]
+)
+def toileting_event_new(shift_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+
+    shift = conn.execute("""
+    SELECT
+        shifts.*,
+        clients.client_name
+    FROM shifts
+    JOIN clients
+        ON shifts.client_id = clients.client_id
+    WHERE shifts.shift_id = ?
+    """, (shift_id,)).fetchone()
+
+    if shift is None:
+        conn.close()
+        return "Shift not found", 404
+
+    conn.close()
+
+    return render_template(
+        "toileting_event_new.html",
+        shift=shift
+    )
+
 @app.route("/shift-staff/<int:shift_staff_id>/manager-sign-off", methods=["GET", "POST"])
 def manager_sign_off(shift_staff_id):
 

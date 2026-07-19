@@ -164,6 +164,44 @@ textarea{
 
 }
 
+.form-row {
+
+    display:flex;
+    gap:15px;
+    align-items:flex-end;
+    flex-wrap:wrap;
+
+}
+
+.form-field {
+
+    min-width:180px;
+
+}
+
+.form-field {
+
+    flex:1;
+    min-width:220px;
+
+}
+
+@media (max-width:700px) {
+
+    .form-row {
+
+        display:block;
+
+    }
+
+    .form-field {
+
+        width:100%;
+
+    }
+
+}
+
 table{
 
     width:100%;

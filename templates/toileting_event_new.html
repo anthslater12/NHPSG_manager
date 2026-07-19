@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Record BM / Urination Event</h2>
+
+    <table class="management-detail-table">
+
+        <tr>
+            <th>Client</th>
+            <td>{{ shift.client_name }}</td>
+        </tr>
+
+        <tr>
+            <th>Shift Date</th>
+            <td>{{ shift.shift_date }}</td>
+        </tr>
+
+        <tr>
+            <th>Shift Type</th>
+            <td>{{ shift.shift_type }}</td>
+        </tr>
+
+    </table>
+
+    <hr>
+
+    <form method="POST">
+
+        <div class="form-row">
+
+            <div class="form-field">
+
+                <label for="event_type">
+                    Event Type
+                </label>
+
+                <select
+                    id="event_type"
+                    name="event_type"
+                    required
+                >
+                    <option value="">Select event type</option>
+                    <option value="BM">BM</option>
+                    <option value="Urination">Urination</option>
+                    <option value="Both">BM and Urination</option>
+                </select>
+
+            </div>
+
+            <div class="form-field">
+
+                <label for="event_datetime">
+                    Event Date and Time
+                </label>
+
+                <input
+                    type="datetime-local"
+                    id="event_datetime"
+                    name="event_datetime"
+                    required
+                >
+
+            </div>
+
+        </div>
+
+    </form>
+
+    <a
+        class="button"
+        href="{{ url_for('shift_dashboard', shift_id=shift.shift_id) }}"
+    >
+        Back to Shift
+    </a>
+
+</div>
+
+{% endblock %}
