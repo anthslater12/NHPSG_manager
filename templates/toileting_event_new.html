@@ -161,7 +161,7 @@
             </div>
 
             <div
-                id="bm_unusual_details"
+                id="bm_additional_observations"
                 style="display:none;"
             >
 
@@ -169,49 +169,15 @@
 
                     <div class="form-field">
 
-                        <label for="bm_colour">
-                            BM Colour
+                        <label for="bm_unusual_details">
+                            Describe Additional Observations
                         </label>
 
-                        <input
-                            type="text"
-                            id="bm_colour"
-                            name="bm_colour"
-                        >
-
-                    </div>
-
-                    <div class="form-field">
-
-                        <label for="bm_blood_observed">
-                            Blood Observed?
-                        </label>
-
-                        <select
-                            id="bm_blood_observed"
-                            name="bm_blood_observed"
-                        >
-                            <option value="">Select</option>
-                            <option value="No">No</option>
-                            <option value="Yes">Yes</option>
-                        </select>
-
-                    </div>
-
-                    <div class="form-field">
-
-                        <label for="bm_mucus_observed">
-                            Mucus Observed?
-                        </label>
-
-                        <select
-                            id="bm_mucus_observed"
-                            name="bm_mucus_observed"
-                        >
-                            <option value="">Select</option>
-                            <option value="No">No</option>
-                            <option value="Yes">Yes</option>
-                        </select>
+                        <textarea
+                            id="bm_unusual_details"
+                            name="bm_unusual_details"
+                            rows="3"
+                        ></textarea>
 
                     </div>
 
@@ -280,59 +246,15 @@
 
                     <div class="form-field">
 
-                        <label for="urine_colour">
-                            Urine Colour
+                        <label for="urine_unusual_details">
+                            Describe Additional Observations
                         </label>
 
-                        <select
-                            id="urine_colour"
-                            name="urine_colour"
-                        >
-                            <option value="">Select colour</option>
-                            <option value="Clear">Clear</option>
-                            <option value="Pale Yellow">Pale Yellow</option>
-                            <option value="Yellow">Yellow</option>
-                            <option value="Dark Yellow">Dark Yellow</option>
-                            <option value="Amber">Amber</option>
-                            <option value="Red">Red</option>
-                            <option value="Brown">Brown</option>
-                            <option value="Cloudy">Cloudy</option>
-                            <option value="Other">Other</option>
-                        </select>
-
-                    </div>
-
-                    <div class="form-field">
-
-                        <label for="urine_blood_observed">
-                            Blood Observed?
-                        </label>
-
-                        <select
-                            id="urine_blood_observed"
-                            name="urine_blood_observed"
-                        >
-                            <option value="">Select</option>
-                            <option value="No">No</option>
-                            <option value="Yes">Yes</option>
-                        </select>
-
-                    </div>
-
-                    <div class="form-field">
-
-                        <label for="urine_strong_odour">
-                            Strong Odour?
-                        </label>
-
-                        <select
-                            id="urine_strong_odour"
-                            name="urine_strong_odour"
-                        >
-                            <option value="">Select</option>
-                            <option value="No">No</option>
-                            <option value="Yes">Yes</option>
-                        </select>
+                        <textarea
+                            id="urine_unusual_details"
+                            name="urine_unusual_details"
+                            rows="3"
+                        ></textarea>
 
                     </div>
 
@@ -452,7 +374,7 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('urination_details_section');
     const bmUnusual = document.getElementById('bm_unusual');
     const bmUnusualDetails =
-        document.getElementById('bm_unusual_details');
+        document.getElementById('bm_additional_observations');
     const urineUnusual =
         document.getElementById('urine_unusual');
 
