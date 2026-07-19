@@ -29,6 +29,12 @@
 
     <form method="POST">
 
+        {% if error %}
+            <div class="error-message">
+                {{ error }}
+            </div>
+        {% endif %}
+
         <h3>Event Information</h3>
 
         <div class="form-row">
@@ -44,10 +50,25 @@
                     name="event_type"
                     required
                 >
-                    <option value="">Select event type</option>
-                    <option value="BM">BM</option>
-                    <option value="Urination">Urination</option>
-                    <option value="Both">BM and Urination</option>
+                    <option value=""
+                        {% if event_type|default("") == "" %}selected{% endif %}>
+                        Select event type
+                    </option>
+
+                    <option value="BM"
+                        {% if event_type|default("") == "BM" %}selected{% endif %}>
+                        BM
+                    </option>
+
+                    <option value="Urination"
+                        {% if event_type|default("") == "Urination" %}selected{% endif %}>
+                        Urination
+                    </option>
+
+                    <option value="Both"
+                        {% if event_type|default("") == "Both" %}selected{% endif %}>
+                        BM and Urination
+                    </option>
                 </select>
 
             </div>
@@ -62,6 +83,7 @@
                     type="datetime-local"
                     id="event_datetime"
                     name="event_datetime"
+                    value="{{ event_datetime|default("") }}"
                     required
                 >
 
@@ -78,14 +100,45 @@
                     name="location"
                     required
                 >
-                    <option value="">Select location</option>
-                    <option value="Bathroom">Bathroom</option>
-                    <option value="Bedroom">Bedroom</option>
-                    <option value="Living Room">Living Room</option>
-                    <option value="Kitchen">Kitchen</option>
-                    <option value="Community">Community</option>
-                    <option value="Vehicle">Vehicle</option>
-                    <option value="Other">Other</option>
+                    <option value=""
+                        {% if location|default("") == "" %}selected{% endif %}>
+                        Select location
+                    </option>
+
+                    <option value="Bathroom"
+                        {% if location|default("") == "Bathroom" %}selected{% endif %}>
+                        Bathroom
+                    </option>
+
+                    <option value="Bedroom"
+                        {% if location|default("") == "Bedroom" %}selected{% endif %}>
+                        Bedroom
+                    </option>
+
+                    <option value="Living Room"
+                        {% if location|default("") == "Living Room" %}selected{% endif %}>
+                        Living Room
+                    </option>
+
+                    <option value="Kitchen"
+                        {% if location|default("") == "Kitchen" %}selected{% endif %}>
+                        Kitchen
+                    </option>
+
+                    <option value="Community"
+                        {% if location|default("") == "Community" %}selected{% endif %}>
+                        Community
+                    </option>
+
+                    <option value="Vehicle"
+                        {% if location|default("") == "Vehicle" %}selected{% endif %}>
+                        Vehicle
+                    </option>
+
+                    <option value="Other"
+                        {% if location|default("") == "Other" %}selected{% endif %}>
+                        Other
+                    </option>
                 </select>
 
             </div>
@@ -113,10 +166,25 @@
                         id="bm_size"
                         name="bm_size"
                     >
-                        <option value="">Select size</option>
-                        <option value="Small">Small</option>
-                        <option value="Medium">Medium</option>
-                        <option value="Large">Large</option>
+                        <option value=""
+                            {% if bm_size|default("") == "" %}selected{% endif %}>
+                            Select size
+                        </option>
+
+                        <option value="Small"
+                            {% if bm_size|default("") == "Small" %}selected{% endif %}>
+                            Small
+                        </option>
+
+                        <option value="Medium"
+                            {% if bm_size|default("") == "Medium" %}selected{% endif %}>
+                            Medium
+                        </option>
+
+                        <option value="Large"
+                            {% if bm_size|default("") == "Large" %}selected{% endif %}>
+                            Large
+                        </option>
                     </select>
 
                 </div>
@@ -131,12 +199,35 @@
                         id="bm_consistency"
                         name="bm_consistency"
                     >
-                        <option value="">Select consistency</option>
-                        <option value="Hard">Hard</option>
-                        <option value="Firm">Firm</option>
-                        <option value="Soft">Soft</option>
-                        <option value="Loose">Loose</option>
-                        <option value="Watery">Watery</option>
+                        <option value=""
+                            {% if bm_consistency|default("") == "" %}selected{% endif %}>
+                            Select consistency
+                        </option>
+
+                        <option value="Hard"
+                            {% if bm_consistency|default("") == "Hard" %}selected{% endif %}>
+                            Hard
+                        </option>
+
+                        <option value="Firm"
+                            {% if bm_consistency|default("") == "Firm" %}selected{% endif %}>
+                            Firm
+                        </option>
+
+                        <option value="Soft"
+                            {% if bm_consistency|default("") == "Soft" %}selected{% endif %}>
+                            Soft
+                        </option>
+
+                        <option value="Loose"
+                            {% if bm_consistency|default("") == "Loose" %}selected{% endif %}>
+                            Loose
+                        </option>
+
+                        <option value="Watery"
+                            {% if bm_consistency|default("") == "Watery" %}selected{% endif %}>
+                            Watery
+                        </option>
                     </select>
 
                 </div>
@@ -151,9 +242,20 @@
                         id="bm_unusual"
                         name="bm_unusual"
                     >
-                        <option value="">Select</option>
-                        <option value="No">No</option>
-                        <option value="Yes">Yes</option>
+                        <option value=""
+                            {% if bm_unusual|default("") == "" %}selected{% endif %}>
+                            Select
+                        </option>
+
+                        <option value="No"
+                            {% if bm_unusual|default("") == "No" %}selected{% endif %}>
+                            No
+                        </option>
+
+                        <option value="Yes"
+                            {% if bm_unusual|default("") == "Yes" %}selected{% endif %}>
+                            Yes
+                        </option>
                     </select>
 
                 </div>
@@ -177,7 +279,7 @@
                             id="bm_unusual_details"
                             name="bm_unusual_details"
                             rows="3"
-                        ></textarea>
+                        >{{ bm_unusual_details|default("") }}</textarea>
 
                     </div>
 
@@ -208,10 +310,25 @@
                         id="urine_volume"
                         name="urine_volume"
                     >
-                        <option value="">Select volume</option>
-                        <option value="Small">Small</option>
-                        <option value="Medium">Medium</option>
-                        <option value="Large">Large</option>
+                        <option value=""
+                            {% if urine_volume|default("") == "" %}selected{% endif %}>
+                            Select volume
+                        </option>
+
+                        <option value="Small"
+                            {% if urine_volume|default("") == "Small" %}selected{% endif %}>
+                            Small
+                        </option>
+
+                        <option value="Medium"
+                            {% if urine_volume|default("") == "Medium" %}selected{% endif %}>
+                            Medium
+                        </option>
+
+                        <option value="Large"
+                            {% if urine_volume|default("") == "Large" %}selected{% endif %}>
+                            Large
+                        </option>
                     </select>
 
                 </div>
@@ -226,9 +343,20 @@
                         id="urine_unusual"
                         name="urine_unusual"
                     >
-                        <option value="">Select</option>
-                        <option value="No">No</option>
-                        <option value="Yes">Yes</option>
+                        <option value=""
+                            {% if urine_unusual|default("") == "" %}selected{% endif %}>
+                            Select
+                        </option>
+
+                        <option value="No"
+                            {% if urine_unusual|default("") == "No" %}selected{% endif %}>
+                            No
+                        </option>
+
+                        <option value="Yes"
+                            {% if urine_unusual|default("") == "Yes" %}selected{% endif %}>
+                            Yes
+                        </option>
                     </select>
 
                 </div>
@@ -254,7 +382,7 @@
                             id="urine_unusual_details"
                             name="urine_unusual_details"
                             rows="3"
-                        ></textarea>
+                        >{{ urine_unusual_details|default("") }}</textarea>
 
                     </div>
 
@@ -282,6 +410,7 @@
                         type="text"
                         id="behaviour_before"
                         name="behaviour_before"
+                        value="{{ behaviour_before|default("") }}"
                     >
 
                 </div>
@@ -296,6 +425,7 @@
                         type="text"
                         id="behaviour_during"
                         name="behaviour_during"
+                        value="{{ behaviour_during|default("") }}"
                     >
 
                 </div>
@@ -310,6 +440,7 @@
                         type="text"
                         id="behaviour_after"
                         name="behaviour_after"
+                        value="{{ behaviour_after|default("") }}"
                     >
 
                 </div>
@@ -324,7 +455,7 @@
                 id="behaviour_comments"
                 name="behaviour_comments"
                 rows="4"
-            ></textarea>
+            >{{ behaviour_comments|default("") }}</textarea>
 
         </div>
 
@@ -342,7 +473,7 @@
                 id="general_comments"
                 name="general_comments"
                 rows="4"
-            ></textarea>
+            >{{ general_comments|default("") }}</textarea>
 
         </div>
 

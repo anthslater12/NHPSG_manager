@@ -1296,6 +1296,200 @@ def toileting_event_new(shift_id):
         conn.close()
         return "Shift not found", 404
 
+    if request.method == "POST":
+        event_type = request.form.get("event_type", "").strip()
+        event_datetime = request.form.get(
+            "event_datetime",
+            ""
+        ).strip()
+        location = request.form.get("location", "").strip()
+
+        bm_size = request.form.get("bm_size", "").strip()
+        bm_consistency = request.form.get(
+            "bm_consistency",
+            ""
+        ).strip()
+        bm_unusual = request.form.get("bm_unusual", "").strip()
+        bm_unusual_details = request.form.get(
+            "bm_unusual_details",
+            ""
+        ).strip()
+
+        urine_volume = request.form.get("urine_volume", "").strip()
+        urine_unusual = request.form.get(
+            "urine_unusual",
+            ""
+        ).strip()
+        urine_unusual_details = request.form.get(
+            "urine_unusual_details",
+            ""
+        ).strip()
+
+        behaviour_before = request.form.get(
+            "behaviour_before",
+            ""
+        ).strip()
+        behaviour_during = request.form.get(
+            "behaviour_during",
+            ""
+        ).strip()
+        behaviour_after = request.form.get(
+            "behaviour_after",
+            ""
+        ).strip()
+        behaviour_comments = request.form.get(
+            "behaviour_comments",
+            ""
+        ).strip()
+        general_comments = request.form.get(
+            "general_comments",
+            ""
+        ).strip()
+
+        error = None
+
+        valid_event_types = [
+            "BM",
+            "Urination",
+            "Both"
+        ]
+
+        if event_type not in valid_event_types:
+            error = "Please select a valid event type."
+
+        elif not event_datetime:
+            error = "Event date and time is required."
+
+        elif not location:
+            error = "Location is required."
+
+        elif (
+            event_type in ["BM", "Both"]
+            and bm_unusual == "Yes"
+            and not bm_unusual_details
+        ):
+            error = (
+                "Additional BM observations are required when "
+                "Anything Unusual is Yes."
+            )
+
+        elif (
+            event_type in ["Urination", "Both"]
+            and urine_unusual == "Yes"
+            and not urine_unusual_details
+        ):
+            error = (
+                "Additional urination observations are required when "
+                "Anything Unusual is Yes."
+            )
+
+        if error:
+            conn.close()
+
+            return render_template(
+                "toileting_event_new.html",
+                shift=shift,
+                error=error,
+                event_type=event_type,
+                event_datetime=event_datetime,
+                location=location,
+                bm_size=bm_size,
+                bm_consistency=bm_consistency,
+                bm_unusual=bm_unusual,
+                bm_unusual_details=bm_unusual_details,
+                urine_volume=urine_volume,
+                urine_unusual=urine_unusual,
+                urine_unusual_details=urine_unusual_details,
+                behaviour_before=behaviour_before,
+                behaviour_during=behaviour_during,
+                behaviour_after=behaviour_after,
+                behaviour_comments=behaviour_comments,
+                general_comments=general_comments
+            )
+
+        if event_type == "Urination":
+            bm_size = None
+            bm_consistency = None
+            bm_unusual = None
+            bm_unusual_details = None
+
+        elif event_type == "BM":
+            urine_volume = None
+            urine_unusual = None
+            urine_unusual_details = None
+
+        if bm_unusual != "Yes":
+            bm_unusual_details = None
+
+        if urine_unusual != "Yes":
+            urine_unusual_details = None
+
+        cur = conn.execute("""
+            INSERT INTO toileting_events
+            (
+                shift_id,
+                client_id,
+                recorded_by_user_id,
+                event_type,
+                event_datetime,
+                location,
+                bm_size,
+                bm_consistency,
+                bm_unusual_details,
+                urine_volume,
+                urine_unusual_details,
+                behaviour_before,
+                behaviour_during,
+                behaviour_after,
+                behaviour_comments,
+                general_comments
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            shift_id,
+            shift["client_id"],
+            session["user_id"],
+            event_type,
+            event_datetime,
+            location,
+            bm_size,
+            bm_consistency,
+            bm_unusual_details,
+            urine_volume,
+            urine_unusual_details,
+            behaviour_before,
+            behaviour_during,
+            behaviour_after,
+            behaviour_comments,
+            general_comments
+        ))
+
+        toileting_event_id = cur.lastrowid
+
+        log_activity(
+            conn,
+            activity_class="TOILETING",
+            activity_type="toileting_event_created",
+            summary=f"Toileting event recorded: {event_type}",
+            user_id=session["user_id"],
+            client_id=shift["client_id"],
+            shift_id=shift_id,
+            related_table="toileting_events",
+            related_id=toileting_event_id,
+            details=general_comments,
+            success=1
+        )
+
+        conn.commit()
+        conn.close()
+
+        return redirect(
+            url_for(
+                "shift_dashboard",
+                shift_id=shift_id
+            )
+        )
+
     conn.close()
 
     return render_template(
