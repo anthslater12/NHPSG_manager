@@ -1354,14 +1354,94 @@ def toileting_event_new(shift_id):
             "Both"
         ]
 
+        valid_locations = [
+            "Bathroom",
+            "Bedroom",
+            "Living Room",
+            "Kitchen",
+            "Community",
+            "Vehicle",
+            "Other"
+        ]
+
+        valid_bm_sizes = [
+            "",
+            "Small",
+            "Medium",
+            "Large"
+        ]
+
+        valid_bm_consistencies = [
+            "",
+            "Hard",
+            "Firm",
+            "Soft",
+            "Loose",
+            "Watery"
+        ]
+
+        valid_unusual_values = [
+            "",
+            "No",
+            "Yes"
+        ]
+
+        valid_urine_volumes = [
+            "",
+            "Small",
+            "Medium",
+            "Large"
+        ]
+
+        event_datetime_is_valid = False
+
+        if event_datetime:
+            try:
+                parsed_event_datetime = datetime.strptime(
+                    event_datetime,
+                    "%Y-%m-%dT%H:%M"
+                )
+
+                event_datetime_is_valid = (
+                    parsed_event_datetime.strftime(
+                        "%Y-%m-%dT%H:%M"
+                    ) == event_datetime
+                )
+            except ValueError:
+                event_datetime_is_valid = False
+
         if event_type not in valid_event_types:
             error = "Please select a valid event type."
 
         elif not event_datetime:
             error = "Event date and time is required."
 
+        elif not event_datetime_is_valid:
+            error = "Please enter a valid event date and time."
+
         elif not location:
             error = "Location is required."
+
+        elif location not in valid_locations:
+            error = "Please select a valid location."
+
+        elif (
+            event_type in ["BM", "Both"]
+            and bm_size not in valid_bm_sizes
+        ):
+            error = "Please select a valid BM size."
+
+        elif (
+            event_type in ["BM", "Both"]
+            and bm_consistency not in valid_bm_consistencies
+        ):
+            error = "Please select a valid BM consistency."
+
+        elif (
+            event_type in ["BM", "Both"]
+            and bm_unusual not in valid_unusual_values
+        ):
+            error = "Please select a valid BM observation option."
 
         elif (
             event_type in ["BM", "Both"]
@@ -1371,6 +1451,20 @@ def toileting_event_new(shift_id):
             error = (
                 "Additional BM observations are required when "
                 "Anything Unusual is Yes."
+            )
+
+        elif (
+            event_type in ["Urination", "Both"]
+            and urine_volume not in valid_urine_volumes
+        ):
+            error = "Please select a valid urine volume."
+
+        elif (
+            event_type in ["Urination", "Both"]
+            and urine_unusual not in valid_unusual_values
+        ):
+            error = (
+                "Please select a valid urination observation option."
             )
 
         elif (
@@ -2660,6 +2754,120 @@ def care_review_list():
         reviewed_by_current_user=reviewed_by_current_user
     )
 
+@app.route("/manager-review/toileting")
+def toileting_review_list():
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    conn = get_db()
+
+    entries = conn.execute("""
+        SELECT
+            te.toileting_event_id AS entry_id,
+            te.shift_id,
+            te.event_type,
+            te.event_datetime,
+            te.location,
+            te.bm_size,
+            te.bm_consistency,
+            te.bm_unusual_details,
+            te.urine_volume,
+            te.urine_unusual_details,
+            te.behaviour_before,
+            te.behaviour_during,
+            te.behaviour_after,
+            te.behaviour_comments,
+            te.general_comments,
+
+            recorded_by.full_name AS recorded_by,
+
+            s.shift_date,
+            s.shift_type,
+
+            c.client_name
+
+        FROM toileting_events te
+
+        JOIN users recorded_by
+            ON te.recorded_by_user_id = recorded_by.user_id
+
+        JOIN shifts s
+            ON te.shift_id = s.shift_id
+
+        JOIN clients c
+            ON te.client_id = c.client_id
+
+        ORDER BY
+            te.event_datetime DESC,
+            te.toileting_event_id DESC
+    """).fetchall()
+
+    reviews = conn.execute("""
+        SELECT
+            ack.source_id AS entry_id,
+            ack.acknowledged_at,
+            u.full_name AS reviewed_by
+
+        FROM acknowledgements ack
+
+        JOIN users u
+            ON ack.user_id = u.user_id
+
+        WHERE ack.source_table =
+              'toileting_events'
+          AND ack.active = 1
+
+        ORDER BY ack.acknowledged_at
+    """).fetchall()
+
+    current_user_reviews = conn.execute("""
+        SELECT
+            source_id AS entry_id
+
+        FROM acknowledgements
+
+        WHERE source_table =
+              'toileting_events'
+          AND user_id = ?
+          AND active = 1
+    """, (
+        session["user_id"],
+    )).fetchall()
+
+    conn.close()
+
+    reviews_by_entry = {}
+
+    for review in reviews:
+        entry_id = review["entry_id"]
+
+        if entry_id not in reviews_by_entry:
+            reviews_by_entry[entry_id] = []
+
+        reviews_by_entry[entry_id].append(review)
+
+    reviewed_by_current_user = set()
+
+    for review in current_user_reviews:
+        reviewed_by_current_user.add(
+            review["entry_id"]
+        )
+
+    return render_template(
+        "toileting_review_list.html",
+        entries=entries,
+        reviews_by_entry=reviews_by_entry,
+        reviewed_by_current_user=reviewed_by_current_user
+    )
+
 @app.route("/manager-review/housekeeping")
 def housekeeping_review_list():
 
@@ -3202,6 +3410,367 @@ def review_housekeeping_entry(entry_id):
         + f"#housekeeping-entry-{entry_id}"
     )
 
+@app.route("/manager-review/toileting/<int:entry_id>")
+def toileting_review_detail(entry_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    conn = get_db()
+
+    entry = conn.execute("""
+        SELECT
+            te.*,
+
+            recorded_by.full_name AS recorded_by,
+
+            s.shift_date,
+            s.shift_type,
+            s.client_id,
+
+            c.client_name
+
+        FROM toileting_events te
+
+        JOIN users recorded_by
+            ON te.recorded_by_user_id = recorded_by.user_id
+
+        JOIN shifts s
+            ON te.shift_id = s.shift_id
+
+        JOIN clients c
+            ON te.client_id = c.client_id
+
+        WHERE te.toileting_event_id = ?
+    """, (entry_id,)).fetchone()
+
+    if entry is None:
+        conn.close()
+        return "Toileting event not found", 404
+
+    review_history = conn.execute("""
+        SELECT
+            ack.acknowledgement_id,
+            ack.user_id,
+            ack.acknowledged_at,
+            ack.acknowledgement_type,
+
+            u.full_name AS reviewed_by
+
+        FROM acknowledgements ack
+
+        JOIN users u
+            ON ack.user_id = u.user_id
+
+        WHERE ack.source_table =
+              'toileting_events'
+          AND ack.source_id = ?
+          AND ack.active = 1
+
+        ORDER BY
+            ack.acknowledged_at ASC,
+            ack.acknowledgement_id ASC
+    """, (entry_id,)).fetchall()
+
+    current_user_review = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+
+        WHERE source_table =
+              'toileting_events'
+          AND source_id = ?
+          AND user_id = ?
+          AND active = 1
+    """, (
+        entry_id,
+        session["user_id"]
+    )).fetchone()
+
+    management_notes = get_management_notes(
+        conn,
+        source_table="toileting_events",
+        source_id=entry_id
+    )
+
+    linked_actions = conn.execute("""
+        SELECT
+            ai.action_id,
+            ai.title,
+            ai.status,
+            ai.priority,
+            ai.created_at,
+
+            assigned_to.full_name AS assigned_to
+
+        FROM action_items ai
+
+        LEFT JOIN users assigned_to
+            ON ai.assigned_to_user_id =
+               assigned_to.user_id
+
+        WHERE ai.source_table =
+              'toileting_events'
+          AND ai.source_id = ?
+
+        ORDER BY ai.created_at DESC
+    """, (entry_id,)).fetchall()
+
+    shift_staff = conn.execute("""
+        SELECT
+            u.full_name,
+            u.role,
+            ss.actual_start_time,
+            ss.actual_end_time
+
+        FROM shift_staff ss
+
+        JOIN users u
+            ON ss.user_id = u.user_id
+
+        WHERE ss.shift_id = ?
+
+        ORDER BY ss.sign_on_at
+    """, (entry["shift_id"],)).fetchall()
+
+    conn.close()
+
+    current_user_reviewed = (
+        current_user_review is not None
+    )
+
+    return render_template(
+        "toileting_review_detail.html",
+        entry=entry,
+        review_history=review_history,
+        current_user_reviewed=current_user_reviewed,
+        management_notes=management_notes,
+        linked_actions=linked_actions,
+        shift_staff=shift_staff
+    )
+
+@app.route(
+    "/manager-review/toileting/<int:entry_id>/management-note",
+    methods=["POST"]
+)
+def add_toileting_management_note(entry_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    note_text = request.form.get(
+        "note_text",
+        ""
+    ).strip()
+
+    if not note_text:
+        return redirect(
+            url_for(
+                "toileting_review_detail",
+                entry_id=entry_id,
+                note_error="Management note text is required."
+            )
+        )
+
+    conn = get_db()
+
+    entry = conn.execute("""
+        SELECT
+            toileting_event_id,
+            shift_id
+        FROM toileting_events
+        WHERE toileting_event_id = ?
+    """, (entry_id,)).fetchone()
+
+    if entry is None:
+        conn.close()
+        return "Toileting event not found", 404
+
+    add_management_note(
+        conn,
+        source_table="toileting_events",
+        source_id=entry_id,
+        note_text=note_text,
+        created_by_user_id=session["user_id"],
+        visibility="management_only",
+        shift_id=entry["shift_id"]
+    )
+
+    conn.commit()
+    conn.close()
+
+    return redirect(
+        url_for(
+            "toileting_review_detail",
+            entry_id=entry_id
+        )
+    )
+
+@app.route(
+    "/manager-review/toileting/<int:entry_id>/action/new",
+    methods=["GET", "POST"]
+)
+def toileting_action_new(entry_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    conn = get_db()
+
+    entry = conn.execute("""
+        SELECT
+            te.toileting_event_id AS entry_id,
+            te.shift_id,
+            te.event_type,
+            te.event_datetime,
+            te.location,
+            te.general_comments,
+
+            s.shift_date,
+            s.shift_type
+
+        FROM toileting_events te
+
+        JOIN shifts s
+            ON te.shift_id = s.shift_id
+
+        WHERE te.toileting_event_id = ?
+    """, (entry_id,)).fetchone()
+
+    if entry is None:
+        conn.close()
+        return "Toileting event not found", 404
+
+    active_users = conn.execute("""
+        SELECT
+            user_id,
+            full_name,
+            role
+        FROM users
+        WHERE active = 1
+        ORDER BY full_name
+    """).fetchall()
+
+    if request.method == "POST":
+
+        title = request.form.get("title", "").strip()
+        description = request.form.get(
+            "description",
+            ""
+        ).strip()
+
+        priority = request.form.get(
+            "priority",
+            "Medium"
+        )
+
+        assigned_to_user_id = request.form.get(
+            "assigned_to_user_id",
+            ""
+        ).strip()
+
+        error = None
+
+        if not title:
+            error = "Action title is required."
+
+        if priority not in [
+            "High",
+            "Medium",
+            "Low"
+        ]:
+            error = "Invalid priority."
+
+        if assigned_to_user_id:
+            assigned_to_user_id = int(
+                assigned_to_user_id
+            )
+        else:
+            assigned_to_user_id = None
+
+        if error:
+            conn.close()
+
+            return render_template(
+                "toileting_action_new.html",
+                entry=entry,
+                active_users=active_users,
+                error=error,
+                title=title,
+                description=description,
+                priority=priority,
+                assigned_to_user_id=assigned_to_user_id
+            )
+
+        action_id = create_action(
+            conn,
+            title=title,
+            description=description or None,
+            source_table="toileting_events",
+            source_id=entry_id,
+            shift_id=entry["shift_id"],
+            created_by_user_id=session["user_id"],
+            assigned_to_user_id=assigned_to_user_id,
+            priority=priority
+        )
+
+        conn.commit()
+        conn.close()
+
+        return redirect(
+            url_for(
+                "action_detail",
+                action_id=action_id
+            )
+        )
+
+    default_description = (
+        f"Toileting event: {entry['event_type']}\n"
+        f"Event date and time: {entry['event_datetime']}\n"
+        f"Shift: {entry['shift_date']} "
+        f"{entry['shift_type']}\n"
+        f"Location: {entry['location']}"
+    )
+
+    if entry["general_comments"]:
+        default_description += (
+            f"\nOperational comment: "
+            f"{entry['general_comments']}"
+        )
+
+    conn.close()
+
+    return render_template(
+        "toileting_action_new.html",
+        entry=entry,
+        active_users=active_users,
+        error=None,
+        title=f"Toileting Follow-up: {entry['event_type']}",
+        description=default_description,
+        priority="Medium",
+        assigned_to_user_id=None
+    )
+
 @app.route("/manager-review/care/<int:entry_id>")
 def care_review_detail(entry_id):
 
@@ -3624,6 +4193,50 @@ def review_care_entry(entry_id):
     return redirect(
         url_for("care_review_list")
         + f"#care-entry-{entry_id}"
+    )
+
+@app.route(
+    "/manager-review/toileting/<int:entry_id>/review",
+    methods=["POST"]
+)
+def review_toileting_entry(entry_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    conn = get_db()
+
+    entry = conn.execute("""
+        SELECT toileting_event_id
+        FROM toileting_events
+        WHERE toileting_event_id = ?
+    """, (entry_id,)).fetchone()
+
+    if entry is None:
+        conn.close()
+        return "Toileting event not found", 404
+
+    create_acknowledgement(
+        conn,
+        source_table="toileting_events",
+        source_id=entry_id,
+        user_id=session["user_id"],
+        acknowledgement_type="Review"
+    )
+
+    conn.commit()
+    conn.close()
+
+    return redirect(
+        url_for("toileting_review_list")
+        + f"#toileting-entry-{entry_id}"
     )
 
 #####################################################################

@@ -4,7 +4,7 @@
 
 <div class="card">
 
-    <h2>Housekeeping Management Review</h2>
+    <h2>Toileting Management Review</h2>
 
     <p>
         <a href="{{ url_for("manager_review_hub") }}">
@@ -13,8 +13,8 @@
     </p>
 
     <p>
-        <a href="{{ url_for('housekeeping_review_list') }}">
-            ← Back to Housekeeping Review List
+        <a href="{{ url_for("toileting_review_list") }}">
+            ← Back to Toileting Review
         </a>
     </p>
 
@@ -38,38 +38,127 @@
         </tr>
 
         <tr>
-            <th>Task</th>
-            <td>{{ entry.task_name }}</td>
+            <th>Recorded By</th>
+            <td>{{ entry.recorded_by }}</td>
         </tr>
 
         <tr>
-            <th>Category</th>
-            <td>{{ entry.category_name or "Not assigned" }}</td>
+            <th>Event Date &amp; Time</th>
+            <td>{{ entry.event_datetime }}</td>
         </tr>
 
         <tr>
-            <th>Instructions</th>
-            <td>{{ entry.instructions or "" }}</td>
+            <th>Event Type</th>
+            <td>{{ entry.event_type }}</td>
         </tr>
 
         <tr>
-            <th>Outcome</th>
-            <td>{{ entry.outcome }}</td>
+            <th>Location</th>
+            <td>{{ entry.location }}</td>
+        </tr>
+
+    </table>
+
+    <h3>BM Information</h3>
+
+    {% if entry.event_type in ["BM", "Both"] %}
+
+        <table class="management-detail-table">
+
+            <tr>
+                <th>BM Size</th>
+                <td>{{ entry.bm_size or "—" }}</td>
+            </tr>
+
+            <tr>
+                <th>BM Consistency</th>
+                <td>{{ entry.bm_consistency or "—" }}</td>
+            </tr>
+
+            <tr>
+                <th>Additional Observations</th>
+                <td>{{ entry.bm_unusual_details or "—" }}</td>
+            </tr>
+
+        </table>
+
+    {% else %}
+
+        <table class="management-detail-table">
+
+            <tr>
+                <th>BM Recorded</th>
+                <td>No</td>
+            </tr>
+
+        </table>
+
+    {% endif %}
+
+    <h3>Urination Information</h3>
+
+    {% if entry.event_type in ["Urination", "Both"] %}
+
+        <table class="management-detail-table">
+
+            <tr>
+                <th>Urine Volume</th>
+                <td>{{ entry.urine_volume or "—" }}</td>
+            </tr>
+
+            <tr>
+                <th>Additional Observations</th>
+                <td>{{ entry.urine_unusual_details or "—" }}</td>
+            </tr>
+
+        </table>
+
+    {% else %}
+
+        <table class="management-detail-table">
+
+            <tr>
+                <th>Urination Recorded</th>
+                <td>No</td>
+            </tr>
+
+        </table>
+
+    {% endif %}
+
+    <h3>Behaviour</h3>
+
+    <table class="management-detail-table">
+
+        <tr>
+            <th>Behaviour Before</th>
+            <td>{{ entry.behaviour_before or "—" }}</td>
         </tr>
 
         <tr>
-            <th>Completed By</th>
-            <td>{{ entry.completed_by }}</td>
+            <th>Behaviour During</th>
+            <td>{{ entry.behaviour_during or "—" }}</td>
         </tr>
 
         <tr>
-            <th>Completed At</th>
-            <td>{{ entry.completed_at }}</td>
+            <th>Behaviour After</th>
+            <td>{{ entry.behaviour_after or "—" }}</td>
         </tr>
 
         <tr>
-            <th>Operational Comment</th>
-            <td>{{ entry.comment or "No comment entered." }}</td>
+            <th>Behaviour Comments</th>
+            <td>{{ entry.behaviour_comments or "—" }}</td>
+        </tr>
+
+    </table>
+
+    <h3>General Comments</h3>
+
+    <table class="management-detail-table">
+
+        <tr>
+            <th>General Comments</th>
+            <td>{{ entry.general_comments or "—" }}</td>
         </tr>
 
     </table>
@@ -103,11 +192,11 @@
 
     <h3>Reviews</h3>
 
-    {% if reviews %}
+    {% if review_history %}
 
         <ul>
 
-            {% for review in reviews %}
+            {% for review in review_history %}
 
                 <li>
                     {{ review.reviewed_by }}
@@ -129,15 +218,14 @@
         <form
             method="POST"
             action="{{ url_for(
-                'review_housekeeping_entry',
-                entry_id=entry.entry_id
+                'review_toileting_entry',
+                entry_id=entry.toileting_event_id
             ) }}"
+            class="inline-form"
         >
-
-            <button type="submit">
+            <button type="submit" class="link-button">
                 Mark as Reviewed
             </button>
-
         </form>
 
     {% else %}
@@ -159,8 +247,8 @@
     <form
         method="POST"
         action="{{ url_for(
-            'add_housekeeping_management_note',
-            entry_id=entry.entry_id
+            'add_toileting_management_note',
+            entry_id=entry.toileting_event_id
         ) }}"
     >
 
@@ -215,14 +303,12 @@
     <h3>Linked Actions</h3>
 
     <p>
-
         <a href="{{ url_for(
-            'housekeeping_action_new',
-            entry_id=entry.entry_id
+            'toileting_action_new',
+            entry_id=entry.toileting_event_id
         ) }}">
             Create Action
         </a>
-
     </p>
 
     {% if linked_actions %}
@@ -265,7 +351,7 @@
 
     {% else %}
 
-        <p>No Actions are linked to this Housekeeping entry.</p>
+        <p>No Actions are linked to this Toileting event.</p>
 
     {% endif %}
 
