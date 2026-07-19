@@ -29,6 +29,8 @@
 
     <form method="POST">
 
+        <h3>Event Information</h3>
+
         <div class="form-row">
 
             <div class="form-field">
@@ -65,17 +67,454 @@
 
             </div>
 
+            <div class="form-field">
+
+                <label for="location">
+                    Location
+                </label>
+
+                <select
+                    id="location"
+                    name="location"
+                    required
+                >
+                    <option value="">Select location</option>
+                    <option value="Bathroom">Bathroom</option>
+                    <option value="Bedroom">Bedroom</option>
+                    <option value="Living Room">Living Room</option>
+                    <option value="Kitchen">Kitchen</option>
+                    <option value="Community">Community</option>
+                    <option value="Vehicle">Vehicle</option>
+                    <option value="Other">Other</option>
+                </select>
+
+            </div>
+
+        </div>
+
+        <div
+            id="bm_details_section"
+            style="display:none;"
+        >
+
+            <hr>
+
+            <h3>BM Details</h3>
+
+            <div class="form-row">
+
+                <div class="form-field">
+
+                    <label for="bm_size">
+                        BM Size
+                    </label>
+
+                    <select
+                        id="bm_size"
+                        name="bm_size"
+                    >
+                        <option value="">Select size</option>
+                        <option value="Small">Small</option>
+                        <option value="Medium">Medium</option>
+                        <option value="Large">Large</option>
+                    </select>
+
+                </div>
+
+                <div class="form-field">
+
+                    <label for="bm_consistency">
+                        BM Consistency
+                    </label>
+
+                    <select
+                        id="bm_consistency"
+                        name="bm_consistency"
+                    >
+                        <option value="">Select consistency</option>
+                        <option value="Hard">Hard</option>
+                        <option value="Firm">Firm</option>
+                        <option value="Soft">Soft</option>
+                        <option value="Loose">Loose</option>
+                        <option value="Watery">Watery</option>
+                    </select>
+
+                </div>
+
+                <div class="form-field">
+
+                    <label for="bm_unusual">
+                        Anything Unusual?
+                    </label>
+
+                    <select
+                        id="bm_unusual"
+                        name="bm_unusual"
+                    >
+                        <option value="">Select</option>
+                        <option value="No">No</option>
+                        <option value="Yes">Yes</option>
+                    </select>
+
+                </div>
+
+            </div>
+
+            <div
+                id="bm_unusual_details"
+                style="display:none;"
+            >
+
+                <div class="form-row">
+
+                    <div class="form-field">
+
+                        <label for="bm_colour">
+                            BM Colour
+                        </label>
+
+                        <input
+                            type="text"
+                            id="bm_colour"
+                            name="bm_colour"
+                        >
+
+                    </div>
+
+                    <div class="form-field">
+
+                        <label for="bm_blood_observed">
+                            Blood Observed?
+                        </label>
+
+                        <select
+                            id="bm_blood_observed"
+                            name="bm_blood_observed"
+                        >
+                            <option value="">Select</option>
+                            <option value="No">No</option>
+                            <option value="Yes">Yes</option>
+                        </select>
+
+                    </div>
+
+                    <div class="form-field">
+
+                        <label for="bm_mucus_observed">
+                            Mucus Observed?
+                        </label>
+
+                        <select
+                            id="bm_mucus_observed"
+                            name="bm_mucus_observed"
+                        >
+                            <option value="">Select</option>
+                            <option value="No">No</option>
+                            <option value="Yes">Yes</option>
+                        </select>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+        <div
+            id="urination_details_section"
+            style="display:none;"
+        >
+
+            <hr>
+
+            <h3>Urination Details</h3>
+
+            <div class="form-row">
+
+                <div class="form-field">
+
+                    <label for="urine_volume">
+                        Urine Volume
+                    </label>
+
+                    <select
+                        id="urine_volume"
+                        name="urine_volume"
+                    >
+                        <option value="">Select volume</option>
+                        <option value="Small">Small</option>
+                        <option value="Medium">Medium</option>
+                        <option value="Large">Large</option>
+                    </select>
+
+                </div>
+
+                <div class="form-field">
+
+                    <label for="urine_unusual">
+                        Anything Unusual?
+                    </label>
+
+                    <select
+                        id="urine_unusual"
+                        name="urine_unusual"
+                    >
+                        <option value="">Select</option>
+                        <option value="No">No</option>
+                        <option value="Yes">Yes</option>
+                    </select>
+
+                </div>
+
+            </div>
+
+            <div
+                id="urination_additional_observations"
+                style="display:none;"
+            >
+
+                <h4>Additional Observations</h4>
+
+                <div class="form-row">
+
+                    <div class="form-field">
+
+                        <label for="urine_colour">
+                            Urine Colour
+                        </label>
+
+                        <select
+                            id="urine_colour"
+                            name="urine_colour"
+                        >
+                            <option value="">Select colour</option>
+                            <option value="Clear">Clear</option>
+                            <option value="Pale Yellow">Pale Yellow</option>
+                            <option value="Yellow">Yellow</option>
+                            <option value="Dark Yellow">Dark Yellow</option>
+                            <option value="Amber">Amber</option>
+                            <option value="Red">Red</option>
+                            <option value="Brown">Brown</option>
+                            <option value="Cloudy">Cloudy</option>
+                            <option value="Other">Other</option>
+                        </select>
+
+                    </div>
+
+                    <div class="form-field">
+
+                        <label for="urine_blood_observed">
+                            Blood Observed?
+                        </label>
+
+                        <select
+                            id="urine_blood_observed"
+                            name="urine_blood_observed"
+                        >
+                            <option value="">Select</option>
+                            <option value="No">No</option>
+                            <option value="Yes">Yes</option>
+                        </select>
+
+                    </div>
+
+                    <div class="form-field">
+
+                        <label for="urine_strong_odour">
+                            Strong Odour?
+                        </label>
+
+                        <select
+                            id="urine_strong_odour"
+                            name="urine_strong_odour"
+                        >
+                            <option value="">Select</option>
+                            <option value="No">No</option>
+                            <option value="Yes">Yes</option>
+                        </select>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+        <hr>
+
+        <div id="behaviour_section">
+
+            <h3>Behaviour</h3>
+
+            <div class="form-row">
+
+                <div class="form-field">
+
+                    <label for="behaviour_before">
+                        Behaviour Before Event
+                    </label>
+
+                    <input
+                        type="text"
+                        id="behaviour_before"
+                        name="behaviour_before"
+                    >
+
+                </div>
+
+                <div class="form-field">
+
+                    <label for="behaviour_during">
+                        Behaviour During Event
+                    </label>
+
+                    <input
+                        type="text"
+                        id="behaviour_during"
+                        name="behaviour_during"
+                    >
+
+                </div>
+
+                <div class="form-field">
+
+                    <label for="behaviour_after">
+                        Behaviour After Event
+                    </label>
+
+                    <input
+                        type="text"
+                        id="behaviour_after"
+                        name="behaviour_after"
+                    >
+
+                </div>
+
+            </div>
+
+            <label for="behaviour_comments">
+                Additional Behaviour Details
+            </label>
+
+            <textarea
+                id="behaviour_comments"
+                name="behaviour_comments"
+                rows="4"
+            ></textarea>
+
+        </div>
+
+        <hr>
+
+        <div id="general_comments_section">
+
+            <h3>General Comments</h3>
+
+            <label for="general_comments">
+                Comments
+            </label>
+
+            <textarea
+                id="general_comments"
+                name="general_comments"
+                rows="4"
+            ></textarea>
+
+        </div>
+
+        <div class="form-row">
+
+            <button type="submit">
+                Save Toileting Event
+            </button>
+
+            <a
+                class="button"
+                href="{{ url_for('shift_dashboard', shift_id=shift.shift_id) }}"
+            >
+                Cancel
+            </a>
+
         </div>
 
     </form>
 
-    <a
-        class="button"
-        href="{{ url_for('shift_dashboard', shift_id=shift.shift_id) }}"
-    >
-        Back to Shift
-    </a>
-
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    const eventType = document.getElementById('event_type');
+    const bmSection = document.getElementById('bm_details_section');
+    const urinationSection =
+        document.getElementById('urination_details_section');
+    const bmUnusual = document.getElementById('bm_unusual');
+    const bmUnusualDetails =
+        document.getElementById('bm_unusual_details');
+    const urineUnusual =
+        document.getElementById('urine_unusual');
+
+    const urinationAdditionalObservations =
+        document.getElementById(
+            'urination_additional_observations'
+        );
+
+    function updateDetailSections() {
+
+        const selectedValue = eventType.value;
+
+        bmSection.style.display =
+            selectedValue === 'BM' || selectedValue === 'Both'
+                ? 'block'
+                : 'none';
+
+        urinationSection.style.display =
+            selectedValue === 'Urination' || selectedValue === 'Both'
+                ? 'block'
+                : 'none';
+
+    }
+
+    function updateBmUnusualDetails() {
+
+        bmUnusualDetails.style.display =
+            bmUnusual.value === 'Yes'
+                ? 'block'
+                : 'none';
+
+    }
+
+    function updateUrinationAdditionalObservations() {
+
+        urinationAdditionalObservations.style.display =
+            urineUnusual.value === 'Yes'
+                ? 'block'
+                : 'none';
+
+    }
+
+    eventType.addEventListener(
+        'change',
+        updateDetailSections
+    );
+
+    bmUnusual.addEventListener(
+        'change',
+        updateBmUnusualDetails
+    );
+
+    urineUnusual.addEventListener(
+        'change',
+        updateUrinationAdditionalObservations
+    );
+
+    updateDetailSections();
+    updateBmUnusualDetails();
+    updateUrinationAdditionalObservations();
+
+});
+</script>
 
 {% endblock %}
