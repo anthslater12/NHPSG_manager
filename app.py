@@ -2444,11 +2444,22 @@ def acknowledge_shift_note(note_id):
         conn,
         source_table="shift_notes",
         source_id=note_id,
-        user_id=session["user_id"]
+        user_id=session["user_id"],
+        acknowledgement_type="Review"
     )
 
     conn.commit()
     conn.close()
+
+    return_to = request.form.get("return_to", "")
+
+    if return_to == "detail":
+        return redirect(
+            url_for(
+                "shift_note_review_detail",
+                note_id=note_id
+            )
+        )
 
     return redirect(
         url_for("shift_notes")

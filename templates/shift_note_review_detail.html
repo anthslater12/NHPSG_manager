@@ -95,7 +95,26 @@
 
     {% else %}
 
-        <p>You have not reviewed this record.</p>
+        <form
+            method="post"
+            action="{{ url_for(
+                'acknowledge_shift_note',
+                note_id=entry.note_id
+            ) }}"
+            class="inline-form"
+        >
+
+            <input
+                type="hidden"
+                name="return_to"
+                value="detail"
+            >
+
+            <button type="submit" class="link-button">
+                Mark as Reviewed
+            </button>
+
+        </form>
 
     {% endif %}
 
