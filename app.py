@@ -2417,6 +2417,70 @@ def shift_note_review_detail(note_id):
     )
 
 @app.route(
+    "/manager-review/shift-notes/<int:note_id>/management-note",
+    methods=["POST"]
+)
+def add_shift_note_management_note(note_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    conn = get_db()
+
+    entry = conn.execute("""
+        SELECT note_id
+        FROM shift_notes
+        WHERE note_id = ?
+    """, (note_id,)).fetchone()
+
+    if entry is None:
+        conn.close()
+        return "Shift note not found", 404
+
+    note_text = request.form.get(
+        "note_text",
+        ""
+    ).strip()
+
+    if not note_text:
+        conn.close()
+
+        return redirect(
+            url_for(
+                "shift_note_review_detail",
+                note_id=note_id,
+                note_error="Management note text is required."
+            )
+        )
+
+    add_management_note(
+        conn,
+        source_table="shift_notes",
+        source_id=note_id,
+        note_text=note_text,
+        created_by_user_id=session["user_id"],
+        visibility="management_only",
+        shift_id=None
+    )
+
+    conn.commit()
+    conn.close()
+
+    return redirect(
+        url_for(
+            "shift_note_review_detail",
+            note_id=note_id
+        )
+    )
+
+@app.route(
     "/shift-note/<int:note_id>/acknowledge",
     methods=["POST"]
 )

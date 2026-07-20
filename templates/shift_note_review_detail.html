@@ -120,6 +120,45 @@
 
     <h3>Management Notes</h3>
 
+    {% if request.args.get("note_error") %}
+
+        <p class="error-message">
+            {{ request.args.get("note_error") }}
+        </p>
+
+    {% endif %}
+
+    <form
+        method="post"
+        action="{{ url_for(
+            'add_shift_note_management_note',
+            note_id=entry.note_id
+        ) }}"
+    >
+
+        <label for="note_text">
+            Add Management Note
+        </label>
+
+        <textarea
+            id="note_text"
+            name="note_text"
+            rows="4"
+            required
+        ></textarea>
+
+        <p>
+            <small>
+                This note is visible to management only.
+            </small>
+        </p>
+
+        <button type="submit">
+            Add Management Note
+        </button>
+
+    </form>
+
     {% if management_notes %}
 
         {% for note in management_notes %}
