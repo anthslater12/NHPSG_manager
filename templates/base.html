@@ -477,6 +477,119 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    var storageKey = 'management-review-detail-position';
+    var expiryMilliseconds = 30 * 60 * 1000;
+    var savedPosition = sessionStorage.getItem(storageKey);
+
+    if (savedPosition) {
+
+        try {
+
+            var positionData = JSON.parse(savedPosition);
+            var savedAt = Number(positionData.savedAt);
+            var viewportTop = Number(positionData.viewportTop);
+            var currentTime = Date.now();
+            var isValid =
+                typeof positionData.path === 'string'
+                && positionData.path.length > 0
+                && typeof positionData.rowId === 'string'
+                && positionData.rowId.length > 0
+                && Number.isFinite(savedAt)
+                && savedAt > 0
+                && savedAt <= currentTime
+                && Number.isFinite(viewportTop);
+            var isExpired =
+                !isValid
+                || currentTime - savedAt > expiryMilliseconds;
+
+            if (isExpired) {
+
+                sessionStorage.removeItem(storageKey);
+
+            } else if (
+                positionData.path === window.location.pathname
+            ) {
+
+                var targetRow = document.getElementById(
+                    positionData.rowId
+                );
+
+                if (targetRow) {
+
+                    requestAnimationFrame(function() {
+
+                        requestAnimationFrame(function() {
+
+                            var currentTop =
+                                targetRow.getBoundingClientRect().top;
+
+                            var scrollDifference =
+                                currentTop - viewportTop;
+
+                            window.scrollBy(0, scrollDifference);
+                            sessionStorage.removeItem(storageKey);
+
+                        });
+
+                    });
+
+                } else {
+
+                    sessionStorage.removeItem(storageKey);
+
+                }
+
+            }
+
+        } catch (error) {
+
+            console.error(
+                'Could not restore management detail row position.',
+                error
+            );
+
+            sessionStorage.removeItem(storageKey);
+
+        }
+
+    }
+
+    document.addEventListener('click', function(event) {
+
+        var detailLink = event.target.closest(
+            '.preserve-detail-position'
+        );
+
+        if (!detailLink) {
+            return;
+        }
+
+        var row = detailLink.closest('tr[id]');
+
+        if (!row) {
+            return;
+        }
+
+        var positionData = {
+            path: window.location.pathname,
+            rowId: row.id,
+            viewportTop: row.getBoundingClientRect().top,
+            savedAt: Date.now()
+        };
+
+        sessionStorage.setItem(
+            storageKey,
+            JSON.stringify(positionData)
+        );
+
+    });
+
+});
+</script>
+
 </body>
 
 </html>
