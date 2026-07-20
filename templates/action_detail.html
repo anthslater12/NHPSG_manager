@@ -59,6 +59,20 @@
                 {% if action.source_id %}
                     #{{ action.source_id }}
                 {% endif %}
+
+                {% if (
+                    action.source_table == "shift_notes"
+                    and action.source_id
+                ) %}
+                    <br>
+
+                    <a href="{{ url_for(
+                        'shift_note_review_detail',
+                        note_id=action.source_id
+                    ) }}">
+                        View Source Shift Note
+                    </a>
+                {% endif %}
             </td>
         </tr>
 

@@ -2481,6 +2481,172 @@ def add_shift_note_management_note(note_id):
     )
 
 @app.route(
+    "/manager-review/shift-notes/<int:note_id>/action/new",
+    methods=["GET", "POST"]
+)
+def shift_note_action_new(note_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    conn = get_db()
+
+    entry = conn.execute("""
+        SELECT
+            sn.note_id,
+            sn.shift_date,
+            sn.shift_type,
+            sn.client_id,
+            c.client_name,
+            u.full_name AS staff_member,
+            sn.note_text,
+            sn.follow_up_required
+
+        FROM shift_notes sn
+
+        JOIN clients c
+            ON sn.client_id = c.client_id
+
+        JOIN users u
+            ON sn.user_id = u.user_id
+
+        WHERE sn.note_id = ?
+    """, (note_id,)).fetchone()
+
+    if entry is None:
+        conn.close()
+        return "Shift note not found", 404
+
+    active_users = conn.execute("""
+        SELECT
+            user_id,
+            full_name,
+            role
+        FROM users
+        WHERE active = 1
+        ORDER BY full_name
+    """).fetchall()
+
+    if request.method == "POST":
+
+        title = request.form.get("title", "").strip()
+        description = request.form.get(
+            "description",
+            ""
+        ).strip()
+
+        priority = request.form.get(
+            "priority",
+            "Medium"
+        ).strip()
+
+        assigned_to_user_id = request.form.get(
+            "assigned_to_user_id",
+            ""
+        ).strip()
+
+        due_date = None
+        error = None
+
+        if not title:
+            error = "Action title is required."
+
+        elif priority not in [
+            "High",
+            "Medium",
+            "Low"
+        ]:
+            error = "Invalid priority."
+
+        if assigned_to_user_id:
+
+            try:
+                assigned_to_user_id = int(
+                    assigned_to_user_id
+                )
+            except ValueError:
+                error = "Invalid assigned user."
+
+            if (
+                isinstance(assigned_to_user_id, int)
+                and assigned_to_user_id not in {
+                    user["user_id"] for user in active_users
+                }
+            ):
+                error = "Invalid assigned user."
+
+        else:
+            assigned_to_user_id = None
+
+        if error:
+            conn.close()
+
+            return render_template(
+                "shift_note_action_new.html",
+                entry=entry,
+                active_users=active_users,
+                error=error,
+                title=title,
+                description=description,
+                priority=priority,
+                assigned_to_user_id=assigned_to_user_id
+            )
+
+        action_id = create_action(
+            conn,
+            title=title,
+            description=description or None,
+            source_table="shift_notes",
+            source_id=note_id,
+            shift_id=None,
+            created_by_user_id=session["user_id"],
+            assigned_to_user_id=assigned_to_user_id,
+            priority=priority,
+            due_date=due_date
+        )
+
+        conn.commit()
+        conn.close()
+
+        return redirect(
+            url_for(
+                "action_detail",
+                action_id=action_id
+            )
+        )
+
+    default_description = (
+        f"Shift note\n"
+        f"Date: {entry['shift_date']}\n"
+        f"Shift: {entry['shift_type']}\n"
+        f"Client: {entry['client_name']}\n"
+        f"Staff member: {entry['staff_member']}\n"
+        f"Follow-up required: "
+        f"{'Yes' if entry['follow_up_required'] else 'No'}\n"
+        f"Note: {entry['note_text']}"
+    )
+
+    conn.close()
+
+    return render_template(
+        "shift_note_action_new.html",
+        entry=entry,
+        active_users=active_users,
+        error=None,
+        title="Shift Note Follow-up",
+        description=default_description,
+        priority="Medium",
+        assigned_to_user_id=None
+    )
+
+@app.route(
     "/shift-note/<int:note_id>/acknowledge",
     methods=["POST"]
 )

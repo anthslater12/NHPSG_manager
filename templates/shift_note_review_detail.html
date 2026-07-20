@@ -186,6 +186,15 @@
 
     <h3>Linked Actions</h3>
 
+    <p>
+        <a href="{{ url_for(
+            'shift_note_action_new',
+            note_id=entry.note_id
+        ) }}">
+            Create Action
+        </a>
+    </p>
+
     {% if linked_actions %}
 
         <table>
