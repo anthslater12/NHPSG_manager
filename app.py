@@ -2298,6 +2298,124 @@ def shift_notes():
         reviewed_by_current_user=reviewed_by_current_user
     )
 
+@app.route("/manager-review/shift-notes/<int:note_id>")
+def shift_note_review_detail(note_id):
+
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in [
+        "Admin",
+        "Program Manager",
+        "Director"
+    ]:
+        return "Access denied", 403
+
+    conn = get_db()
+
+    entry = conn.execute("""
+        SELECT
+            sn.note_id,
+            sn.shift_date,
+            sn.shift_type,
+            sn.client_id,
+            c.client_name,
+            sn.user_id,
+            u.full_name AS staff_member,
+            sn.follow_up_required,
+            sn.created_at,
+            sn.note_text
+
+        FROM shift_notes sn
+
+        JOIN clients c
+            ON sn.client_id = c.client_id
+
+        JOIN users u
+            ON sn.user_id = u.user_id
+
+        WHERE sn.note_id = ?
+    """, (note_id,)).fetchone()
+
+    if entry is None:
+        conn.close()
+        return "Shift note not found", 404
+
+    reviews = conn.execute("""
+        SELECT
+            ack.acknowledgement_id,
+            ack.acknowledged_at,
+            ack.acknowledgement_type,
+            u.full_name AS reviewed_by
+
+        FROM acknowledgements ack
+
+        JOIN users u
+            ON ack.user_id = u.user_id
+
+        WHERE ack.source_table = 'shift_notes'
+          AND ack.source_id = ?
+          AND ack.active = 1
+
+        ORDER BY
+            ack.acknowledged_at ASC,
+            ack.acknowledgement_id ASC
+    """, (note_id,)).fetchall()
+
+    current_user_review = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+
+        WHERE source_table = 'shift_notes'
+          AND source_id = ?
+          AND user_id = ?
+          AND active = 1
+    """, (
+        note_id,
+        session["user_id"]
+    )).fetchone()
+
+    management_notes = get_management_notes(
+        conn,
+        source_table="shift_notes",
+        source_id=note_id
+    )
+
+    linked_actions = conn.execute("""
+        SELECT
+            ai.action_id,
+            ai.title,
+            ai.status,
+            ai.priority,
+            ai.created_at,
+
+            assigned_to.full_name AS assigned_to
+
+        FROM action_items ai
+
+        LEFT JOIN users assigned_to
+            ON ai.assigned_to_user_id =
+               assigned_to.user_id
+
+        WHERE ai.source_table = 'shift_notes'
+          AND ai.source_id = ?
+
+        ORDER BY ai.created_at DESC
+    """, (note_id,)).fetchall()
+
+    conn.close()
+
+    return render_template(
+        "shift_note_review_detail.html",
+        entry=entry,
+        reviews=reviews,
+        current_user_reviewed=(
+            current_user_review is not None
+        ),
+        management_notes=management_notes,
+        linked_actions=linked_actions
+    )
+
 @app.route(
     "/shift-note/<int:note_id>/acknowledge",
     methods=["POST"]

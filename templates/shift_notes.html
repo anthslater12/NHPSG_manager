@@ -22,6 +22,7 @@
                 <th>Created</th>
                 <th>Note</th>
 				<th>Reviewed</th>
+				<th>View</th>
             </tr>
 
             {% for note in notes %}
@@ -81,6 +82,20 @@
 						</form>
 
 					{% endif %}
+
+				</td>
+
+				<td>
+
+					<a
+						href="{{ url_for(
+							'shift_note_review_detail',
+							note_id=note.note_id
+						) }}"
+						class="preserve-detail-position"
+					>
+						View
+					</a>
 
 				</td>
 

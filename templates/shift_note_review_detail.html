@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Shift Note Management Review</h2>
+
+    <p>
+        <a href="{{ url_for("manager_review_hub") }}">
+            &larr; Back to Management Review
+        </a>
+    </p>
+
+    <p>
+        <a href="{{ url_for('shift_notes') }}">
+            &larr; Return to Shift Notes Review List
+        </a>
+    </p>
+
+    <h3>Operational Record</h3>
+
+    <table class="management-detail-table">
+
+        <tr>
+            <th>Date</th>
+            <td>{{ entry.shift_date }}</td>
+        </tr>
+
+        <tr>
+            <th>Shift</th>
+            <td>{{ entry.shift_type }}</td>
+        </tr>
+
+        <tr>
+            <th>Client</th>
+            <td>{{ entry.client_name }}</td>
+        </tr>
+
+        <tr>
+            <th>Staff Member</th>
+            <td>{{ entry.staff_member }}</td>
+        </tr>
+
+        <tr>
+            <th>Creation Date/Time</th>
+            <td>{{ entry.created_at }}</td>
+        </tr>
+
+        <tr>
+            <th>Follow-up Required</th>
+            <td>
+                {% if entry.follow_up_required %}
+                    Yes
+                {% else %}
+                    No
+                {% endif %}
+            </td>
+        </tr>
+
+        <tr>
+            <th>Shift Note</th>
+            <td>{{ entry.note_text }}</td>
+        </tr>
+
+    </table>
+
+    <h3>Reviews</h3>
+
+    {% if reviews %}
+
+        <ul>
+
+            {% for review in reviews %}
+
+                <li>
+                    {{ review.reviewed_by }}
+                    &mdash; {{ review.acknowledged_at }}
+                    &mdash; {{ review.acknowledgement_type }}
+                </li>
+
+            {% endfor %}
+
+        </ul>
+
+    {% else %}
+
+        <p>No management reviews recorded.</p>
+
+    {% endif %}
+
+    {% if current_user_reviewed %}
+
+        <p>You have reviewed this record.</p>
+
+    {% else %}
+
+        <p>You have not reviewed this record.</p>
+
+    {% endif %}
+
+    <h3>Management Notes</h3>
+
+    {% if management_notes %}
+
+        {% for note in management_notes %}
+
+            <div class="card">
+
+                <strong>{{ note.created_by_name }}</strong><br>
+
+                <small>
+                    {{ note.created_at }}
+                    &mdash; Management only
+                </small>
+
+                <p>{{ note.note_text }}</p>
+
+            </div>
+
+        {% endfor %}
+
+    {% else %}
+
+        <p>No Management Notes have been added.</p>
+
+    {% endif %}
+
+    <h3>Linked Actions</h3>
+
+    {% if linked_actions %}
+
+        <table>
+
+            <tr>
+                <th>Created</th>
+                <th>Priority</th>
+                <th>Status</th>
+                <th>Title</th>
+                <th>Assigned To</th>
+                <th>View</th>
+            </tr>
+
+            {% for action in linked_actions %}
+
+                <tr>
+
+                    <td>{{ action.created_at }}</td>
+                    <td>{{ action.priority }}</td>
+                    <td>{{ action.status }}</td>
+                    <td>{{ action.title }}</td>
+                    <td>{{ action.assigned_to or "Unassigned" }}</td>
+
+                    <td>
+                        <a href="{{ url_for(
+                            'action_detail',
+                            action_id=action.action_id
+                        ) }}">
+                            View
+                        </a>
+                    </td>
+
+                </tr>
+
+            {% endfor %}
+
+        </table>
+
+    {% else %}
+
+        <p>No Actions are linked to this Shift Note.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}
