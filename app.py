@@ -150,8 +150,40 @@ DB_NAME = "nhpsg.db"
 def get_db():
     print("Using database:", os.path.abspath(DB_NAME))
     conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
+
+    error_message = (
+        "SQLite foreign-key enforcement could not be enabled or "
+        "verified."
+    )
+
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_keys"
+        ).fetchone()
+
+        if (
+            foreign_keys is None
+            or type(foreign_keys[0]) is not int
+            or foreign_keys[0] != 1
+            or conn.in_transaction is not False
+        ):
+            raise RuntimeError(error_message)
+
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    except Exception as error:
+        try:
+            conn.close()
+        finally:
+            if (
+                isinstance(error, RuntimeError)
+                and str(error) == error_message
+            ):
+                raise
+
+            raise RuntimeError(error_message) from error
 
 def log_activity(
     conn,
