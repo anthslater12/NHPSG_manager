@@ -2,10 +2,19 @@
 # IMPORTS / APPLICATION CONFIGURATION
 #####################################################################
 
-from flask import Flask, render_template, request, redirect, session, url_for
+from flask import (
+    Flask,
+    has_request_context,
+    render_template,
+    request,
+    redirect,
+    session,
+    url_for
+)
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import os
 import time
 
@@ -189,6 +198,262 @@ def log_activity(
         details,
         success
     ))
+
+#####################################################################
+# STAFF NOTICES FOUNDATION HELPERS
+#####################################################################
+
+STAFF_NOTICE_MANAGEMENT_ROLES = frozenset({
+    "Admin",
+    "Program Manager",
+    "Director"
+})
+
+STAFF_NOTICE_TIMEZONE_NAME = "America/Vancouver"
+STAFF_NOTICE_TIMEZONE = ZoneInfo(STAFF_NOTICE_TIMEZONE_NAME)
+STAFF_NOTICE_LOCAL_DATETIME_FORMAT = "%Y-%m-%dT%H:%M"
+
+STAFF_NOTICE_REQUIREMENT_STATUSES = frozenset({
+    "Required",
+    "No Longer Required",
+    "Cancelled"
+})
+
+
+def _is_valid_staff_notice_identifier(value):
+    return type(value) is int and value > 0
+
+
+def user_can_manage_staff_notices(session_data=None):
+    if session_data is None:
+        if not has_request_context():
+            return False
+
+        session_data = session
+
+    user_id = session_data.get("user_id")
+    role = session_data.get("role")
+
+    return (
+        _is_valid_staff_notice_identifier(user_id)
+        and role in STAFF_NOTICE_MANAGEMENT_ROLES
+    )
+
+
+def get_application_now_utc():
+    return datetime.now(timezone.utc)
+
+
+def parse_staff_notice_utc_datetime(value):
+    if isinstance(value, datetime):
+        parsed_value = value
+    elif isinstance(value, str) and value:
+        normalized_value = value
+
+        if normalized_value.endswith("Z"):
+            normalized_value = normalized_value[:-1] + "+00:00"
+
+        try:
+            parsed_value = datetime.fromisoformat(normalized_value)
+        except ValueError as error:
+            raise ValueError(
+                "Staff Notice timestamp must be valid ISO-8601."
+            ) from error
+    else:
+        raise ValueError(
+            "Staff Notice timestamp must be an aware datetime or "
+            "ISO-8601 string."
+        )
+
+    if (
+        parsed_value.tzinfo is None
+        or parsed_value.utcoffset() is None
+    ):
+        raise ValueError(
+            "Staff Notice timestamp must include a UTC offset."
+        )
+
+    return parsed_value.astimezone(timezone.utc)
+
+
+def format_staff_notice_utc_datetime(value):
+    utc_value = parse_staff_notice_utc_datetime(value)
+
+    return (
+        utc_value.isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def parse_staff_notice_local_datetime(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            "Staff Notice local date and time is required."
+        )
+
+    try:
+        local_naive_value = datetime.strptime(
+            value,
+            STAFF_NOTICE_LOCAL_DATETIME_FORMAT
+        )
+    except ValueError as error:
+        raise ValueError(
+            "Staff Notice local date and time must use "
+            "YYYY-MM-DDTHH:MM."
+        ) from error
+
+    if (
+        local_naive_value.strftime(
+            STAFF_NOTICE_LOCAL_DATETIME_FORMAT
+        ) != value
+    ):
+        raise ValueError(
+            "Staff Notice local date and time must use "
+            "YYYY-MM-DDTHH:MM."
+        )
+
+    valid_candidates = []
+
+    for fold in (0, 1):
+        candidate = local_naive_value.replace(
+            tzinfo=STAFF_NOTICE_TIMEZONE,
+            fold=fold
+        )
+
+        round_trip = (
+            candidate.astimezone(timezone.utc)
+            .astimezone(STAFF_NOTICE_TIMEZONE)
+        )
+
+        if (
+            round_trip.replace(tzinfo=None) == local_naive_value
+            and round_trip.fold == fold
+        ):
+            valid_candidates.append(candidate)
+
+    if not valid_candidates:
+        raise ValueError(
+            "Staff Notice local date and time does not exist in "
+            f"{STAFF_NOTICE_TIMEZONE_NAME}."
+        )
+
+    candidate_offsets = {
+        candidate.utcoffset()
+        for candidate in valid_candidates
+    }
+
+    if len(candidate_offsets) > 1:
+        raise ValueError(
+            "Staff Notice local date and time is ambiguous in "
+            f"{STAFF_NOTICE_TIMEZONE_NAME}."
+        )
+
+    return valid_candidates[0]
+
+
+def staff_notice_local_datetime_to_utc(value):
+    return parse_staff_notice_local_datetime(value).astimezone(
+        timezone.utc
+    )
+
+
+def staff_notice_utc_datetime_to_local(value):
+    return parse_staff_notice_utc_datetime(value).astimezone(
+        STAFF_NOTICE_TIMEZONE
+    )
+
+
+def format_staff_notice_local_datetime(
+    value,
+    format_string="%Y-%m-%d %H:%M"
+):
+    return staff_notice_utc_datetime_to_local(value).strftime(
+        format_string
+    )
+
+
+def get_application_local_date(now_utc=None):
+    if now_utc is None:
+        now_utc = get_application_now_utc()
+
+    return staff_notice_utc_datetime_to_local(now_utc).date()
+
+
+def get_recipient_staff_notice_status(
+    *,
+    active_acknowledgement_at_utc=None,
+    due_at_utc=None,
+    requirement_status="Required",
+    first_viewed_at_utc=None
+):
+    if requirement_status not in STAFF_NOTICE_REQUIREMENT_STATUSES:
+        raise ValueError("Invalid Staff Notice requirement status.")
+
+    if active_acknowledgement_at_utc is not None:
+        acknowledged_at = parse_staff_notice_utc_datetime(
+            active_acknowledgement_at_utc
+        )
+
+        if due_at_utc is not None:
+            due_at = parse_staff_notice_utc_datetime(due_at_utc)
+
+            if acknowledged_at > due_at:
+                return "Acknowledged Late"
+
+        return "Acknowledged"
+
+    if requirement_status == "Cancelled":
+        return "Cancelled"
+
+    if requirement_status == "No Longer Required":
+        return "No Longer Required"
+
+    if first_viewed_at_utc is not None:
+        parse_staff_notice_utc_datetime(first_viewed_at_utc)
+        return "Viewed – Awaiting Acknowledgement"
+
+    return "Not Viewed"
+
+
+def _get_staff_notice_record_value(record, field_name):
+    if record is None:
+        return None
+
+    try:
+        return record[field_name]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def user_owns_staff_notice_delivery(delivery, user_id):
+    delivery_user_id = _get_staff_notice_record_value(
+        delivery,
+        "user_id"
+    )
+
+    if not _is_valid_staff_notice_identifier(user_id):
+        return False
+
+    return (
+        _is_valid_staff_notice_identifier(delivery_user_id)
+        and delivery_user_id == user_id
+    )
+
+
+def staff_notice_delivery_has_content_access(delivery):
+    recipient_access = _get_staff_notice_record_value(
+        delivery,
+        "recipient_access"
+    )
+
+    return type(recipient_access) is int and recipient_access == 1
+
+
+def user_can_access_staff_notice_delivery(delivery, user_id):
+    return (
+        user_owns_staff_notice_delivery(delivery, user_id)
+        and staff_notice_delivery_has_content_access(delivery)
+    )
 
 def get_current_shift_type():
     now = datetime.now()
