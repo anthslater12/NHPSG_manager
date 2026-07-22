@@ -10,7 +10,6 @@ import add_staff_notices_tables as staff_notice_schema
 
 
 LATER_PUBLICATION_TABLES = (
-    "staff_notice_audience_eligibility_periods",
     "staff_notice_occurrences",
     "staff_notice_deliveries",
     "staff_notice_delivery_history",
@@ -34,6 +33,7 @@ class PublicationTrackingConnection:
         self.rollback_error = rollback_error
         self.close_error = close_error
         self.begin_calls = 0
+        self.eligibility_insert_calls = 0
         self.update_calls = 0
         self.commit_calls = 0
         self.rollback_calls = 0
@@ -48,6 +48,10 @@ class PublicationTrackingConnection:
 
         if normalized_sql == "BEGIN IMMEDIATE":
             self.begin_calls += 1
+        if normalized_sql.startswith(
+            "INSERT INTO staff_notice_audience_eligibility_periods"
+        ):
+            self.eligibility_insert_calls += 1
         if normalized_sql.startswith(
             "UPDATE staff_notices SET status = 'Published'"
         ):
@@ -200,7 +204,13 @@ class StaffNoticePublicationTests(unittest.TestCase):
             **kwargs
         )
 
-    def create_notice(self, *, audience=True, schedule=True):
+    def create_notice(
+        self,
+        *,
+        audience=True,
+        audience_rules=None,
+        schedule=True
+    ):
         conn = self.open_database()
 
         try:
@@ -241,12 +251,28 @@ class StaffNoticePublicationTests(unittest.TestCase):
                     (notice_id, created_at_utc)
                     VALUES (?, '2026-07-30T19:00:00Z')
                 """, (notice_id,))
-                conn.execute("""
+                audience_id = cursor.lastrowid
+                if audience_rules is None:
+                    audience_rules = ((
+                        "All Support Workers",
+                        None,
+                        None
+                    ),)
+
+                conn.executemany("""
                     INSERT INTO staff_notice_audience_rules
-                    (audience_id, rule_type, created_at_utc)
-                    VALUES (?, 'All Support Workers',
-                            '2026-07-30T19:00:00Z')
-                """, (cursor.lastrowid,))
+                    (
+                        audience_id,
+                        rule_type,
+                        role_name,
+                        user_id,
+                        created_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, '2026-07-30T19:00:00Z')
+                """, (
+                    (audience_id, rule_type, role_name, user_id)
+                    for rule_type, role_name, user_id in audience_rules
+                ))
 
             if schedule:
                 conn.execute("""
@@ -276,6 +302,24 @@ class StaffNoticePublicationTests(unittest.TestCase):
                 FROM staff_notices
                 WHERE notice_id = ?
             """, (notice_id,)).fetchone())
+        finally:
+            conn.close()
+
+    def eligibility_rows(self, notice_id):
+        conn = self.open_database()
+
+        try:
+            return [
+                dict(row)
+                for row in conn.execute("""
+                    SELECT ep.*
+                    FROM staff_notice_audience_eligibility_periods ep
+                    JOIN staff_notice_audiences a
+                        ON ep.audience_id = a.audience_id
+                    WHERE a.notice_id = ?
+                    ORDER BY ep.user_id, ep.eligibility_period_id
+                """, (notice_id,)).fetchall()
+            ]
         finally:
             conn.close()
 
@@ -335,7 +379,22 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_successful_publication_changes_only_lifecycle_metadata(self):
+    def make_notice_shift_scheduled(self, notice_id):
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                UPDATE staff_notice_schedules
+                SET occurrence_basis = 'Shift',
+                    recurrence_pattern = 'Daily',
+                    shift_applicability = 'Every Shift'
+                WHERE notice_id = ?
+            """, (notice_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_successful_publication_creates_initial_eligibility(self):
         notice_id = self.create_notice()
         result = app.publish_staff_notice(notice_id, 2)
         notice = self.notice_row(notice_id)
@@ -354,6 +413,23 @@ class StaffNoticePublicationTests(unittest.TestCase):
         )
         self.assertIsNone(notice["updated_by_user_id"])
         self.assertIsNone(notice["updated_at_utc"])
+        rows = self.eligibility_rows(notice_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["user_id"], 4)
+        self.assertEqual(
+            rows[0]["eligible_from_at_utc"],
+            self.FIXED_TIMESTAMP
+        )
+        self.assertIsNone(rows[0]["eligible_until_at_utc"])
+        self.assertEqual(
+            rows[0]["eligibility_source_summary"],
+            "All Support Workers"
+        )
+        self.assertEqual(rows[0]["opened_by_user_id"], 2)
+        self.assertIsNone(rows[0]["closed_by_user_id"])
+        self.assertIsNone(rows[0]["close_reason"])
+        self.assertEqual(rows[0]["created_at_utc"], self.FIXED_TIMESTAMP)
+        self.assertIsNone(rows[0]["updated_at_utc"])
         self.assert_no_later_publication_rows()
 
     def test_public_service_owns_one_connection_and_transaction(self):
@@ -369,10 +445,94 @@ class StaffNoticePublicationTests(unittest.TestCase):
 
         get_db_mock.assert_called_once_with()
         self.assertEqual(connection.begin_calls, 1)
+        self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.commit_calls, 1)
         self.assertEqual(connection.rollback_calls, 0)
         self.assertEqual(connection.close_calls, 1)
+
+    def test_audience_union_deduplicates_worker_and_sources(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("Core Organization", None, None),
+            ("All Support Workers", None, None),
+            ("Selected Role", "Support Worker", None),
+            ("Selected Individual", None, 4)
+        ))
+
+        app.publish_staff_notice(notice_id, 1)
+
+        rows = self.eligibility_rows(notice_id)
+        self.assertEqual([row["user_id"] for row in rows], [1, 2, 4])
+        worker = next(row for row in rows if row["user_id"] == 4)
+        self.assertEqual(
+            worker["eligibility_source_summary"],
+            "Core Organization, All Support Workers, "
+            "Selected Role: Support Worker, Selected Individual"
+        )
+        self.assertEqual(
+            len(worker["eligibility_source_summary"].split(", ")),
+            4
+        )
+
+    def test_inactive_users_are_excluded_from_initial_eligibility(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("Core Organization", None, None),
+        ))
+
+        app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(
+            [row["user_id"] for row in self.eligibility_rows(notice_id)],
+            [1, 2, 4]
+        )
+        self.assertNotIn(
+            3,
+            [row["user_id"] for row in self.eligibility_rows(notice_id)]
+        )
+
+    def test_applicable_shift_staff_alone_creates_no_eligibility(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("Applicable Shift Staff", None, None),
+        ))
+        self.make_notice_shift_scheduled(notice_id)
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                INSERT INTO shifts
+                (shift_id, client_id, shift_date, shift_type, status)
+                VALUES (1, 1, '2026-08-01', 'Day', 'Open')
+            """)
+            conn.execute("""
+                INSERT INTO shift_staff
+                (shift_id, user_id, active)
+                VALUES (1, 4, 1)
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(self.eligibility_rows(notice_id), [])
+        self.assert_no_later_publication_rows()
+
+    def test_non_shift_candidate_needs_no_matching_shift_assignment(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("All Support Workers", None, None),
+            ("Applicable Shift Staff", None, None)
+        ))
+        self.make_notice_shift_scheduled(notice_id)
+
+        app.publish_staff_notice(notice_id, 1)
+
+        rows = self.eligibility_rows(notice_id)
+        self.assertEqual([row["user_id"] for row in rows], [4])
+        self.assertEqual(
+            rows[0]["eligibility_source_summary"],
+            "All Support Workers"
+        )
+        self.assert_no_later_publication_rows()
 
     def test_internal_publisher_requires_and_reuses_active_transaction(self):
         notice_id = self.create_notice()
@@ -474,6 +634,54 @@ class StaffNoticePublicationTests(unittest.TestCase):
             self.FIXED_TIMESTAMP
         )
 
+    def test_overlapping_publication_attempt_cannot_duplicate_periods(self):
+        notice_id = self.create_notice()
+        first_connection = self.tracking_connection()
+        self.addCleanup(first_connection.close)
+        first_connection.execute("BEGIN IMMEDIATE")
+        app._publish_staff_notice_in_transaction(
+            first_connection,
+            notice_id,
+            1,
+            self.FIXED_NOW
+        )
+
+        second_raw_connection = sqlite3.connect(
+            self.database_path,
+            timeout=0
+        )
+        second_raw_connection.execute("PRAGMA foreign_keys = ON")
+        second_raw_connection.row_factory = sqlite3.Row
+        second_connection = PublicationTrackingConnection(
+            second_raw_connection
+        )
+
+        with mock.patch.object(
+            app,
+            "get_db",
+            return_value=second_connection
+        ):
+            with self.assertRaisesRegex(
+                sqlite3.OperationalError,
+                "locked"
+            ):
+                app.publish_staff_notice(notice_id, 2)
+
+        self.assertEqual(second_connection.begin_calls, 1)
+        self.assertEqual(second_connection.eligibility_insert_calls, 0)
+        self.assertEqual(second_connection.commit_calls, 0)
+        self.assertEqual(second_connection.close_calls, 1)
+
+        first_connection.commit()
+        rows = self.eligibility_rows(notice_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["user_id"], 4)
+
+        with self.assertRaises(app.StaffNoticeNotEditableError):
+            app.publish_staff_notice(notice_id, 2)
+
+        self.assertEqual(self.eligibility_rows(notice_id), rows)
+
     def test_inactive_draft_is_rejected(self):
         notice_id = self.create_notice()
         conn = self.open_database()
@@ -536,11 +744,50 @@ class StaffNoticePublicationTests(unittest.TestCase):
                 app.publish_staff_notice(notice_id, 1)
 
         self.assertEqual(connection.update_calls, 1)
+        self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(connection.close_calls, 1)
         self.assertEqual(self.database_snapshot(), before)
         self.assert_no_later_publication_rows()
+
+    def test_eligibility_insert_failure_rolls_back_everything(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("Core Organization", None, None),
+        ))
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_eligibility_insert
+                BEFORE INSERT ON staff_notice_audience_eligibility_periods
+                WHEN NEW.user_id = 2
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled eligibility failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        before = self.database_snapshot()
+        connection = self.tracking_connection()
+
+        with mock.patch.object(app, "get_db", return_value=connection):
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled eligibility failure"
+            ):
+                app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(connection.eligibility_insert_calls, 2)
+        self.assertEqual(connection.update_calls, 0)
+        self.assertEqual(connection.commit_calls, 0)
+        self.assertEqual(connection.rollback_calls, 1)
+        self.assertEqual(connection.close_calls, 1)
+        self.assertEqual(self.database_snapshot(), before)
+        self.assertEqual(self.notice_row(notice_id)["status"], "Draft")
+        self.assertEqual(self.eligibility_rows(notice_id), [])
 
     def test_guarded_update_rejects_stale_write(self):
         notice_id = self.create_notice()
@@ -555,9 +802,11 @@ class StaffNoticePublicationTests(unittest.TestCase):
                 app.publish_staff_notice(notice_id, 1)
 
         self.assertEqual(connection.update_calls, 1)
+        self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(self.database_snapshot(), before)
+        self.assertEqual(self.eligibility_rows(notice_id), [])
 
     def test_commit_failure_rolls_back_publication(self):
         notice_id = self.create_notice()

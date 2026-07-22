@@ -4017,6 +4017,50 @@ def get_staff_notice_publish_preview(
     return preview
 
 
+def _create_initial_staff_notice_eligibility_periods(
+    conn,
+    preview,
+    actor_user_id,
+    opened_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice eligibility creation requires an active "
+            "transaction."
+        )
+
+    audience_id = preview["notice"]["audience"]["audience_id"]
+    candidates = preview["_publication_audience_candidates"]
+
+    for user_id in sorted(candidates):
+        sources = list(dict.fromkeys(
+            candidates[user_id]["qualification_sources"]
+        ))
+        conn.execute("""
+            INSERT INTO staff_notice_audience_eligibility_periods
+            (
+                audience_id,
+                user_id,
+                eligible_from_at_utc,
+                eligible_until_at_utc,
+                eligibility_source_summary,
+                opened_by_user_id,
+                closed_by_user_id,
+                close_reason,
+                created_at_utc,
+                updated_at_utc
+            )
+            VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL, ?, NULL)
+        """, (
+            audience_id,
+            user_id,
+            opened_at_utc,
+            ", ".join(sources),
+            actor_user_id,
+            opened_at_utc
+        ))
+
+
 def _publish_staff_notice_in_transaction(
     conn,
     notice_id,
@@ -4042,6 +4086,12 @@ def _publish_staff_notice_in_transaction(
         )
 
     published_at_utc = format_staff_notice_utc_datetime(now_utc)
+    _create_initial_staff_notice_eligibility_periods(
+        conn,
+        preview,
+        actor_user_id,
+        published_at_utc
+    )
     cursor = conn.execute("""
         UPDATE staff_notices
         SET status = 'Published',
