@@ -179,6 +179,15 @@
     {% if notice.draft_active %}
         <p>
             <a href="{{ url_for(
+                'staff_notice_publish_review',
+                notice_id=notice.notice_id
+            ) }}">
+                Review for Publication
+            </a>
+        </p>
+
+        <p>
+            <a href="{{ url_for(
                 'staff_notice_edit',
                 notice_id=notice.notice_id
             ) }}">

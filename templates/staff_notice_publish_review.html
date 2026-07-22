@@ -1,0 +1,302 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Staff Notice Publication Preview</h2>
+
+    <p>
+        <strong>
+            This is a read-only preview. The Staff Notice has not been
+            published.
+        </strong>
+    </p>
+
+    <p>
+        Preview generated {{ preview_generated_at_local }}
+        (America/Vancouver).
+    </p>
+
+    <h3>Publication Readiness</h3>
+
+    {% if ready_for_publication %}
+        <p class="status-active">
+            Ready for the later controlled publication step
+        </p>
+    {% else %}
+        <p class="status-inactive">
+            Publication is blocked until the issues below are corrected
+        </p>
+    {% endif %}
+
+    {% if blocking_errors %}
+        <div class="error-message">
+            <strong>Blocking Errors</strong>
+            <ul>
+                {% for message in blocking_errors %}
+                    <li>{{ message }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+
+    {% if warnings %}
+        <h3>Warnings</h3>
+        <ul>
+            {% for message in warnings %}
+                <li>{{ message }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+
+    <h3>Notice</h3>
+
+    <table class="management-detail-table">
+        <tr>
+            <th>Title</th>
+            <td>{{ notice.title }}</td>
+        </tr>
+        <tr>
+            <th>Priority</th>
+            <td>{{ notice.priority }}</td>
+        </tr>
+        <tr>
+            <th>Notice Text</th>
+            <td>{{ notice.notice_text }}</td>
+        </tr>
+    </table>
+
+    <h3>Scope and Effective Period</h3>
+
+    <table class="management-detail-table">
+        <tr>
+            <th>Scope</th>
+            <td>{{ summary.scope }}</td>
+        </tr>
+        <tr>
+            <th>Effective Start</th>
+            <td>
+                {% if effective_start_local %}
+                    {{ effective_start_local }} (America/Vancouver)
+                {% else %}
+                    &mdash;
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <th>Expiry</th>
+            <td>
+                {% if notice.until_withdrawn == 1 %}
+                    Until Withdrawn
+                {% elif expires_local %}
+                    {{ expires_local }} (America/Vancouver)
+                {% else %}
+                    &mdash;
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+
+    <h3>Audience</h3>
+
+    <p>{{ summary.audience }}</p>
+
+    {% if notice.audience_rules %}
+        <ul>
+            {% for rule in notice.audience_rules %}
+                <li>
+                    {{ rule.rule_type }}
+                    {% if rule.role_name %}
+                        &mdash; {{ rule.role_name }}
+                    {% elif rule.selected_user_name %}
+                        &mdash; {{ rule.selected_user_name }}
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No audience rules are configured.</p>
+    {% endif %}
+
+    <h3>Schedule</h3>
+
+    <p>{{ summary.schedule }}</p>
+
+    {% if notice.schedule %}
+        <table class="management-detail-table">
+            <tr>
+                <th>Occurrence Basis</th>
+                <td>{{ notice.schedule.occurrence_basis }}</td>
+            </tr>
+            <tr>
+                <th>Recurrence</th>
+                <td>{{ notice.schedule.recurrence_pattern }}</td>
+            </tr>
+            <tr>
+                <th>Shift Applicability</th>
+                <td>{{ notice.schedule.shift_applicability }}</td>
+            </tr>
+            <tr>
+                <th>Selected Shift Types</th>
+                <td>
+                    {% if notice.shift_types %}
+                        {{ notice.shift_types|join(", ") }}
+                    {% else %}
+                        &mdash;
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Selected Weekdays</th>
+                <td>
+                    {% set weekday_names = [
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                        "Saturday",
+                        "Sunday"
+                    ] %}
+                    {% if notice.weekdays %}
+                        {% for weekday in notice.weekdays %}
+                            {% if weekday in [0, 1, 2, 3, 4, 5, 6] %}
+                                {{ weekday_names[weekday] }}{% if not loop.last %}, {% endif %}
+                            {% else %}
+                                Invalid weekday{% if not loop.last %}, {% endif %}
+                            {% endif %}
+                        {% endfor %}
+                    {% else %}
+                        &mdash;
+                    {% endif %}
+                </td>
+            </tr>
+        </table>
+    {% else %}
+        <p>No schedule is configured.</p>
+    {% endif %}
+
+    <h3>Acknowledgement Requirements</h3>
+
+    <p>{{ acknowledgement_description }}</p>
+
+    <p>
+        Every assigned delivery will require acknowledgement by its assigned
+        recipient. This preview does not create any acknowledgement
+        requirement.
+    </p>
+
+    <h3>Currently Identifiable Recipients</h3>
+
+    <p>
+        <strong>Unique recipients:</strong> {{ recipient_count }}
+    </p>
+
+    {% if recipients %}
+        <div class="table-scroll">
+            <table>
+                <tr>
+                    <th>Name</th>
+                    <th>Current Role</th>
+                    <th>Qualifies Through</th>
+                </tr>
+                {% for recipient in recipients %}
+                    <tr>
+                        <td>{{ recipient.full_name }}</td>
+                        <td>{{ recipient.role }}</td>
+                        <td>
+                            {{ recipient.qualification_sources|join(", ") }}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+        </div>
+    {% else %}
+        <p>No currently identifiable active recipients.</p>
+    {% endif %}
+
+    {% if notice.schedule and notice.schedule.occurrence_basis == "Shift" %}
+        <h3>Matching Shifts</h3>
+
+        <p>
+            <strong>Matching shifts:</strong> {{ matching_shift_count }}<br>
+            <strong>Estimated deliveries:</strong>
+            {{ estimated_delivery_count }}
+        </p>
+
+        {% if matching_shifts %}
+            <div class="table-scroll">
+                <table>
+                    <tr>
+                        <th>Shift ID</th>
+                        <th>Client</th>
+                        <th>Shift Date</th>
+                        <th>Shift Type</th>
+                        <th>Status</th>
+                        <th>Eligible Assigned Staff</th>
+                    </tr>
+                    {% for shift in matching_shifts %}
+                        <tr>
+                            <td>{{ shift.shift_id }}</td>
+                            <td>{{ shift.client_name or shift.client_id }}</td>
+                            <td>
+                                {{ shift.shift_date }}
+                                (America/Vancouver shift-start date)
+                            </td>
+                            <td>{{ shift.shift_type }}</td>
+                            <td>{{ shift.status }}</td>
+                            <td>
+                                {% if shift.recipients %}
+                                    {% for recipient in shift.recipients %}
+                                        {{ recipient.full_name }}{% if not loop.last %}, {% endif %}
+                                    {% endfor %}
+                                {% else %}
+                                    &mdash;
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </table>
+            </div>
+        {% else %}
+            <p>No matching shift currently exists.</p>
+        {% endif %}
+    {% endif %}
+
+    {% if information %}
+        <h3>Additional Information</h3>
+        <ul>
+            {% for message in information %}
+                <li>{{ message }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+
+    <h3>Navigation</h3>
+
+    <p>
+        <a href="{{ url_for(
+            'staff_notice_admin_detail',
+            notice_id=notice.notice_id
+        ) }}">
+            &larr; Back to Staff Notice Draft
+        </a>
+    </p>
+
+    <p>
+        <a href="{{ url_for(
+            'staff_notice_edit',
+            notice_id=notice.notice_id
+        ) }}">
+            Edit Draft
+        </a>
+    </p>
+
+    <p>
+        Actual publication belongs to a later controlled checkpoint.
+    </p>
+
+</div>
+
+{% endblock %}
