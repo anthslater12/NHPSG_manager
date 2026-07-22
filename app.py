@@ -11,6 +11,7 @@ from flask import (
     session,
     url_for
 )
+from collections.abc import Mapping
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timezone
@@ -241,6 +242,87 @@ STAFF_NOTICE_MANAGEMENT_ROLES = frozenset({
     "Director"
 })
 
+STAFF_NOTICE_SELECTABLE_ROLES = frozenset({
+    "Admin",
+    "Program Manager",
+    "Director",
+    "Support Worker",
+    "Behaviour Consultant"
+})
+
+STAFF_NOTICE_PRIORITIES = frozenset({
+    "Normal",
+    "Important",
+    "Urgent"
+})
+
+STAFF_NOTICE_AUDIENCE_RULE_TYPES = frozenset({
+    "Core Organization",
+    "All Support Workers",
+    "Selected Role",
+    "Selected Individual",
+    "Applicable Shift Staff"
+})
+
+STAFF_NOTICE_OCCURRENCE_BASES = frozenset({
+    "One Time",
+    "Calendar",
+    "Shift"
+})
+
+STAFF_NOTICE_RECURRENCE_PATTERNS = frozenset({
+    "Once",
+    "Daily",
+    "Interval Days",
+    "Selected Weekdays"
+})
+
+STAFF_NOTICE_SHIFT_APPLICABILITY_VALUES = frozenset({
+    "None",
+    "Every Shift",
+    "Selected Shift Types",
+    "Specific Shift"
+})
+
+STAFF_NOTICE_SHIFT_TYPES = frozenset({
+    "Day",
+    "Afternoon",
+    "Overnight"
+})
+
+STAFF_NOTICE_DRAFT_KEYS = frozenset({
+    "title",
+    "notice_text",
+    "priority",
+    "client_id",
+    "effective_start_local",
+    "expires_local",
+    "until_withdrawn",
+    "audience_rules",
+    "schedule"
+})
+
+STAFF_NOTICE_AUDIENCE_RULE_KEYS = frozenset({
+    "rule_type",
+    "role_name",
+    "user_id"
+})
+
+STAFF_NOTICE_SCHEDULE_KEYS = frozenset({
+    "occurrence_basis",
+    "recurrence_pattern",
+    "shift_applicability",
+    "interval_days",
+    "recurrence_anchor_date",
+    "specific_calendar_date",
+    "specific_shift_client_id",
+    "specific_shift_date",
+    "specific_shift_type",
+    "one_time_due_local",
+    "shift_types",
+    "weekdays"
+})
+
 STAFF_NOTICE_TIMEZONE_NAME = "America/Vancouver"
 STAFF_NOTICE_TIMEZONE = ZoneInfo(STAFF_NOTICE_TIMEZONE_NAME)
 STAFF_NOTICE_LOCAL_DATETIME_FORMAT = "%Y-%m-%dT%H:%M"
@@ -250,6 +332,19 @@ STAFF_NOTICE_REQUIREMENT_STATUSES = frozenset({
     "No Longer Required",
     "Cancelled"
 })
+
+
+class StaffNoticeDraftCommittedCloseError(RuntimeError):
+
+    def __init__(self, notice_id):
+        super().__init__(
+            f"Staff Notice draft {notice_id} was committed, but its "
+            "database connection could not be closed. Do not retry "
+            "draft creation."
+        )
+        self.notice_id = notice_id
+        self.committed = True
+        self.retry_safe = False
 
 
 def _is_valid_staff_notice_identifier(value):
@@ -409,6 +504,1008 @@ def get_application_local_date(now_utc=None):
         now_utc = get_application_now_utc()
 
     return staff_notice_utc_datetime_to_local(now_utc).date()
+
+
+def _reject_unknown_staff_notice_keys(
+    value,
+    allowed_keys,
+    context
+):
+    unknown_keys = set(value) - allowed_keys
+
+    if unknown_keys:
+        field_name = sorted(
+            str(key) for key in unknown_keys
+        )[0]
+        raise ValueError(
+            f"Unknown {context} field: {field_name}."
+        )
+
+
+def _normalize_staff_notice_text(
+    value,
+    field_name,
+    *,
+    required=False
+):
+    if value is None:
+        normalized_value = None
+    elif isinstance(value, str):
+        normalized_value = value.strip()
+        if not normalized_value:
+            normalized_value = None
+    else:
+        raise ValueError(f"{field_name} must be text.")
+
+    if required and normalized_value is None:
+        raise ValueError(f"{field_name} is required.")
+
+    return normalized_value
+
+
+def _normalize_staff_notice_identifier(value, field_name):
+    if value is None:
+        return None
+
+    if not _is_valid_staff_notice_identifier(value):
+        raise ValueError(
+            f"{field_name} must be a positive integer."
+        )
+
+    return value
+
+
+def _normalize_staff_notice_local_date(value, field_name):
+    normalized_value = _normalize_staff_notice_text(
+        value,
+        field_name
+    )
+
+    if normalized_value is None:
+        return None
+
+    try:
+        parsed_value = datetime.strptime(
+            normalized_value,
+            "%Y-%m-%d"
+        )
+    except ValueError as error:
+        raise ValueError(
+            f"{field_name} must use YYYY-MM-DD."
+        ) from error
+
+    if parsed_value.strftime("%Y-%m-%d") != normalized_value:
+        raise ValueError(
+            f"{field_name} must use YYYY-MM-DD."
+        )
+
+    return normalized_value
+
+
+def _normalize_staff_notice_local_datetime(value, field_name):
+    normalized_value = _normalize_staff_notice_text(
+        value,
+        field_name
+    )
+
+    if normalized_value is None:
+        return None
+
+    try:
+        utc_value = staff_notice_local_datetime_to_utc(
+            normalized_value
+        )
+    except ValueError as error:
+        raise ValueError(f"Invalid {field_name}.") from error
+
+    return format_staff_notice_utc_datetime(utc_value)
+
+
+def _normalize_staff_notice_audience_rules(value):
+    if value is None:
+        return tuple()
+
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            "Staff Notice audience rules must be a list or tuple."
+        )
+
+    normalized_rules = []
+    rule_keys = set()
+
+    for rule in value:
+        if not isinstance(rule, Mapping):
+            raise ValueError(
+                "Each Staff Notice audience rule must be a mapping."
+            )
+
+        _reject_unknown_staff_notice_keys(
+            rule,
+            STAFF_NOTICE_AUDIENCE_RULE_KEYS,
+            "Staff Notice audience rule"
+        )
+
+        rule_type = _normalize_staff_notice_text(
+            rule.get("rule_type"),
+            "Staff Notice audience rule type",
+            required=True
+        )
+
+        if rule_type not in STAFF_NOTICE_AUDIENCE_RULE_TYPES:
+            raise ValueError(
+                "Invalid Staff Notice audience rule type."
+            )
+
+        role_name = _normalize_staff_notice_text(
+            rule.get("role_name"),
+            "Staff Notice audience role"
+        )
+        user_id = _normalize_staff_notice_identifier(
+            rule.get("user_id"),
+            "Staff Notice audience user ID"
+        )
+
+        if rule_type == "Selected Role":
+            if role_name is None or user_id is not None:
+                raise ValueError(
+                    "Selected Role requires a role and forbids a user."
+                )
+
+            if role_name not in STAFF_NOTICE_SELECTABLE_ROLES:
+                raise ValueError("Invalid Staff Notice audience role.")
+
+            duplicate_key = (rule_type, role_name)
+
+        elif rule_type == "Selected Individual":
+            if user_id is None or role_name is not None:
+                raise ValueError(
+                    "Selected Individual requires a user and forbids "
+                    "a role."
+                )
+
+            duplicate_key = (rule_type, user_id)
+
+        else:
+            if role_name is not None or user_id is not None:
+                raise ValueError(
+                    f"{rule_type} forbids a role and user."
+                )
+
+            duplicate_key = (rule_type,)
+
+        if duplicate_key in rule_keys:
+            raise ValueError("Duplicate Staff Notice audience rule.")
+
+        rule_keys.add(duplicate_key)
+        normalized_rules.append({
+            "rule_type": rule_type,
+            "role_name": role_name,
+            "user_id": user_id
+        })
+
+    return tuple(normalized_rules)
+
+
+def _normalize_staff_notice_schedule(value):
+    if value is None:
+        return None
+
+    if not isinstance(value, Mapping):
+        raise ValueError("Staff Notice schedule must be a mapping.")
+
+    _reject_unknown_staff_notice_keys(
+        value,
+        STAFF_NOTICE_SCHEDULE_KEYS,
+        "Staff Notice schedule"
+    )
+
+    occurrence_basis = _normalize_staff_notice_text(
+        value.get("occurrence_basis"),
+        "Staff Notice occurrence basis",
+        required=True
+    )
+    recurrence_pattern = _normalize_staff_notice_text(
+        value.get("recurrence_pattern"),
+        "Staff Notice recurrence pattern",
+        required=True
+    )
+    shift_applicability = _normalize_staff_notice_text(
+        value.get("shift_applicability"),
+        "Staff Notice shift applicability",
+        required=True
+    )
+
+    if occurrence_basis not in STAFF_NOTICE_OCCURRENCE_BASES:
+        raise ValueError("Invalid Staff Notice occurrence basis.")
+
+    if recurrence_pattern not in STAFF_NOTICE_RECURRENCE_PATTERNS:
+        raise ValueError("Invalid Staff Notice recurrence pattern.")
+
+    if (
+        shift_applicability
+        not in STAFF_NOTICE_SHIFT_APPLICABILITY_VALUES
+    ):
+        raise ValueError("Invalid Staff Notice shift applicability.")
+
+    valid_combinations = {
+        ("One Time", "Once", "None"),
+        ("Calendar", "Once", "None"),
+        ("Calendar", "Daily", "None"),
+        ("Calendar", "Interval Days", "None"),
+        ("Calendar", "Selected Weekdays", "None"),
+        ("Shift", "Once", "Every Shift"),
+        ("Shift", "Once", "Selected Shift Types"),
+        ("Shift", "Once", "Specific Shift"),
+        ("Shift", "Daily", "Every Shift"),
+        ("Shift", "Daily", "Selected Shift Types"),
+        ("Shift", "Interval Days", "Every Shift"),
+        ("Shift", "Interval Days", "Selected Shift Types"),
+        ("Shift", "Selected Weekdays", "Every Shift"),
+        (
+            "Shift",
+            "Selected Weekdays",
+            "Selected Shift Types"
+        )
+    }
+
+    combination = (
+        occurrence_basis,
+        recurrence_pattern,
+        shift_applicability
+    )
+
+    if combination not in valid_combinations:
+        raise ValueError("Invalid Staff Notice schedule combination.")
+
+    interval_days = value.get("interval_days")
+
+    if (
+        "interval_days" in value
+        and recurrence_pattern != "Interval Days"
+    ):
+        raise ValueError(
+            "Interval days is allowed only for Interval Days."
+        )
+
+    if interval_days is not None:
+        if type(interval_days) is not int or interval_days < 2:
+            raise ValueError(
+                "Staff Notice interval days must be an integer of at "
+                "least 2."
+            )
+
+    recurrence_anchor_date = _normalize_staff_notice_local_date(
+        value.get("recurrence_anchor_date"),
+        "Staff Notice recurrence anchor date"
+    )
+    specific_calendar_date = _normalize_staff_notice_local_date(
+        value.get("specific_calendar_date"),
+        "Staff Notice specific calendar date"
+    )
+
+    if combination == ("Calendar", "Once", "None"):
+        if specific_calendar_date is None:
+            raise ValueError(
+                "A one-time calendar schedule requires a specific date."
+            )
+    elif "specific_calendar_date" in value:
+        raise ValueError(
+            "Specific calendar date is allowed only for a one-time "
+            "calendar schedule."
+        )
+
+    specific_shift_client_id = _normalize_staff_notice_identifier(
+        value.get("specific_shift_client_id"),
+        "Staff Notice specific shift client ID"
+    )
+    specific_shift_date = _normalize_staff_notice_local_date(
+        value.get("specific_shift_date"),
+        "Staff Notice specific shift date"
+    )
+    specific_shift_type = _normalize_staff_notice_text(
+        value.get("specific_shift_type"),
+        "Staff Notice specific shift type"
+    )
+    specific_shift_values = (
+        specific_shift_client_id,
+        specific_shift_date,
+        specific_shift_type
+    )
+
+    if shift_applicability == "Specific Shift":
+        if any(item is None for item in specific_shift_values):
+            raise ValueError(
+                "Specific Shift requires a client, date, and shift "
+                "type."
+            )
+
+        if specific_shift_type not in STAFF_NOTICE_SHIFT_TYPES:
+            raise ValueError("Invalid Staff Notice shift type.")
+
+    elif any(
+        field_name in value
+        for field_name in (
+            "specific_shift_client_id",
+            "specific_shift_date",
+            "specific_shift_type"
+        )
+    ):
+        raise ValueError(
+            "Specific-shift fields are allowed only for Specific Shift."
+        )
+
+    one_time_due_at_utc = _normalize_staff_notice_local_datetime(
+        value.get("one_time_due_local"),
+        "Staff Notice one-time due date and time"
+    )
+
+    if (
+        "one_time_due_local" in value
+        and occurrence_basis != "One Time"
+    ):
+        raise ValueError(
+            "One-time due date is allowed only for One Time."
+        )
+
+    shift_types = value.get("shift_types", [])
+
+    if shift_types is None:
+        shift_types = []
+
+    if not isinstance(shift_types, (list, tuple)):
+        raise ValueError("Staff Notice shift types must be a list or tuple.")
+
+    normalized_shift_types = []
+
+    for shift_type in shift_types:
+        normalized_shift_type = _normalize_staff_notice_text(
+            shift_type,
+            "Staff Notice shift type",
+            required=True
+        )
+
+        if normalized_shift_type not in STAFF_NOTICE_SHIFT_TYPES:
+            raise ValueError("Invalid Staff Notice shift type.")
+
+        if normalized_shift_type in normalized_shift_types:
+            raise ValueError("Duplicate Staff Notice shift type.")
+
+        normalized_shift_types.append(normalized_shift_type)
+
+    if (
+        "shift_types" in value
+        and shift_applicability != "Selected Shift Types"
+    ):
+        raise ValueError(
+            "Shift types are allowed only for Selected Shift Types."
+        )
+
+    weekdays = value.get("weekdays", [])
+
+    if weekdays is None:
+        weekdays = []
+
+    if not isinstance(weekdays, (list, tuple)):
+        raise ValueError("Staff Notice weekdays must be a list or tuple.")
+
+    normalized_weekdays = []
+
+    for weekday in weekdays:
+        if type(weekday) is not int or not 0 <= weekday <= 6:
+            raise ValueError(
+                "Staff Notice weekdays must be integers from 0 to 6."
+            )
+
+        if weekday in normalized_weekdays:
+            raise ValueError("Duplicate Staff Notice weekday.")
+
+        normalized_weekdays.append(weekday)
+
+    if (
+        "weekdays" in value
+        and recurrence_pattern != "Selected Weekdays"
+    ):
+        raise ValueError(
+            "Weekdays are allowed only for Selected Weekdays."
+        )
+
+    return {
+        "occurrence_basis": occurrence_basis,
+        "recurrence_pattern": recurrence_pattern,
+        "shift_applicability": shift_applicability,
+        "interval_days": interval_days,
+        "recurrence_anchor_date": recurrence_anchor_date,
+        "specific_calendar_date": specific_calendar_date,
+        "specific_shift_client_id": specific_shift_client_id,
+        "specific_shift_date": specific_shift_date,
+        "specific_shift_type": specific_shift_type,
+        "one_time_due_at_utc": one_time_due_at_utc,
+        "shift_types": tuple(normalized_shift_types),
+        "weekdays": tuple(normalized_weekdays)
+    }
+
+
+def validate_staff_notice_draft(payload):
+    if not isinstance(payload, Mapping):
+        raise ValueError("Staff Notice draft payload must be a mapping.")
+
+    _reject_unknown_staff_notice_keys(
+        payload,
+        STAFF_NOTICE_DRAFT_KEYS,
+        "Staff Notice draft"
+    )
+
+    title = _normalize_staff_notice_text(
+        payload.get("title"),
+        "Staff Notice title",
+        required=True
+    )
+    notice_text = _normalize_staff_notice_text(
+        payload.get("notice_text"),
+        "Staff Notice content",
+        required=True
+    )
+    priority = _normalize_staff_notice_text(
+        payload.get("priority", "Normal"),
+        "Staff Notice priority",
+        required=True
+    )
+
+    if priority not in STAFF_NOTICE_PRIORITIES:
+        raise ValueError("Invalid Staff Notice priority.")
+
+    client_id = _normalize_staff_notice_identifier(
+        payload.get("client_id"),
+        "Staff Notice client ID"
+    )
+    until_withdrawn = payload.get("until_withdrawn", False)
+
+    if type(until_withdrawn) is not bool:
+        raise ValueError("Staff Notice until withdrawn must be a boolean.")
+
+    effective_start_at_utc = _normalize_staff_notice_local_datetime(
+        payload.get("effective_start_local"),
+        "Staff Notice effective start"
+    )
+    expires_at_utc = _normalize_staff_notice_local_datetime(
+        payload.get("expires_local"),
+        "Staff Notice expiry"
+    )
+
+    if until_withdrawn and expires_at_utc is not None:
+        raise ValueError(
+            "An until-withdrawn Staff Notice cannot have an expiry."
+        )
+
+    if (
+        effective_start_at_utc is not None
+        and expires_at_utc is not None
+        and parse_staff_notice_utc_datetime(expires_at_utc)
+        <= parse_staff_notice_utc_datetime(effective_start_at_utc)
+    ):
+        raise ValueError(
+            "Staff Notice expiry must be later than its effective start."
+        )
+
+    audience_rules = _normalize_staff_notice_audience_rules(
+        payload.get("audience_rules")
+    )
+    schedule = _normalize_staff_notice_schedule(
+        payload.get("schedule")
+    )
+
+    if schedule is not None:
+        specific_shift_client_id = schedule[
+            "specific_shift_client_id"
+        ]
+
+        if (
+            client_id is not None
+            and specific_shift_client_id is not None
+            and client_id != specific_shift_client_id
+        ):
+            raise ValueError(
+                "Specific-shift client must match the Staff Notice "
+                "client."
+            )
+
+        if (
+            schedule["one_time_due_at_utc"] is not None
+            and expires_at_utc is not None
+            and parse_staff_notice_utc_datetime(
+                schedule["one_time_due_at_utc"]
+            ) > parse_staff_notice_utc_datetime(expires_at_utc)
+        ):
+            raise ValueError(
+                "One-time due date cannot be after the notice expiry."
+            )
+
+        if (
+            schedule["occurrence_basis"] != "Shift"
+            and any(
+                rule["rule_type"] == "Applicable Shift Staff"
+                for rule in audience_rules
+            )
+        ):
+            raise ValueError(
+                "Applicable Shift Staff requires a Shift schedule."
+            )
+
+    return {
+        "title": title,
+        "notice_text": notice_text,
+        "priority": priority,
+        "client_id": client_id,
+        "effective_start_at_utc": effective_start_at_utc,
+        "expires_at_utc": expires_at_utc,
+        "until_withdrawn": 1 if until_withdrawn else 0,
+        "audience_rules": audience_rules,
+        "schedule": schedule
+    }
+
+
+def _validate_staff_notice_draft_references(
+    conn,
+    normalized_draft,
+    actor_user_id
+):
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise PermissionError("Staff Notice management access denied.")
+
+    actor = conn.execute("""
+        SELECT user_id, role, active
+        FROM users
+        WHERE user_id = ?
+    """, (actor_user_id,)).fetchone()
+
+    if (
+        actor is None
+        or type(actor["active"]) is not int
+        or actor["active"] != 1
+        or not user_can_manage_staff_notices({
+            "user_id": actor["user_id"],
+            "role": actor["role"]
+        })
+    ):
+        raise PermissionError("Staff Notice management access denied.")
+
+    client_ids = set()
+
+    if normalized_draft["client_id"] is not None:
+        client_ids.add(normalized_draft["client_id"])
+
+    schedule = normalized_draft["schedule"]
+
+    if (
+        schedule is not None
+        and schedule["specific_shift_client_id"] is not None
+    ):
+        client_ids.add(schedule["specific_shift_client_id"])
+
+    for client_id in client_ids:
+        client = conn.execute("""
+            SELECT client_id, active
+            FROM clients
+            WHERE client_id = ?
+        """, (client_id,)).fetchone()
+
+        if (
+            client is None
+            or type(client["active"]) is not int
+            or client["active"] != 1
+        ):
+            raise ValueError(
+                "Staff Notice client must exist and be active."
+            )
+
+    selected_user_ids = {
+        rule["user_id"]
+        for rule in normalized_draft["audience_rules"]
+        if rule["rule_type"] == "Selected Individual"
+    }
+
+    for user_id in selected_user_ids:
+        selected_user = conn.execute("""
+            SELECT user_id, active
+            FROM users
+            WHERE user_id = ?
+        """, (user_id,)).fetchone()
+
+        if (
+            selected_user is None
+            or type(selected_user["active"]) is not int
+            or selected_user["active"] != 1
+        ):
+            raise ValueError(
+                "Selected Staff Notice user must exist and be active."
+            )
+
+
+def _get_staff_notice_exception_link(error, attribute_name):
+    try:
+        error_type = type(error)
+        effective_getattribute = type.__getattribute__(
+            error_type,
+            "__getattribute__"
+        )
+
+        if effective_getattribute is not BaseException.__getattribute__:
+            return False, None
+
+        canonical_link = BaseException.__getattribute__(
+            error,
+            attribute_name
+        )
+
+        if (
+            canonical_link is not None
+            and not isinstance(canonical_link, BaseException)
+        ):
+            return False, None
+
+        return True, canonical_link
+
+    except BaseException:
+        return False, None
+
+
+def _get_staff_notice_exception_graph_ids(error):
+    try:
+        pending = [(error, False)]
+        visiting = set()
+        visited = set()
+
+        while pending:
+            current_error, completed = pending.pop()
+
+            if not isinstance(current_error, BaseException):
+                return None
+
+            current_id = id(current_error)
+
+            if completed:
+                visiting.remove(current_id)
+                visited.add(current_id)
+                continue
+
+            if current_id in visiting:
+                return None
+
+            if current_id in visited:
+                continue
+
+            visiting.add(current_id)
+            pending.append((current_error, True))
+
+            cause_is_safe, cause = _get_staff_notice_exception_link(
+                current_error,
+                "__cause__"
+            )
+            context_is_safe, context = (
+                _get_staff_notice_exception_link(
+                    current_error,
+                    "__context__"
+                )
+            )
+
+            if not cause_is_safe or not context_is_safe:
+                return None
+
+            for related_error in (cause, context):
+                if related_error is not None:
+                    pending.append((related_error, False))
+
+        return frozenset(visited)
+
+    except BaseException:
+        return None
+
+
+def _preserve_staff_notice_cleanup_error(
+    primary_error,
+    attribute_name,
+    cleanup_error,
+    note_text
+):
+    try:
+        diagnostic_attached = False
+
+        try:
+            setattr(primary_error, attribute_name, cleanup_error)
+
+            if getattr(primary_error, attribute_name) is cleanup_error:
+                diagnostic_attached = True
+        except BaseException:
+            pass
+
+        try:
+            add_note = getattr(primary_error, "add_note", None)
+        except BaseException:
+            add_note = None
+
+        if callable(add_note):
+            try:
+                add_note(note_text)
+                diagnostic_attached = True
+            except BaseException:
+                pass
+
+        if diagnostic_attached:
+            return
+
+        try:
+            cause_is_safe, primary_cause = (
+                _get_staff_notice_exception_link(
+                    primary_error,
+                    "__cause__"
+                )
+            )
+            context_is_safe, primary_context = (
+                _get_staff_notice_exception_link(
+                    primary_error,
+                    "__context__"
+                )
+            )
+
+            if not cause_is_safe or not context_is_safe:
+                return
+
+            if primary_cause is not None or primary_context is not None:
+                return
+
+            if cleanup_error is primary_error:
+                return
+
+            primary_graph_ids = (
+                _get_staff_notice_exception_graph_ids(primary_error)
+            )
+            cleanup_graph_ids = (
+                _get_staff_notice_exception_graph_ids(cleanup_error)
+            )
+
+            if primary_graph_ids is None or cleanup_graph_ids is None:
+                return
+
+            if (
+                id(cleanup_error) in primary_graph_ids
+                or id(primary_error) in cleanup_graph_ids
+            ):
+                return
+
+            original_suppress_context = BaseException.__getattribute__(
+                primary_error,
+                "__suppress_context__"
+            )
+            BaseException.__setattr__(
+                primary_error,
+                "__cause__",
+                cleanup_error
+            )
+            cause_is_safe, retained_cause = (
+                _get_staff_notice_exception_link(
+                    primary_error,
+                    "__cause__"
+                )
+            )
+
+            if not cause_is_safe or retained_cause is not cleanup_error:
+                BaseException.__setattr__(
+                    primary_error,
+                    "__cause__",
+                    None
+                )
+                BaseException.__setattr__(
+                    primary_error,
+                    "__suppress_context__",
+                    original_suppress_context
+                )
+        except BaseException:
+            pass
+
+    except BaseException:
+        pass
+
+
+def create_staff_notice_draft(payload, actor_user_id):
+    normalized_draft = validate_staff_notice_draft(payload)
+    conn = None
+    primary_error = None
+    notice_id = None
+    commit_succeeded = False
+
+    try:
+        conn = get_db()
+        _validate_staff_notice_draft_references(
+            conn,
+            normalized_draft,
+            actor_user_id
+        )
+
+        conn.execute("BEGIN IMMEDIATE")
+
+        _validate_staff_notice_draft_references(
+            conn,
+            normalized_draft,
+            actor_user_id
+        )
+
+        created_at_utc = format_staff_notice_utc_datetime(
+            get_application_now_utc()
+        )
+
+        cur = conn.execute("""
+            INSERT INTO staff_notices
+            (
+                title,
+                notice_text,
+                priority,
+                client_id,
+                status,
+                draft_active,
+                effective_start_at_utc,
+                expires_at_utc,
+                until_withdrawn,
+                version_number,
+                created_by_user_id,
+                created_at_utc
+            )
+            VALUES (?, ?, ?, ?, 'Draft', 1, ?, ?, ?, 1, ?, ?)
+        """, (
+            normalized_draft["title"],
+            normalized_draft["notice_text"],
+            normalized_draft["priority"],
+            normalized_draft["client_id"],
+            normalized_draft["effective_start_at_utc"],
+            normalized_draft["expires_at_utc"],
+            normalized_draft["until_withdrawn"],
+            actor_user_id,
+            created_at_utc
+        ))
+        notice_id = cur.lastrowid
+
+        audience_rules = normalized_draft["audience_rules"]
+
+        if audience_rules:
+            cur = conn.execute("""
+                INSERT INTO staff_notice_audiences
+                (notice_id, created_at_utc)
+                VALUES (?, ?)
+            """, (notice_id, created_at_utc))
+            audience_id = cur.lastrowid
+
+            for rule in audience_rules:
+                conn.execute("""
+                    INSERT INTO staff_notice_audience_rules
+                    (
+                        audience_id,
+                        rule_type,
+                        role_name,
+                        user_id,
+                        created_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    audience_id,
+                    rule["rule_type"],
+                    rule["role_name"],
+                    rule["user_id"],
+                    created_at_utc
+                ))
+
+        schedule = normalized_draft["schedule"]
+
+        if schedule is not None:
+            cur = conn.execute("""
+                INSERT INTO staff_notice_schedules
+                (
+                    notice_id,
+                    occurrence_basis,
+                    recurrence_pattern,
+                    shift_applicability,
+                    interval_days,
+                    recurrence_anchor_date,
+                    specific_calendar_date,
+                    specific_shift_client_id,
+                    specific_shift_date,
+                    specific_shift_type,
+                    one_time_due_at_utc,
+                    created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                notice_id,
+                schedule["occurrence_basis"],
+                schedule["recurrence_pattern"],
+                schedule["shift_applicability"],
+                schedule["interval_days"],
+                schedule["recurrence_anchor_date"],
+                schedule["specific_calendar_date"],
+                schedule["specific_shift_client_id"],
+                schedule["specific_shift_date"],
+                schedule["specific_shift_type"],
+                schedule["one_time_due_at_utc"],
+                created_at_utc
+            ))
+            schedule_id = cur.lastrowid
+
+            for shift_type in schedule["shift_types"]:
+                conn.execute("""
+                    INSERT INTO staff_notice_schedule_shift_types
+                    (schedule_id, shift_type)
+                    VALUES (?, ?)
+                """, (schedule_id, shift_type))
+
+            for weekday in schedule["weekdays"]:
+                conn.execute("""
+                    INSERT INTO staff_notice_schedule_weekdays
+                    (schedule_id, weekday_number)
+                    VALUES (?, ?)
+                """, (schedule_id, weekday))
+
+        log_activity(
+            conn,
+            activity_class="STAFF_NOTICE",
+            activity_type="staff_notice_draft_created",
+            summary=(
+                "Staff Notice draft created: "
+                f"{normalized_draft['title']}"
+            ),
+            user_id=actor_user_id,
+            client_id=normalized_draft["client_id"],
+            shift_id=None,
+            related_table="staff_notices",
+            related_id=notice_id,
+            details=(
+                f"Priority: {normalized_draft['priority']}; "
+                f"Audience rules: {len(audience_rules)}; "
+                "Schedule configured: "
+                f"{'Yes' if schedule is not None else 'No'}"
+            ),
+            success=1
+        )
+
+        conn.commit()
+        commit_succeeded = True
+        return notice_id
+
+    except BaseException as error:
+        primary_error = error
+
+        if conn is not None:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except BaseException as rollback_error:
+                _preserve_staff_notice_cleanup_error(
+                    error,
+                    "staff_notice_rollback_error",
+                    rollback_error,
+                    "Staff Notice draft rollback also failed: "
+                    f"{rollback_error}"
+                )
+
+        raise
+
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except BaseException as close_error:
+                if primary_error is None:
+                    if commit_succeeded:
+                        raise StaffNoticeDraftCommittedCloseError(
+                            notice_id
+                        ) from close_error
+
+                    raise
+
+                _preserve_staff_notice_cleanup_error(
+                    primary_error,
+                    "staff_notice_close_error",
+                    close_error,
+                    "Staff Notice database close also failed: "
+                    f"{close_error}"
+                )
 
 
 def get_recipient_staff_notice_status(
