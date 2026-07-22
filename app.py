@@ -4061,6 +4061,351 @@ def _create_initial_staff_notice_eligibility_periods(
         ))
 
 
+def _staff_notice_occurrence_status(visible_from_utc, now_utc):
+    if (
+        visible_from_utc is not None
+        and parse_staff_notice_utc_datetime(visible_from_utc) <= now_utc
+    ):
+        return "Active"
+
+    return "Scheduled"
+
+
+def _staff_notice_calendar_day_end_utc(local_date):
+    next_midnight_local = datetime.combine(
+        local_date + timedelta(days=1),
+        datetime.min.time(),
+        tzinfo=STAFF_NOTICE_TIMEZONE
+    )
+    return next_midnight_local.astimezone(timezone.utc) - timedelta(seconds=1)
+
+
+def _parse_staff_notice_shift_clock(value, field_name):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be a stored local time.")
+
+    for format_string in ("%H:%M", "%H:%M:%S"):
+        try:
+            parsed_value = datetime.strptime(value, format_string).time()
+        except ValueError:
+            continue
+
+        if parsed_value.strftime(format_string) == value:
+            return parsed_value
+
+    raise ValueError(
+        f"{field_name} must use HH:MM or HH:MM:SS local time."
+    )
+
+
+def _staff_notice_resolve_local_shift_datetime(
+    local_date,
+    local_clock,
+    field_name
+):
+    local_naive_value = datetime.combine(local_date, local_clock)
+    valid_candidates = []
+
+    for fold in (0, 1):
+        candidate = local_naive_value.replace(
+            tzinfo=STAFF_NOTICE_TIMEZONE,
+            fold=fold
+        )
+        round_trip = (
+            candidate.astimezone(timezone.utc)
+            .astimezone(STAFF_NOTICE_TIMEZONE)
+        )
+        if (
+            round_trip.replace(tzinfo=None) == local_naive_value
+            and round_trip.fold == fold
+        ):
+            valid_candidates.append(candidate)
+
+    if not valid_candidates:
+        raise ValueError(
+            f"{field_name} does not exist in "
+            f"{STAFF_NOTICE_TIMEZONE_NAME}."
+        )
+    if len({value.utcoffset() for value in valid_candidates}) > 1:
+        raise ValueError(
+            f"{field_name} is ambiguous in "
+            f"{STAFF_NOTICE_TIMEZONE_NAME}."
+        )
+
+    return valid_candidates[0]
+
+
+def _staff_notice_shift_occurrence_times(shift, notice, now_utc):
+    shift_date = datetime.strptime(shift["shift_date"], "%Y-%m-%d").date()
+    start_clock = _parse_staff_notice_shift_clock(
+        shift.get("scheduled_start_time"),
+        "Stored scheduled shift start"
+    )
+    end_clock = _parse_staff_notice_shift_clock(
+        shift.get("scheduled_end_time"),
+        "Stored scheduled shift end"
+    )
+    start_local = None
+    end_local = None
+
+    if start_clock is not None:
+        start_local = _staff_notice_resolve_local_shift_datetime(
+            shift_date,
+            start_clock,
+            "Stored scheduled shift start"
+        )
+
+    if end_clock is not None:
+        end_date = shift_date
+        if shift["shift_type"] == "Overnight" or (
+            start_clock is not None and end_clock <= start_clock
+        ):
+            end_date += timedelta(days=1)
+        end_local = _staff_notice_resolve_local_shift_datetime(
+            end_date,
+            end_clock,
+            "Stored scheduled shift end"
+        )
+
+    effective_start = parse_staff_notice_utc_datetime(
+        notice["effective_start_at_utc"]
+    )
+    visible_from = None
+    if start_local is not None:
+        visible_from = max(
+            start_local.astimezone(timezone.utc),
+            effective_start,
+            now_utc
+        )
+
+    due_at = (
+        end_local.astimezone(timezone.utc)
+        if end_local is not None
+        else None
+    )
+    return visible_from, due_at
+
+
+def _insert_initial_staff_notice_occurrence(
+    conn,
+    *,
+    schedule_id,
+    occurrence_kind,
+    occurrence_date,
+    planned_client_id,
+    planned_shift_type,
+    shift_id,
+    is_specific_shift_occurrence,
+    visible_from_at_utc,
+    due_at_utc,
+    due_at_is_provisional,
+    occurrence_status,
+    created_at_utc,
+    shift_bound_at_utc
+):
+    conn.execute("""
+        INSERT INTO staff_notice_occurrences
+        (
+            schedule_id,
+            occurrence_kind,
+            occurrence_date,
+            planned_client_id,
+            planned_shift_type,
+            shift_id,
+            is_specific_shift_occurrence,
+            visible_from_at_utc,
+            due_at_utc,
+            due_at_is_provisional,
+            due_at_updated_at_utc,
+            occurrence_status,
+            status_reason,
+            created_at_utc,
+            shift_bound_at_utc,
+            status_changed_at_utc,
+            status_changed_by_user_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, NULL, NULL)
+    """, (
+        schedule_id,
+        occurrence_kind,
+        occurrence_date,
+        planned_client_id,
+        planned_shift_type,
+        shift_id,
+        is_specific_shift_occurrence,
+        visible_from_at_utc,
+        due_at_utc,
+        due_at_is_provisional,
+        occurrence_status,
+        created_at_utc,
+        shift_bound_at_utc
+    ))
+
+
+def _create_initial_staff_notice_occurrences(
+    conn,
+    preview,
+    created_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice occurrence creation requires an active "
+            "transaction."
+        )
+
+    notice = preview["notice"]
+    schedule = notice["schedule"]
+    schedule_id = schedule["schedule_id"]
+    now_utc = parse_staff_notice_utc_datetime(created_at_utc)
+    effective_start = parse_staff_notice_utc_datetime(
+        notice["effective_start_at_utc"]
+    )
+    occurrence_basis = schedule["occurrence_basis"]
+
+    if occurrence_basis == "One Time":
+        visible_from = max(now_utc, effective_start)
+        due_at = schedule.get("one_time_due_at_utc")
+        if due_at is None and notice["until_withdrawn"] == 0:
+            due_at = notice["expires_at_utc"]
+        _insert_initial_staff_notice_occurrence(
+            conn,
+            schedule_id=schedule_id,
+            occurrence_kind="One Time",
+            occurrence_date=None,
+            planned_client_id=None,
+            planned_shift_type=None,
+            shift_id=None,
+            is_specific_shift_occurrence=0,
+            visible_from_at_utc=format_staff_notice_utc_datetime(visible_from),
+            due_at_utc=(
+                format_staff_notice_utc_datetime(due_at)
+                if due_at is not None else None
+            ),
+            due_at_is_provisional=0,
+            occurrence_status=_staff_notice_occurrence_status(
+                visible_from,
+                now_utc
+            ),
+            created_at_utc=created_at_utc,
+            shift_bound_at_utc=None
+        )
+        return
+
+    if occurrence_basis == "Calendar":
+        local_date = now_utc.astimezone(STAFF_NOTICE_TIMEZONE).date()
+        effective_local_date = effective_start.astimezone(
+            STAFF_NOTICE_TIMEZONE
+        ).date()
+        expires_at = parse_staff_notice_utc_datetime(
+            notice["expires_at_utc"]
+        )
+        expiry_local_date = expires_at.astimezone(
+            STAFF_NOTICE_TIMEZONE
+        ).date()
+        recurrence_anchor = schedule.get("recurrence_anchor_date")
+        recurrence_anchor_date = (
+            datetime.strptime(recurrence_anchor, "%Y-%m-%d").date()
+            if recurrence_anchor is not None else None
+        )
+
+        if (
+            effective_local_date <= local_date <= expiry_local_date
+            and _staff_notice_schedule_applies_on_date(
+                schedule,
+                local_date,
+                notice.get("weekdays", []),
+                recurrence_anchor_date
+            )
+        ):
+            visible_from = max(now_utc, effective_start)
+            due_at = _staff_notice_calendar_day_end_utc(local_date)
+            _insert_initial_staff_notice_occurrence(
+                conn,
+                schedule_id=schedule_id,
+                occurrence_kind="Calendar",
+                occurrence_date=local_date.isoformat(),
+                planned_client_id=None,
+                planned_shift_type=None,
+                shift_id=None,
+                is_specific_shift_occurrence=0,
+                visible_from_at_utc=format_staff_notice_utc_datetime(
+                    visible_from
+                ),
+                due_at_utc=format_staff_notice_utc_datetime(due_at),
+                due_at_is_provisional=0,
+                occurrence_status=_staff_notice_occurrence_status(
+                    visible_from,
+                    now_utc
+                ),
+                created_at_utc=created_at_utc,
+                shift_bound_at_utc=None
+            )
+        return
+
+    is_specific_shift = (
+        schedule["shift_applicability"] == "Specific Shift"
+    )
+    matching_shifts = preview["matching_shifts"]
+
+    if is_specific_shift and not matching_shifts:
+        _insert_initial_staff_notice_occurrence(
+            conn,
+            schedule_id=schedule_id,
+            occurrence_kind="Shift",
+            occurrence_date=schedule["specific_shift_date"],
+            planned_client_id=schedule["specific_shift_client_id"],
+            planned_shift_type=schedule["specific_shift_type"],
+            shift_id=None,
+            is_specific_shift_occurrence=1,
+            visible_from_at_utc=None,
+            due_at_utc=None,
+            due_at_is_provisional=0,
+            occurrence_status="Pending Shift",
+            created_at_utc=created_at_utc,
+            shift_bound_at_utc=None
+        )
+        return
+
+    seen_shift_ids = set()
+    for shift in matching_shifts:
+        shift_id = shift["shift_id"]
+        if shift_id in seen_shift_ids:
+            continue
+        seen_shift_ids.add(shift_id)
+        visible_from, due_at = _staff_notice_shift_occurrence_times(
+            shift,
+            notice,
+            now_utc
+        )
+        _insert_initial_staff_notice_occurrence(
+            conn,
+            schedule_id=schedule_id,
+            occurrence_kind="Shift",
+            occurrence_date=shift["shift_date"],
+            planned_client_id=shift["client_id"],
+            planned_shift_type=shift["shift_type"],
+            shift_id=shift_id,
+            is_specific_shift_occurrence=int(is_specific_shift),
+            visible_from_at_utc=(
+                format_staff_notice_utc_datetime(visible_from)
+                if visible_from is not None else None
+            ),
+            due_at_utc=(
+                format_staff_notice_utc_datetime(due_at)
+                if due_at is not None else None
+            ),
+            due_at_is_provisional=int(due_at is not None),
+            occurrence_status=_staff_notice_occurrence_status(
+                visible_from,
+                now_utc
+            ),
+            created_at_utc=created_at_utc,
+            shift_bound_at_utc=created_at_utc
+        )
+
+
 def _publish_staff_notice_in_transaction(
     conn,
     notice_id,
@@ -4090,6 +4435,11 @@ def _publish_staff_notice_in_transaction(
         conn,
         preview,
         actor_user_id,
+        published_at_utc
+    )
+    _create_initial_staff_notice_occurrences(
+        conn,
+        preview,
         published_at_utc
     )
     cursor = conn.execute("""

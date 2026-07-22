@@ -10,7 +10,6 @@ import add_staff_notices_tables as staff_notice_schema
 
 
 LATER_PUBLICATION_TABLES = (
-    "staff_notice_occurrences",
     "staff_notice_deliveries",
     "staff_notice_delivery_history",
     "acknowledgements",
@@ -34,6 +33,7 @@ class PublicationTrackingConnection:
         self.close_error = close_error
         self.begin_calls = 0
         self.eligibility_insert_calls = 0
+        self.occurrence_insert_calls = 0
         self.update_calls = 0
         self.commit_calls = 0
         self.rollback_calls = 0
@@ -52,6 +52,10 @@ class PublicationTrackingConnection:
             "INSERT INTO staff_notice_audience_eligibility_periods"
         ):
             self.eligibility_insert_calls += 1
+        if normalized_sql.startswith(
+            "INSERT INTO staff_notice_occurrences"
+        ):
+            self.occurrence_insert_calls += 1
         if normalized_sql.startswith(
             "UPDATE staff_notices SET status = 'Published'"
         ):
@@ -323,6 +327,155 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def occurrence_rows(self, notice_id):
+        conn = self.open_database()
+
+        try:
+            return [
+                dict(row)
+                for row in conn.execute("""
+                    SELECT o.*
+                    FROM staff_notice_occurrences o
+                    JOIN staff_notice_schedules s
+                        ON o.schedule_id = s.schedule_id
+                    WHERE s.notice_id = ?
+                    ORDER BY o.occurrence_id
+                """, (notice_id,)).fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def update_notice_period(
+        self,
+        notice_id,
+        *,
+        effective_start="2026-07-31T08:00:00Z",
+        expires_at="2026-08-31T06:59:59Z",
+        until_withdrawn=0
+    ):
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                UPDATE staff_notices
+                SET effective_start_at_utc = ?,
+                    expires_at_utc = ?,
+                    until_withdrawn = ?
+                WHERE notice_id = ?
+            """, (
+                effective_start,
+                expires_at,
+                until_withdrawn,
+                notice_id
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def configure_schedule(self, notice_id, **values):
+        allowed_columns = {
+            "occurrence_basis",
+            "recurrence_pattern",
+            "shift_applicability",
+            "interval_days",
+            "recurrence_anchor_date",
+            "specific_calendar_date",
+            "specific_shift_client_id",
+            "specific_shift_date",
+            "specific_shift_type",
+            "one_time_due_at_utc"
+        }
+        self.assertTrue(values)
+        self.assertTrue(set(values) <= allowed_columns)
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        conn = self.open_database()
+
+        try:
+            conn.execute(
+                f"""
+                    UPDATE staff_notice_schedules
+                    SET {assignments}
+                    WHERE notice_id = ?
+                """,
+                (*values.values(), notice_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_schedule_weekdays(self, notice_id, *weekdays):
+        conn = self.open_database()
+
+        try:
+            schedule_id = conn.execute("""
+                SELECT schedule_id
+                FROM staff_notice_schedules
+                WHERE notice_id = ?
+            """, (notice_id,)).fetchone()[0]
+            conn.executemany("""
+                INSERT INTO staff_notice_schedule_weekdays
+                (schedule_id, weekday_number)
+                VALUES (?, ?)
+            """, ((schedule_id, weekday) for weekday in weekdays))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_schedule_shift_types(self, notice_id, *shift_types):
+        conn = self.open_database()
+
+        try:
+            schedule_id = conn.execute("""
+                SELECT schedule_id
+                FROM staff_notice_schedules
+                WHERE notice_id = ?
+            """, (notice_id,)).fetchone()[0]
+            conn.executemany("""
+                INSERT INTO staff_notice_schedule_shift_types
+                (schedule_id, shift_type)
+                VALUES (?, ?)
+            """, ((schedule_id, value) for value in shift_types))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_shift(
+        self,
+        shift_id,
+        shift_date,
+        shift_type,
+        *,
+        client_id=1,
+        scheduled_start_time=None,
+        scheduled_end_time=None
+    ):
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                INSERT INTO shifts
+                (
+                    shift_id,
+                    client_id,
+                    shift_date,
+                    shift_type,
+                    status,
+                    scheduled_start_time,
+                    scheduled_end_time
+                )
+                VALUES (?, ?, ?, ?, 'Open', ?, ?)
+            """, (
+                shift_id,
+                client_id,
+                shift_date,
+                shift_type,
+                scheduled_start_time,
+                scheduled_end_time
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
     def database_snapshot(self):
         conn = self.open_database()
 
@@ -430,6 +583,20 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertIsNone(rows[0]["close_reason"])
         self.assertEqual(rows[0]["created_at_utc"], self.FIXED_TIMESTAMP)
         self.assertIsNone(rows[0]["updated_at_utc"])
+        occurrences = self.occurrence_rows(notice_id)
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0]["occurrence_kind"], "One Time")
+        self.assertIsNone(occurrences[0]["occurrence_date"])
+        self.assertEqual(
+            occurrences[0]["visible_from_at_utc"],
+            "2026-08-01T08:00:00Z"
+        )
+        self.assertIsNone(occurrences[0]["due_at_utc"])
+        self.assertEqual(occurrences[0]["occurrence_status"], "Scheduled")
+        self.assertEqual(
+            occurrences[0]["created_at_utc"],
+            self.FIXED_TIMESTAMP
+        )
         self.assert_no_later_publication_rows()
 
     def test_public_service_owns_one_connection_and_transaction(self):
@@ -446,6 +613,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         get_db_mock.assert_called_once_with()
         self.assertEqual(connection.begin_calls, 1)
         self.assertEqual(connection.eligibility_insert_calls, 1)
+        self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.commit_calls, 1)
         self.assertEqual(connection.rollback_calls, 0)
@@ -669,6 +837,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
 
         self.assertEqual(second_connection.begin_calls, 1)
         self.assertEqual(second_connection.eligibility_insert_calls, 0)
+        self.assertEqual(second_connection.occurrence_insert_calls, 0)
         self.assertEqual(second_connection.commit_calls, 0)
         self.assertEqual(second_connection.close_calls, 1)
 
@@ -745,6 +914,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
 
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.eligibility_insert_calls, 1)
+        self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(connection.close_calls, 1)
@@ -781,6 +951,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
                 app.publish_staff_notice(notice_id, 1)
 
         self.assertEqual(connection.eligibility_insert_calls, 2)
+        self.assertEqual(connection.occurrence_insert_calls, 0)
         self.assertEqual(connection.update_calls, 0)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
@@ -803,6 +974,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
 
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.eligibility_insert_calls, 1)
+        self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(self.database_snapshot(), before)
@@ -917,6 +1089,351 @@ class StaffNoticePublicationTests(unittest.TestCase):
             self.FIXED_TIMESTAMP
         )
         self.assertNotIn("_publication_preview", result)
+
+    def test_one_time_finite_occurrence_uses_expiry_as_due_time(self):
+        notice_id = self.create_notice()
+        self.update_notice_period(
+            notice_id,
+            expires_at="2026-08-05T07:00:00Z",
+            until_withdrawn=0
+        )
+
+        app.publish_staff_notice(notice_id, 1)
+
+        occurrence = self.occurrence_rows(notice_id)[0]
+        self.assertEqual(occurrence["due_at_utc"], "2026-08-05T07:00:00Z")
+        self.assertEqual(occurrence["due_at_is_provisional"], 0)
+
+    def test_calendar_recurrence_modes_create_only_applicable_publish_date(self):
+        configurations = (
+            ({
+                "recurrence_pattern": "Once",
+                "specific_calendar_date": "2026-07-31"
+            }, ()),
+            ({"recurrence_pattern": "Daily"}, ()),
+            ({
+                "recurrence_pattern": "Interval Days",
+                "interval_days": 2,
+                "recurrence_anchor_date": "2026-07-29"
+            }, ()),
+            ({"recurrence_pattern": "Selected Weekdays"}, (4,))
+        )
+
+        for values, weekdays in configurations:
+            with self.subTest(pattern=values["recurrence_pattern"]):
+                notice_id = self.create_notice()
+                self.update_notice_period(notice_id)
+                self.configure_schedule(
+                    notice_id,
+                    occurrence_basis="Calendar",
+                    shift_applicability="None",
+                    **values
+                )
+                if weekdays:
+                    self.add_schedule_weekdays(notice_id, *weekdays)
+
+                app.publish_staff_notice(notice_id, 1)
+
+                occurrences = self.occurrence_rows(notice_id)
+                self.assertEqual(len(occurrences), 1)
+                occurrence = occurrences[0]
+                self.assertEqual(occurrence["occurrence_kind"], "Calendar")
+                self.assertEqual(occurrence["occurrence_date"], "2026-07-31")
+                self.assertEqual(
+                    occurrence["visible_from_at_utc"],
+                    self.FIXED_TIMESTAMP
+                )
+                self.assertEqual(
+                    occurrence["due_at_utc"],
+                    "2026-08-01T06:59:59Z"
+                )
+                self.assertEqual(occurrence["occurrence_status"], "Active")
+
+    def test_calendar_boundaries_are_inclusive_without_future_precreation(self):
+        today_notice_id = self.create_notice()
+        self.update_notice_period(
+            today_notice_id,
+            effective_start="2026-07-31T19:00:00Z",
+            expires_at="2026-08-01T06:59:59Z"
+        )
+        self.configure_schedule(
+            today_notice_id,
+            occurrence_basis="Calendar",
+            recurrence_pattern="Daily",
+            shift_applicability="None"
+        )
+        future_notice_id = self.create_notice()
+        self.update_notice_period(
+            future_notice_id,
+            effective_start="2026-08-01T07:00:00Z",
+            expires_at="2026-08-03T06:59:59Z"
+        )
+        self.configure_schedule(
+            future_notice_id,
+            occurrence_basis="Calendar",
+            recurrence_pattern="Daily",
+            shift_applicability="None"
+        )
+
+        app.publish_staff_notice(today_notice_id, 1)
+        app.publish_staff_notice(future_notice_id, 1)
+
+        self.assertEqual(
+            [row["occurrence_date"] for row in self.occurrence_rows(
+                today_notice_id
+            )],
+            ["2026-07-31"]
+        )
+        self.assertEqual(self.occurrence_rows(future_notice_id), [])
+
+    def test_calendar_day_end_uses_vancouver_daylight_saving_boundary(self):
+        spring_now = datetime(2026, 3, 8, 18, 0, tzinfo=timezone.utc)
+        app.get_application_now_utc = lambda: spring_now
+        notice_id = self.create_notice()
+        self.update_notice_period(
+            notice_id,
+            effective_start="2026-03-08T08:00:00Z",
+            expires_at="2026-03-09T06:59:59Z"
+        )
+        self.configure_schedule(
+            notice_id,
+            occurrence_basis="Calendar",
+            recurrence_pattern="Daily",
+            shift_applicability="None"
+        )
+
+        app.publish_staff_notice(notice_id, 1)
+
+        occurrence = self.occurrence_rows(notice_id)[0]
+        self.assertEqual(occurrence["occurrence_date"], "2026-03-08")
+        self.assertEqual(occurrence["due_at_utc"], "2026-03-09T06:59:59Z")
+
+    def test_every_shift_creates_separate_bound_occurrences(self):
+        notice_id = self.create_notice()
+        self.make_notice_shift_scheduled(notice_id)
+        self.add_shift(10, "2026-08-01", "Day")
+        self.add_shift(11, "2026-08-01", "Day")
+
+        app.publish_staff_notice(notice_id, 1)
+
+        occurrences = self.occurrence_rows(notice_id)
+        self.assertEqual([row["shift_id"] for row in occurrences], [10, 11])
+        self.assertEqual(
+            [row["occurrence_date"] for row in occurrences],
+            ["2026-08-01", "2026-08-01"]
+        )
+        self.assertEqual(
+            [row["planned_shift_type"] for row in occurrences],
+            ["Day", "Day"]
+        )
+        self.assertTrue(all(
+            row["shift_bound_at_utc"] == self.FIXED_TIMESTAMP
+            for row in occurrences
+        ))
+        self.assertTrue(all(
+            row["occurrence_status"] == "Scheduled"
+            for row in occurrences
+        ))
+
+    def test_selected_shift_types_create_only_matching_occurrences(self):
+        notice_id = self.create_notice()
+        self.configure_schedule(
+            notice_id,
+            occurrence_basis="Shift",
+            recurrence_pattern="Daily",
+            shift_applicability="Selected Shift Types"
+        )
+        self.add_schedule_shift_types(notice_id, "Day", "Overnight")
+        self.add_shift(20, "2026-08-01", "Day")
+        self.add_shift(21, "2026-08-01", "Afternoon")
+        self.add_shift(22, "2026-08-01", "Overnight")
+
+        app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(
+            [row["shift_id"] for row in self.occurrence_rows(notice_id)],
+            [20, 22]
+        )
+
+    def test_all_approved_recurring_shift_schedule_combinations_create(self):
+        configurations = (
+            ("Once", "Every Shift", {}),
+            ("Once", "Selected Shift Types", {}),
+            ("Interval Days", "Every Shift", {
+                "interval_days": 2,
+                "recurrence_anchor_date": "2026-08-01"
+            }),
+            ("Interval Days", "Selected Shift Types", {
+                "interval_days": 2,
+                "recurrence_anchor_date": "2026-08-01"
+            }),
+            ("Selected Weekdays", "Every Shift", {}),
+            ("Selected Weekdays", "Selected Shift Types", {})
+        )
+
+        for index, (pattern, applicability, extra) in enumerate(
+            configurations,
+            start=1
+        ):
+            with self.subTest(
+                pattern=pattern,
+                applicability=applicability
+            ):
+                notice_id = self.create_notice()
+                self.configure_schedule(
+                    notice_id,
+                    occurrence_basis="Shift",
+                    recurrence_pattern=pattern,
+                    shift_applicability=applicability,
+                    **extra
+                )
+                if applicability == "Selected Shift Types":
+                    self.add_schedule_shift_types(notice_id, "Day")
+                if pattern == "Selected Weekdays":
+                    self.add_schedule_weekdays(notice_id, 5)
+                shift_id = 100 + index
+                self.add_shift(shift_id, "2026-08-01", "Day")
+
+                app.publish_staff_notice(notice_id, 1)
+
+                self.assertEqual(
+                    [row["shift_id"] for row in self.occurrence_rows(
+                        notice_id
+                    )],
+                    list(range(101, shift_id + 1))
+                )
+
+    def test_specific_shift_binds_existing_overnight_by_start_date(self):
+        notice_id = self.create_notice()
+        self.configure_schedule(
+            notice_id,
+            occurrence_basis="Shift",
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-01",
+            specific_shift_type="Overnight"
+        )
+        self.add_shift(
+            30,
+            "2026-08-01",
+            "Overnight",
+            scheduled_start_time="23:00",
+            scheduled_end_time="07:00"
+        )
+
+        app.publish_staff_notice(notice_id, 1)
+
+        occurrence = self.occurrence_rows(notice_id)[0]
+        self.assertEqual(occurrence["occurrence_date"], "2026-08-01")
+        self.assertEqual(occurrence["shift_id"], 30)
+        self.assertEqual(occurrence["is_specific_shift_occurrence"], 1)
+        self.assertEqual(occurrence["visible_from_at_utc"], "2026-08-02T06:00:00Z")
+        self.assertEqual(occurrence["due_at_utc"], "2026-08-02T14:00:00Z")
+        self.assertEqual(occurrence["due_at_is_provisional"], 1)
+
+    def test_future_specific_shift_without_record_creates_pending_shift(self):
+        notice_id = self.create_notice()
+        self.configure_schedule(
+            notice_id,
+            occurrence_basis="Shift",
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-02",
+            specific_shift_type="Overnight"
+        )
+
+        app.publish_staff_notice(notice_id, 1)
+
+        occurrence = self.occurrence_rows(notice_id)[0]
+        self.assertEqual(occurrence["occurrence_date"], "2026-08-02")
+        self.assertEqual(occurrence["planned_client_id"], 1)
+        self.assertEqual(occurrence["planned_shift_type"], "Overnight")
+        self.assertIsNone(occurrence["shift_id"])
+        self.assertEqual(occurrence["is_specific_shift_occurrence"], 1)
+        self.assertEqual(occurrence["occurrence_status"], "Pending Shift")
+        self.assertIsNone(occurrence["visible_from_at_utc"])
+        self.assertIsNone(occurrence["due_at_utc"])
+        self.assertIsNone(occurrence["shift_bound_at_utc"])
+        self.assert_no_later_publication_rows()
+
+    def test_occurrence_calculation_failure_rolls_back_publication(self):
+        notice_id = self.create_notice()
+        self.make_notice_shift_scheduled(notice_id)
+        self.add_shift(
+            40,
+            "2026-08-01",
+            "Day",
+            scheduled_start_time="invalid"
+        )
+        before = self.database_snapshot()
+
+        with self.assertRaisesRegex(ValueError, "scheduled shift start"):
+            app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_occurrence_insert_failure_rolls_back_all_publication_rows(self):
+        notice_id = self.create_notice()
+        self.make_notice_shift_scheduled(notice_id)
+        self.add_shift(50, "2026-08-01", "Day")
+        self.add_shift(51, "2026-08-01", "Afternoon")
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_occurrence_insert
+                BEFORE INSERT ON staff_notice_occurrences
+                WHEN NEW.shift_id = 51
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled occurrence failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "controlled occurrence failure"
+        ):
+            app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_occurrence_uniqueness_rejects_duplicate_schedule_identity(self):
+        notice_id = self.create_notice()
+        app.publish_staff_notice(notice_id, 1)
+        occurrence = self.occurrence_rows(notice_id)[0]
+        conn = self.open_database()
+
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("""
+                    INSERT INTO staff_notice_occurrences
+                    (
+                        schedule_id,
+                        occurrence_kind,
+                        occurrence_status,
+                        created_at_utc
+                    )
+                    VALUES (?, 'One Time', 'Scheduled', ?)
+                """, (
+                    occurrence["schedule_id"],
+                    self.FIXED_TIMESTAMP
+                ))
+        finally:
+            conn.close()
+
+    def test_occurrence_creation_adds_no_later_stage_records(self):
+        notice_id = self.create_notice()
+
+        app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(len(self.occurrence_rows(notice_id)), 1)
+        self.assert_no_later_publication_rows()
 
 
 if __name__ == "__main__":
