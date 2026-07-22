@@ -3664,6 +3664,7 @@ def _resolve_staff_notice_preview_recipients(
             "matching_shifts": [],
             "matching_shift_count": 0,
             "estimated_delivery_count": len(recipients),
+            "audience_candidates": audience_candidates,
             "blocking_errors": tuple(),
             "warnings": tuple(warnings),
             "information": tuple(information)
@@ -3711,6 +3712,7 @@ def _resolve_staff_notice_preview_recipients(
             "matching_shifts": matching_shifts,
             "matching_shift_count": len(matching_shifts),
             "estimated_delivery_count": 0,
+            "audience_candidates": audience_candidates,
             "blocking_errors": tuple(blocking_errors),
             "warnings": tuple(warnings),
             "information": tuple(information)
@@ -3817,9 +3819,145 @@ def _resolve_staff_notice_preview_recipients(
         "matching_shifts": matching_shifts,
         "matching_shift_count": len(matching_shifts),
         "estimated_delivery_count": estimated_delivery_count,
+        "audience_candidates": audience_candidates,
         "blocking_errors": tuple(blocking_errors),
         "warnings": tuple(warnings),
         "information": tuple(information)
+    }
+
+
+def _build_staff_notice_publish_preview(
+    conn,
+    notice_id,
+    actor_user_id,
+    now_utc
+):
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise PermissionError("Staff Notice management access denied.")
+    if not _is_valid_staff_notice_identifier(notice_id):
+        raise StaffNoticeNotFoundError("Staff Notice draft not found.")
+
+    now_utc = parse_staff_notice_utc_datetime(now_utc)
+
+    actor = conn.execute("""
+        SELECT user_id, role, active
+        FROM users
+        WHERE user_id = ?
+    """, (actor_user_id,)).fetchone()
+
+    if (
+        actor is None
+        or type(actor["active"]) is not int
+        or actor["active"] != 1
+        or not user_can_manage_staff_notices({
+            "user_id": actor["user_id"],
+            "role": actor["role"]
+        })
+    ):
+        raise PermissionError("Staff Notice management access denied.")
+
+    notice = _load_staff_notice_publish_record(conn, notice_id)
+
+    if notice is None:
+        raise StaffNoticeNotFoundError("Staff Notice draft not found.")
+    if notice["status"] != "Draft" or notice["draft_active"] != 1:
+        raise StaffNoticeNotEditableError(
+            "Staff Notice draft is not available for publication review."
+        )
+
+    validation = _validate_staff_notice_publication_readiness(
+        notice,
+        now_utc
+    )
+    resolution = _resolve_staff_notice_preview_recipients(
+        conn,
+        notice,
+        validation
+    )
+    blocking_errors = list(validation["blocking_errors"])
+    warnings = list(validation["warnings"])
+    information = list(validation["information"])
+
+    for message in resolution["blocking_errors"]:
+        _append_staff_notice_preview_message(blocking_errors, message)
+    for message in resolution["warnings"]:
+        _append_staff_notice_preview_message(warnings, message)
+    for message in resolution["information"]:
+        _append_staff_notice_preview_message(information, message)
+
+    if notice["schedule"] is None:
+        acknowledgement_description = (
+            "Acknowledgement frequency cannot be determined until a "
+            "complete schedule is configured."
+        )
+    elif notice["schedule"]["occurrence_basis"] == "One Time":
+        acknowledgement_description = (
+            "Every assigned recipient will require one acknowledgement."
+        )
+    elif notice["schedule"]["occurrence_basis"] == "Calendar":
+        acknowledgement_description = (
+            "Every assigned recipient will require a separate "
+            "acknowledgement for each applicable calendar occurrence."
+        )
+    elif notice["schedule"]["occurrence_basis"] == "Shift":
+        acknowledgement_description = (
+            "Every assigned recipient will require a separate "
+            "acknowledgement for each applicable actual shift. No final "
+            "shift deadline is claimed by this preview."
+        )
+    else:
+        acknowledgement_description = (
+            "Acknowledgement frequency cannot be determined from the "
+            "saved schedule."
+        )
+
+    try:
+        summary = build_staff_notice_plain_language_summary(notice)
+    except (IndexError, KeyError, TypeError, ValueError):
+        summary = {
+            "scope": (
+                notice.get("client_name")
+                if notice.get("client_id") is not None
+                else "Organization-wide"
+            ),
+            "audience": "See publication-readiness findings",
+            "schedule": "See publication-readiness findings",
+            "period": "See publication-readiness findings",
+            "priority": notice.get("priority") or "Unknown",
+            "state": "Active draft"
+        }
+
+    return {
+        "notice": notice,
+        "summary": summary,
+        "preview_generated_at_local": format_staff_notice_local_datetime(
+            now_utc
+        ),
+        "effective_start_local": (
+            format_staff_notice_local_datetime(
+                notice["effective_start_at_utc"]
+            ) if validation["effective_start"] is not None else None
+        ),
+        "expires_local": (
+            format_staff_notice_local_datetime(
+                notice["expires_at_utc"]
+            ) if validation["expires_at"] is not None else None
+        ),
+        "blocking_errors": tuple(blocking_errors),
+        "warnings": tuple(warnings),
+        "information": tuple(information),
+        "ready_for_publication": not blocking_errors,
+        "acknowledgement_description": acknowledgement_description,
+        "recipients": resolution["recipients"],
+        "recipient_count": resolution["recipient_count"],
+        "matching_shifts": resolution["matching_shifts"],
+        "matching_shift_count": resolution["matching_shift_count"],
+        "estimated_delivery_count": resolution[
+            "estimated_delivery_count"
+        ],
+        "_publication_audience_candidates": resolution[
+            "audience_candidates"
+        ]
     }
 
 
@@ -3841,125 +3979,17 @@ def get_staff_notice_publish_preview(
     conn = get_db()
 
     try:
-        actor = conn.execute("""
-            SELECT user_id, role, active
-            FROM users
-            WHERE user_id = ?
-        """, (actor_user_id,)).fetchone()
-
-        if (
-            actor is None
-            or type(actor["active"]) is not int
-            or actor["active"] != 1
-            or not user_can_manage_staff_notices({
-                "user_id": actor["user_id"],
-                "role": actor["role"]
-            })
-        ):
-            raise PermissionError("Staff Notice management access denied.")
-
-        notice = _load_staff_notice_publish_record(conn, notice_id)
-
-        if notice is None:
-            raise StaffNoticeNotFoundError("Staff Notice draft not found.")
-        if notice["status"] != "Draft" or notice["draft_active"] != 1:
-            raise StaffNoticeNotEditableError(
-                "Staff Notice draft is not available for publication review."
-            )
-
-        validation = _validate_staff_notice_publication_readiness(
-            notice,
+        preview = _build_staff_notice_publish_preview(
+            conn,
+            notice_id,
+            actor_user_id,
             now_utc
         )
-        resolution = _resolve_staff_notice_preview_recipients(
-            conn,
-            notice,
-            validation
-        )
-        blocking_errors = list(validation["blocking_errors"])
-        warnings = list(validation["warnings"])
-        information = list(validation["information"])
-
-        for message in resolution["blocking_errors"]:
-            _append_staff_notice_preview_message(blocking_errors, message)
-        for message in resolution["warnings"]:
-            _append_staff_notice_preview_message(warnings, message)
-        for message in resolution["information"]:
-            _append_staff_notice_preview_message(information, message)
-
-        if notice["schedule"] is None:
-            acknowledgement_description = (
-                "Acknowledgement frequency cannot be determined until a "
-                "complete schedule is configured."
-            )
-        elif notice["schedule"]["occurrence_basis"] == "One Time":
-            acknowledgement_description = (
-                "Every assigned recipient will require one acknowledgement."
-            )
-        elif notice["schedule"]["occurrence_basis"] == "Calendar":
-            acknowledgement_description = (
-                "Every assigned recipient will require a separate "
-                "acknowledgement for each applicable calendar occurrence."
-            )
-        elif notice["schedule"]["occurrence_basis"] == "Shift":
-            acknowledgement_description = (
-                "Every assigned recipient will require a separate "
-                "acknowledgement for each applicable actual shift. No final "
-                "shift deadline is claimed by this preview."
-            )
-        else:
-            acknowledgement_description = (
-                "Acknowledgement frequency cannot be determined from the "
-                "saved schedule."
-            )
-
-        try:
-            summary = build_staff_notice_plain_language_summary(notice)
-        except (IndexError, KeyError, TypeError, ValueError):
-            summary = {
-                "scope": (
-                    notice.get("client_name")
-                    if notice.get("client_id") is not None
-                    else "Organization-wide"
-                ),
-                "audience": "See publication-readiness findings",
-                "schedule": "See publication-readiness findings",
-                "period": "See publication-readiness findings",
-                "priority": notice.get("priority") or "Unknown",
-                "state": "Active draft"
-            }
-
-        return {
-            "notice": notice,
-            "summary": summary,
-            "preview_generated_at_local": format_staff_notice_local_datetime(
-                now_utc
-            ),
-            "effective_start_local": (
-                format_staff_notice_local_datetime(
-                    notice["effective_start_at_utc"]
-                ) if validation["effective_start"] is not None else None
-            ),
-            "expires_local": (
-                format_staff_notice_local_datetime(
-                    notice["expires_at_utc"]
-                ) if validation["expires_at"] is not None else None
-            ),
-            "blocking_errors": tuple(blocking_errors),
-            "warnings": tuple(warnings),
-            "information": tuple(information),
-            "ready_for_publication": not blocking_errors,
-            "acknowledgement_description": acknowledgement_description,
-            "recipients": resolution["recipients"],
-            "recipient_count": resolution["recipient_count"],
-            "matching_shifts": resolution["matching_shifts"],
-            "matching_shift_count": resolution["matching_shift_count"],
-            "estimated_delivery_count": resolution[
-                "estimated_delivery_count"
-            ]
-        }
     finally:
         conn.close()
+
+    preview.pop("_publication_audience_candidates", None)
+    return preview
 
 
 def _staff_notice_management_choices(conn, notice=None):

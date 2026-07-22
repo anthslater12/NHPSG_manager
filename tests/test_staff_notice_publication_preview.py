@@ -5,6 +5,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import app
 import add_staff_notices_tables as staff_notice_schema
@@ -60,6 +61,40 @@ class DuplicateParentRowsConnection:
 
     def close(self):
         self.connection.close()
+
+
+class PreviewWrapperConnection:
+
+    def __init__(self, close_error=None):
+        self.close_calls = 0
+        self.close_error = close_error
+
+    def close(self):
+        self.close_calls += 1
+
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class PreviewCalculationConnection:
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.close_calls = 0
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    def execute(self, sql, parameters=()):
+        return self.connection.execute(sql, parameters)
+
+    def close(self):
+        self.close_calls += 1
+
+    def commit(self):
+        self.commit_calls += 1
+
+    def rollback(self):
+        self.rollback_calls += 1
 
 
 class StaffNoticePublicationPreviewTests(unittest.TestCase):
@@ -475,6 +510,272 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
         self.assertIn("Publication is blocked", html)
         self.assertEqual(self.database_snapshot(), before)
         return html
+
+    def test_public_wrapper_owns_exactly_one_connection(self):
+        wrapper_connection = PreviewWrapperConnection()
+        internal_result = {
+            "public_value": "unchanged",
+            "_publication_audience_candidates": {4: {"user_id": 4}}
+        }
+
+        with mock.patch.object(
+            app,
+            "get_db",
+            return_value=wrapper_connection
+        ) as get_db_mock, mock.patch.object(
+            app,
+            "_build_staff_notice_publish_preview",
+            return_value=internal_result
+        ) as calculation_mock:
+            result = app.get_staff_notice_publish_preview(
+                9,
+                1,
+                self.FIXED_NOW
+            )
+
+        get_db_mock.assert_called_once_with()
+        calculation_mock.assert_called_once_with(
+            wrapper_connection,
+            9,
+            1,
+            self.FIXED_NOW
+        )
+        self.assertEqual(wrapper_connection.close_calls, 1)
+        self.assertEqual(result, {"public_value": "unchanged"})
+
+    def test_public_wrapper_closes_connection_after_calculation_failure(self):
+        wrapper_connection = PreviewWrapperConnection()
+        calculation_error = ValueError("calculation failed")
+
+        with mock.patch.object(
+            app,
+            "get_db",
+            return_value=wrapper_connection
+        ) as get_db_mock, mock.patch.object(
+            app,
+            "_build_staff_notice_publish_preview",
+            side_effect=calculation_error
+        ):
+            with self.assertRaises(ValueError) as raised:
+                app.get_staff_notice_publish_preview(
+                    9,
+                    1,
+                    self.FIXED_NOW
+                )
+
+        get_db_mock.assert_called_once_with()
+        self.assertIs(raised.exception, calculation_error)
+        self.assertEqual(wrapper_connection.close_calls, 1)
+
+    def test_public_wrapper_preserves_existing_close_error_behavior(self):
+        calculation_error = ValueError("calculation failed")
+        close_error = RuntimeError("close failed")
+        wrapper_connection = PreviewWrapperConnection(close_error)
+
+        with mock.patch.object(
+            app,
+            "get_db",
+            return_value=wrapper_connection
+        ), mock.patch.object(
+            app,
+            "_build_staff_notice_publish_preview",
+            side_effect=calculation_error
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                app.get_staff_notice_publish_preview(
+                    9,
+                    1,
+                    self.FIXED_NOW
+                )
+
+        self.assertIs(raised.exception, close_error)
+        self.assertIs(raised.exception.__context__, calculation_error)
+        self.assertEqual(wrapper_connection.close_calls, 1)
+
+    def test_public_wrapper_surfaces_close_error_after_success(self):
+        close_error = RuntimeError("close failed")
+        wrapper_connection = PreviewWrapperConnection(close_error)
+
+        with mock.patch.object(
+            app,
+            "get_db",
+            return_value=wrapper_connection
+        ), mock.patch.object(
+            app,
+            "_build_staff_notice_publish_preview",
+            return_value={"public_value": "unchanged"}
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                app.get_staff_notice_publish_preview(
+                    9,
+                    1,
+                    self.FIXED_NOW
+                )
+
+        self.assertIs(raised.exception, close_error)
+        self.assertEqual(wrapper_connection.close_calls, 1)
+
+    def test_internal_calculation_uses_but_does_not_own_connection(self):
+        notice_id = self.create_notice()
+        raw_connection = sqlite3.connect(self.database_path)
+        raw_connection.row_factory = sqlite3.Row
+        self.addCleanup(raw_connection.close)
+        supplied_connection = PreviewCalculationConnection(raw_connection)
+        before = self.database_snapshot()
+        self.assertFalse(raw_connection.in_transaction)
+
+        with mock.patch.object(
+            app,
+            "get_db",
+            side_effect=AssertionError("internal helper opened a connection")
+        ):
+            preview = app._build_staff_notice_publish_preview(
+                supplied_connection,
+                notice_id,
+                1,
+                self.FIXED_NOW
+            )
+
+        self.assertTrue(preview["ready_for_publication"])
+        self.assertEqual(supplied_connection.close_calls, 0)
+        self.assertEqual(supplied_connection.commit_calls, 0)
+        self.assertEqual(supplied_connection.rollback_calls, 0)
+        self.assertFalse(raw_connection.in_transaction)
+        self.assertEqual(
+            supplied_connection.execute("SELECT 1").fetchone()[0],
+            1
+        )
+        self.assertEqual(self.database_snapshot(), before)
+        self.assert_no_derived_rows()
+
+    def test_internal_calculation_failure_does_not_own_connection(self):
+        notice_id = self.create_notice()
+        raw_connection = sqlite3.connect(self.database_path)
+        raw_connection.row_factory = sqlite3.Row
+        self.addCleanup(raw_connection.close)
+        supplied_connection = PreviewCalculationConnection(raw_connection)
+        before = self.database_snapshot()
+        self.assertFalse(raw_connection.in_transaction)
+
+        with mock.patch.object(
+            app,
+            "get_db",
+            side_effect=AssertionError("internal helper opened a connection")
+        ):
+            with self.assertRaises(PermissionError):
+                app._build_staff_notice_publish_preview(
+                    supplied_connection,
+                    notice_id,
+                    4,
+                    self.FIXED_NOW
+                )
+
+        self.assertEqual(supplied_connection.close_calls, 0)
+        self.assertEqual(supplied_connection.commit_calls, 0)
+        self.assertEqual(supplied_connection.rollback_calls, 0)
+        self.assertFalse(raw_connection.in_transaction)
+        self.assertEqual(
+            supplied_connection.execute("SELECT 1").fetchone()[0],
+            1
+        )
+        self.assertEqual(self.database_snapshot(), before)
+        self.assert_no_derived_rows()
+
+    def test_internal_calculation_exposes_complete_non_shift_candidates(self):
+        notice_id = self.create_notice(
+            audience_rules=(
+                {"rule_type": "All Support Workers"},
+                {
+                    "rule_type": "Selected Role",
+                    "role_name": "Support Worker"
+                },
+                {"rule_type": "Applicable Shift Staff"}
+            ),
+            schedule={
+                "occurrence_basis": "Shift",
+                "recurrence_pattern": "Daily",
+                "shift_applicability": "Every Shift"
+            }
+        )
+        self.add_shift(
+            1,
+            "2026-08-01",
+            "Day",
+            staff=((4, 1), (6, 1), (8, 1))
+        )
+        conn = app.get_db()
+
+        try:
+            internal_preview = app._build_staff_notice_publish_preview(
+                conn,
+                notice_id,
+                1,
+                self.FIXED_NOW
+            )
+        finally:
+            conn.close()
+
+        candidates = internal_preview[
+            "_publication_audience_candidates"
+        ]
+        self.assertEqual(set(candidates), {4, 7})
+        self.assertEqual(
+            candidates[4]["qualification_sources"],
+            [
+                "All Support Workers",
+                "Selected Role: Support Worker"
+            ]
+        )
+        self.assertEqual(
+            len(candidates[4]["qualification_sources"]),
+            len(set(candidates[4]["qualification_sources"]))
+        )
+        self.assertNotIn(6, candidates)
+        self.assertNotIn(8, candidates)
+        self.assertEqual(
+            {recipient["user_id"] for recipient in internal_preview["recipients"]},
+            {4, 8}
+        )
+        self.assertNotIn(
+            7,
+            {
+                recipient["user_id"]
+                for recipient in internal_preview["recipients"]
+            }
+        )
+        self.assertEqual(internal_preview["estimated_delivery_count"], 2)
+
+        public_preview = self.preview(notice_id)
+        self.assertNotIn(
+            "_publication_audience_candidates",
+            public_preview
+        )
+
+        self.login(1, "Admin")
+        html = self.client.get(
+            f"/staff-notices/{notice_id}/review"
+        ).get_data(as_text=True)
+        self.assertNotIn("_publication_audience_candidates", html)
+        self.assertNotIn("Support Worker Two", html)
+
+    def test_internal_blocked_calculation_is_completely_read_only(self):
+        notice_id = self.create_notice(schedule=False)
+        conn = app.get_db()
+        before = self.database_snapshot()
+
+        try:
+            preview = app._build_staff_notice_publish_preview(
+                conn,
+                notice_id,
+                1,
+                self.FIXED_NOW
+            )
+        finally:
+            conn.close()
+
+        self.assertFalse(preview["ready_for_publication"])
+        self.assertEqual(self.database_snapshot(), before)
+        self.assert_no_derived_rows()
 
     def test_unauthenticated_request_redirects_to_login(self):
         notice_id = self.create_notice()
