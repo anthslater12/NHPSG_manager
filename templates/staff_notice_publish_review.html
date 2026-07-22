@@ -13,6 +13,23 @@
         </strong>
     </p>
 
+    {% if publication_result == "blocked" %}
+        <div class="error-message">
+            Publication remains blocked. Review the current readiness
+            findings below.
+        </div>
+    {% elif publication_result == "invalid_form" %}
+        <div class="error-message">
+            The publication request was invalid. Reload this preview before
+            trying again.
+        </div>
+    {% elif publication_result == "failed" %}
+        <div class="error-message">
+            The Staff Notice could not be published. No publication changes
+            were saved.
+        </div>
+    {% endif %}
+
     <p>
         Preview generated {{ preview_generated_at_local }}
         (America/Vancouver).
@@ -275,6 +292,23 @@
 
     <h3>Navigation</h3>
 
+    {% if ready_for_publication %}
+        <form
+            method="post"
+            action="{{ url_for(
+                'staff_notice_publish',
+                notice_id=notice.notice_id
+            ) }}"
+        >
+            <input
+                type="hidden"
+                name="expected_updated_at_utc"
+                value="{{ expected_updated_at_utc }}"
+            >
+            <button type="submit">Publish Staff Notice</button>
+        </form>
+    {% endif %}
+
     <p>
         <a href="{{ url_for(
             'staff_notice_admin_detail',
@@ -291,10 +325,6 @@
         ) }}">
             Edit Draft
         </a>
-    </p>
-
-    <p>
-        Actual publication belongs to a later controlled checkpoint.
     </p>
 
 </div>

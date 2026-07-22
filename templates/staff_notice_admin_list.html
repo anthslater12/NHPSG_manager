@@ -6,6 +6,21 @@
 
     <h2>Staff Notice Drafts</h2>
 
+    {% if publication_result == "published" %}
+        <p class="status-active">
+            Staff Notice published successfully.
+        </p>
+    {% elif publication_result == "conflict" %}
+        <div class="error-message">
+            The Staff Notice is no longer available for publication. No
+            duplicate publication was created.
+        </div>
+    {% elif publication_result == "not_found" %}
+        <div class="error-message">
+            The Staff Notice draft could not be found.
+        </div>
+    {% endif %}
+
     <p>
         <a href="{{ url_for('staff_notice_new') }}">
             + Create Staff Notice Draft

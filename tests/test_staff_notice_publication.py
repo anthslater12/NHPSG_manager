@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from werkzeug.datastructures import MultiDict
 
 import app
 import add_staff_notices_tables as staff_notice_schema
@@ -616,6 +617,244 @@ class StaffNoticePublicationTests(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
+
+    def publication_client(self, user_id, session_role=None):
+        client = app.app.test_client()
+
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = user_id
+            session_data["role"] = session_role or "Admin"
+
+        return client
+
+    def publication_form(self, notice_id):
+        notice = self.notice_row(notice_id)
+        return {
+            "expected_updated_at_utc": (
+                notice["updated_at_utc"] or notice["created_at_utc"]
+            )
+        }
+
+    def test_post_route_publishes_with_current_database_authorization(self):
+        notice_id = self.create_notice()
+        client = self.publication_client(2, session_role="Support Worker")
+
+        response = client.post(
+            f"/staff-notices/{notice_id}/publish",
+            data=self.publication_form(notice_id)
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(
+            "/staff-notices/manage?publication_result=published",
+            response.headers["Location"]
+        )
+        notice = self.notice_row(notice_id)
+        self.assertEqual(notice["status"], "Published")
+        self.assertEqual(notice["published_by_user_id"], 2)
+        self.assertEqual(len(self.eligibility_rows(notice_id)), 1)
+        self.assertEqual(len(self.occurrence_rows(notice_id)), 1)
+        self.assertEqual(len(self.delivery_rows(notice_id)), 1)
+        self.assertEqual(self.delivery_history_rows(notice_id), [])
+        self.assert_no_later_publication_rows()
+
+    def test_all_active_management_roles_can_publish_through_route(self):
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                INSERT INTO users (user_id, full_name, role, active)
+                VALUES (5, 'Active Director', 'Director', 1)
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        for user_id in (1, 2, 5):
+            with self.subTest(user_id=user_id):
+                notice_id = self.create_notice()
+                response = self.publication_client(user_id).post(
+                    f"/staff-notices/{notice_id}/publish",
+                    data=self.publication_form(notice_id)
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    self.notice_row(notice_id)["published_by_user_id"],
+                    user_id
+                )
+
+    def test_route_rejects_inactive_and_unauthorized_database_users(self):
+        for user_id in (3, 4):
+            with self.subTest(user_id=user_id):
+                notice_id = self.create_notice()
+                response = self.publication_client(
+                    user_id,
+                    session_role="Admin"
+                ).post(
+                    f"/staff-notices/{notice_id}/publish",
+                    data=self.publication_form(notice_id)
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(
+                    self.notice_row(notice_id)["status"],
+                    "Draft"
+                )
+                self.assertEqual(self.eligibility_rows(notice_id), [])
+                self.assertEqual(self.occurrence_rows(notice_id), [])
+                self.assertEqual(self.delivery_rows(notice_id), [])
+
+    def test_publication_route_rejects_get_and_requires_login(self):
+        notice_id = self.create_notice()
+        self.assertEqual(
+            app.app.test_client().get(
+                f"/staff-notices/{notice_id}/publish"
+            ).status_code,
+            405
+        )
+        response = app.app.test_client().post(
+            f"/staff-notices/{notice_id}/publish",
+            data=self.publication_form(notice_id)
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.headers["Location"].endswith("/login"))
+        self.assertEqual(self.notice_row(notice_id)["status"], "Draft")
+
+    def test_route_rejects_missing_invalid_and_tampered_form_values(self):
+        client = self.publication_client(1)
+
+        for data in (
+            {},
+            {"expected_updated_at_utc": ""},
+            {
+                "expected_updated_at_utc": "2026-07-30T19:00:00Z",
+                "title": "Browser replacement"
+            },
+            MultiDict([
+                ("expected_updated_at_utc", "2026-07-30T19:00:00Z"),
+                ("expected_updated_at_utc", "2026-07-30T19:00:00Z")
+            ])
+        ):
+            with self.subTest(data=data):
+                notice_id = self.create_notice()
+                response = client.post(
+                    f"/staff-notices/{notice_id}/publish",
+                    data=data
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertIn("publication_result=invalid_form", response.headers[
+                    "Location"
+                ])
+                notice = self.notice_row(notice_id)
+                self.assertEqual(notice["title"], "Publication Foundation")
+                self.assertEqual(notice["status"], "Draft")
+                self.assertEqual(self.eligibility_rows(notice_id), [])
+                self.assertEqual(self.occurrence_rows(notice_id), [])
+                self.assertEqual(self.delivery_rows(notice_id), [])
+
+    def test_route_rejects_missing_notice_and_readiness_blockers(self):
+        client = self.publication_client(1)
+        missing = client.post(
+            "/staff-notices/999/publish",
+            data={"expected_updated_at_utc": "2026-07-30T19:00:00Z"}
+        )
+        self.assertIn("publication_result=not_found", missing.headers["Location"])
+
+        notice_id = self.create_notice(audience=False)
+        blocked = client.post(
+            f"/staff-notices/{notice_id}/publish",
+            data=self.publication_form(notice_id)
+        )
+        self.assertEqual(blocked.status_code, 302)
+        self.assertIn("publication_result=blocked", blocked.headers["Location"])
+        self.assertEqual(self.notice_row(notice_id)["status"], "Draft")
+        self.assertEqual(self.eligibility_rows(notice_id), [])
+        self.assertEqual(self.occurrence_rows(notice_id), [])
+        self.assertEqual(self.delivery_rows(notice_id), [])
+
+    def test_stale_and_repeated_route_submissions_cannot_republish(self):
+        stale_notice_id = self.create_notice()
+        stale_form = self.publication_form(stale_notice_id)
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                UPDATE staff_notices
+                SET updated_at_utc = '2026-07-30T20:00:00Z',
+                    updated_by_user_id = 1
+                WHERE notice_id = ?
+            """, (stale_notice_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        client = self.publication_client(1)
+        stale = client.post(
+            f"/staff-notices/{stale_notice_id}/publish",
+            data=stale_form
+        )
+        self.assertIn("publication_result=conflict", stale.headers["Location"])
+        self.assertEqual(self.notice_row(stale_notice_id)["status"], "Draft")
+        self.assertEqual(self.eligibility_rows(stale_notice_id), [])
+
+        notice_id = self.create_notice()
+        form = self.publication_form(notice_id)
+        first = client.post(f"/staff-notices/{notice_id}/publish", data=form)
+        second = client.post(f"/staff-notices/{notice_id}/publish", data=form)
+        self.assertIn("publication_result=published", first.headers["Location"])
+        self.assertIn("publication_result=conflict", second.headers["Location"])
+        self.assertEqual(len(self.eligibility_rows(notice_id)), 1)
+        self.assertEqual(len(self.occurrence_rows(notice_id)), 1)
+        self.assertEqual(len(self.delivery_rows(notice_id)), 1)
+
+    def test_route_returns_safe_feedback_for_unexpected_service_failure(self):
+        notice_id = self.create_notice()
+        client = self.publication_client(1)
+
+        with mock.patch.object(
+            app,
+            "publish_staff_notice",
+            side_effect=RuntimeError("sensitive database detail")
+        ):
+            response = client.post(
+                f"/staff-notices/{notice_id}/publish",
+                data=self.publication_form(notice_id),
+                follow_redirects=True
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"could not be published", response.data)
+        self.assertNotIn(b"sensitive database detail", response.data)
+        self.assertEqual(self.notice_row(notice_id)["status"], "Draft")
+        self.assertEqual(self.eligibility_rows(notice_id), [])
+        self.assertEqual(self.occurrence_rows(notice_id), [])
+        self.assertEqual(self.delivery_rows(notice_id), [])
+
+    def test_preview_publish_control_is_read_only_and_visibility_gated(self):
+        client = self.publication_client(1)
+        ready_notice_id = self.create_notice()
+        ready = client.get(f"/staff-notices/{ready_notice_id}/review")
+        ready_html = ready.data.decode("utf-8")
+
+        self.assertIn("This is a read-only preview", ready_html)
+        self.assertIn(
+            f'action="/staff-notices/{ready_notice_id}/publish"',
+            ready_html
+        )
+        self.assertIn("Publish Staff Notice", ready_html)
+        self.assertEqual(ready_html.count("<form"), 1)
+        self.assertEqual(ready_html.count('name="expected_updated_at_utc"'), 1)
+        self.assertNotIn('name="title"', ready_html)
+        self.assertNotIn('name="notice_text"', ready_html)
+
+        blocked_notice_id = self.create_notice(audience=False)
+        blocked_html = client.get(
+            f"/staff-notices/{blocked_notice_id}/review"
+        ).data.decode("utf-8")
+        self.assertNotIn("Publish Staff Notice", blocked_html)
+        self.assertNotIn(
+            f'action="/staff-notices/{blocked_notice_id}/publish"',
+            blocked_html
+        )
 
     def test_successful_publication_creates_initial_eligibility(self):
         notice_id = self.create_notice()

@@ -2096,31 +2096,34 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
             html.index("<h2>Staff Notice Publication Preview"):
             html.index('<div class="footer">')
         ].lower()
-        self.assertNotIn("<form", preview_html)
-        self.assertNotIn("method=\"post\"", preview_html)
-        self.assertNotIn("<button", preview_html)
-        self.assertNotIn("type=\"submit\"", preview_html)
-        self.assertNotIn("type='submit'", preview_html)
-        self.assertNotIn("/publish", preview_html)
-        self.assertIn("later controlled checkpoint", html)
+        self.assertEqual(preview_html.count("<form"), 1)
+        self.assertIn('method="post"', preview_html)
+        self.assertIn("<button", preview_html)
+        self.assertIn("publish staff notice", preview_html)
+        self.assertIn(f"/staff-notices/{notice_id}/publish", preview_html)
+        self.assertEqual(
+            preview_html.count('name="expected_updated_at_utc"'),
+            1
+        )
+        self.assertNotIn('name="title"', preview_html)
+        self.assertNotIn('name="notice_text"', preview_html)
         template_source = Path(
             "templates/staff_notice_publish_review.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("<script", template_source.lower())
         self.assertNotIn("|safe", template_source)
-        self.assertNotIn("<form", template_source.lower())
-        self.assertNotIn("<button", template_source.lower())
+        self.assertIn("<form", template_source.lower())
+        self.assertIn("<button", template_source.lower())
         self.assertIsNone(re.search(
             r"<input\b[^>]*\btype\s*=\s*(['\"])submit\1",
             template_source,
             re.IGNORECASE
         ))
-        self.assertIsNone(re.search(
+        self.assertIsNotNone(re.search(
             r"url_for\s*\(\s*['\"][^'\"]*publish[^'\"]*['\"]",
             template_source,
             re.IGNORECASE
         ))
-        self.assertNotIn("/publish", template_source.lower())
 
     def test_detail_has_review_link_only_for_active_draft(self):
         active_id = self.create_notice()

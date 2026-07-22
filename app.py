@@ -372,6 +372,10 @@ STAFF_NOTICE_CREATE_FORM_KEYS = (
     - {"expected_updated_at_utc"}
 )
 
+STAFF_NOTICE_PUBLICATION_FORM_KEYS = frozenset({
+    "expected_updated_at_utc"
+})
+
 STAFF_NOTICE_SCALAR_FORM_KEYS = frozenset({
     "title",
     "notice_text",
@@ -4560,7 +4564,8 @@ def _publish_staff_notice_in_transaction(
     conn,
     notice_id,
     actor_user_id,
-    now_utc
+    now_utc,
+    expected_updated_at_utc=None
 ):
     if not conn.in_transaction:
         raise RuntimeError(
@@ -4574,6 +4579,16 @@ def _publish_staff_notice_in_transaction(
         actor_user_id,
         now_utc
     )
+
+    if (
+        expected_updated_at_utc is not None
+        and _staff_notice_draft_token(preview["notice"])
+        != expected_updated_at_utc
+    ):
+        raise StaffNoticeStalePublicationError(
+            "This Staff Notice draft changed after publication review. "
+            "Reload it and review the current draft before publishing."
+        )
 
     if not preview["ready_for_publication"]:
         raise StaffNoticePublicationNotReadyError(
@@ -4628,7 +4643,11 @@ def _publish_staff_notice_in_transaction(
     }
 
 
-def publish_staff_notice(notice_id, actor_user_id):
+def publish_staff_notice(
+    notice_id,
+    actor_user_id,
+    expected_updated_at_utc=None
+):
     if not _is_valid_staff_notice_identifier(actor_user_id):
         raise PermissionError("Staff Notice management access denied.")
     if not _is_valid_staff_notice_identifier(notice_id):
@@ -4645,7 +4664,8 @@ def publish_staff_notice(notice_id, actor_user_id):
             conn,
             notice_id,
             actor_user_id,
-            get_application_now_utc()
+            get_application_now_utc(),
+            expected_updated_at_utc
         )
         conn.commit()
         commit_succeeded = True
@@ -4834,7 +4854,8 @@ def staff_notice_admin_list():
 
     return render_template(
         "staff_notice_admin_list.html",
-        notices=notices
+        notices=notices,
+        publication_result=request.args.get("publication_result")
     )
 
 
@@ -4963,8 +4984,74 @@ def staff_notice_publish_review(notice_id):
 
     return render_template(
         "staff_notice_publish_review.html",
+        expected_updated_at_utc=_staff_notice_draft_token(
+            preview["notice"]
+        ),
+        publication_result=request.args.get("publication_result"),
         **preview
     )
+
+
+@app.route(
+    "/staff-notices/<int:notice_id>/publish",
+    methods=["POST"]
+)
+def staff_notice_publish(notice_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    try:
+        if set(request.form.keys()) != STAFF_NOTICE_PUBLICATION_FORM_KEYS:
+            raise ValueError("Invalid Staff Notice publication form.")
+
+        expected_updated_at_utc = _staff_notice_single_form_value(
+            request.form,
+            "expected_updated_at_utc",
+            required=True
+        )
+        result = publish_staff_notice(
+            notice_id,
+            session["user_id"],
+            expected_updated_at_utc
+        )
+    except StaffNoticePublicationCommittedCloseError as error:
+        result = {"notice_id": error.notice_id}
+    except PermissionError:
+        return "Access denied", 403
+    except StaffNoticeNotFoundError:
+        return redirect(url_for(
+            "staff_notice_admin_list",
+            publication_result="not_found"
+        ))
+    except (StaffNoticeNotEditableError, StaffNoticeStalePublicationError):
+        return redirect(url_for(
+            "staff_notice_admin_list",
+            publication_result="conflict"
+        ))
+    except StaffNoticePublicationNotReadyError:
+        return redirect(url_for(
+            "staff_notice_publish_review",
+            notice_id=notice_id,
+            publication_result="blocked"
+        ))
+    except ValueError:
+        return redirect(url_for(
+            "staff_notice_publish_review",
+            notice_id=notice_id,
+            publication_result="invalid_form"
+        ))
+    except Exception:
+        return redirect(url_for(
+            "staff_notice_publish_review",
+            notice_id=notice_id,
+            publication_result="failed"
+        ))
+
+    return redirect(url_for(
+        "staff_notice_admin_list",
+        publication_result="published",
+        notice_id=result["notice_id"]
+    ))
 
 
 @app.route(
