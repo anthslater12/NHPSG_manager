@@ -10,7 +10,6 @@ import add_staff_notices_tables as staff_notice_schema
 
 
 LATER_PUBLICATION_TABLES = (
-    "staff_notice_deliveries",
     "staff_notice_delivery_history",
     "acknowledgements",
     "activity_log"
@@ -34,6 +33,7 @@ class PublicationTrackingConnection:
         self.begin_calls = 0
         self.eligibility_insert_calls = 0
         self.occurrence_insert_calls = 0
+        self.delivery_insert_calls = 0
         self.update_calls = 0
         self.commit_calls = 0
         self.rollback_calls = 0
@@ -56,6 +56,10 @@ class PublicationTrackingConnection:
             "INSERT INTO staff_notice_occurrences"
         ):
             self.occurrence_insert_calls += 1
+        if normalized_sql.startswith(
+            "INSERT INTO staff_notice_deliveries"
+        ):
+            self.delivery_insert_calls += 1
         if normalized_sql.startswith(
             "UPDATE staff_notices SET status = 'Published'"
         ):
@@ -345,6 +349,53 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def delivery_rows(self, notice_id):
+        conn = self.open_database()
+
+        try:
+            return [
+                dict(row)
+                for row in conn.execute("""
+                    SELECT
+                        d.*,
+                        o.occurrence_kind,
+                        o.occurrence_date,
+                        o.shift_id,
+                        o.due_at_utc
+                    FROM staff_notice_deliveries d
+                    JOIN staff_notice_occurrences o
+                        ON d.occurrence_id = o.occurrence_id
+                    JOIN staff_notice_schedules s
+                        ON o.schedule_id = s.schedule_id
+                    WHERE s.notice_id = ?
+                    ORDER BY d.occurrence_id, d.user_id
+                """, (notice_id,)).fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def delivery_history_rows(self, notice_id):
+        conn = self.open_database()
+
+        try:
+            return [
+                dict(row)
+                for row in conn.execute("""
+                    SELECT h.*
+                    FROM staff_notice_delivery_history h
+                    JOIN staff_notice_deliveries d
+                        ON h.delivery_id = d.delivery_id
+                    JOIN staff_notice_occurrences o
+                        ON d.occurrence_id = o.occurrence_id
+                    JOIN staff_notice_schedules s
+                        ON o.schedule_id = s.schedule_id
+                    WHERE s.notice_id = ?
+                    ORDER BY h.delivery_history_id
+                """, (notice_id,)).fetchall()
+            ]
+        finally:
+            conn.close()
+
     def update_notice_period(
         self,
         notice_id,
@@ -476,6 +527,25 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def add_shift_assignment(
+        self,
+        shift_id,
+        user_id,
+        *,
+        active=1
+    ):
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                INSERT INTO shift_staff
+                (shift_id, user_id, active)
+                VALUES (?, ?, ?)
+            """, (shift_id, user_id, active))
+            conn.commit()
+        finally:
+            conn.close()
+
     def database_snapshot(self):
         conn = self.open_database()
 
@@ -597,6 +667,30 @@ class StaffNoticePublicationTests(unittest.TestCase):
             occurrences[0]["created_at_utc"],
             self.FIXED_TIMESTAMP
         )
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(deliveries[0]["user_id"], 4)
+        self.assertEqual(deliveries[0]["occurrence_id"], occurrences[0][
+            "occurrence_id"
+        ])
+        self.assertEqual(deliveries[0]["requirement_status"], "Required")
+        self.assertEqual(
+            deliveries[0]["assigned_at_utc"],
+            self.FIXED_TIMESTAMP
+        )
+        self.assertEqual(
+            deliveries[0]["eligibility_cutoff_at_utc"],
+            "2026-08-01T08:00:00Z"
+        )
+        self.assertIsNone(deliveries[0]["first_viewed_at_utc"])
+        self.assertIsNone(deliveries[0]["viewed_by_user_id"])
+        self.assertEqual(deliveries[0]["recipient_access"], 1)
+        self.assertIsNone(deliveries[0]["status_changed_at_utc"])
+        self.assertIsNone(deliveries[0]["status_changed_by_user_id"])
+        self.assertIsNone(deliveries[0]["current_reason_code"])
+        self.assertIsNone(deliveries[0]["current_reason_text"])
+        self.assertIsNone(deliveries[0]["access_revoked_at_utc"])
+        self.assertEqual(self.delivery_history_rows(notice_id), [])
         self.assert_no_later_publication_rows()
 
     def test_public_service_owns_one_connection_and_transaction(self):
@@ -614,6 +708,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.begin_calls, 1)
         self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.occurrence_insert_calls, 1)
+        self.assertEqual(connection.delivery_insert_calls, 1)
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.commit_calls, 1)
         self.assertEqual(connection.rollback_calls, 0)
@@ -641,6 +736,9 @@ class StaffNoticePublicationTests(unittest.TestCase):
             len(worker["eligibility_source_summary"].split(", ")),
             4
         )
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual([row["user_id"] for row in deliveries], [1, 2, 4])
+        self.assertEqual(len({row["user_id"] for row in deliveries}), 3)
 
     def test_inactive_users_are_excluded_from_initial_eligibility(self):
         notice_id = self.create_notice(audience_rules=(
@@ -656,6 +754,10 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertNotIn(
             3,
             [row["user_id"] for row in self.eligibility_rows(notice_id)]
+        )
+        self.assertEqual(
+            [row["user_id"] for row in self.delivery_rows(notice_id)],
+            [1, 2, 4]
         )
 
     def test_applicable_shift_staff_alone_creates_no_eligibility(self):
@@ -683,6 +785,9 @@ class StaffNoticePublicationTests(unittest.TestCase):
         app.publish_staff_notice(notice_id, 1)
 
         self.assertEqual(self.eligibility_rows(notice_id), [])
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual([row["user_id"] for row in deliveries], [4])
+        self.assertEqual(deliveries[0]["shift_id"], 1)
         self.assert_no_later_publication_rows()
 
     def test_non_shift_candidate_needs_no_matching_shift_assignment(self):
@@ -838,6 +943,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(second_connection.begin_calls, 1)
         self.assertEqual(second_connection.eligibility_insert_calls, 0)
         self.assertEqual(second_connection.occurrence_insert_calls, 0)
+        self.assertEqual(second_connection.delivery_insert_calls, 0)
         self.assertEqual(second_connection.commit_calls, 0)
         self.assertEqual(second_connection.close_calls, 1)
 
@@ -915,6 +1021,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.occurrence_insert_calls, 1)
+        self.assertEqual(connection.delivery_insert_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(connection.close_calls, 1)
@@ -952,6 +1059,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
 
         self.assertEqual(connection.eligibility_insert_calls, 2)
         self.assertEqual(connection.occurrence_insert_calls, 0)
+        self.assertEqual(connection.delivery_insert_calls, 0)
         self.assertEqual(connection.update_calls, 0)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
@@ -975,6 +1083,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.occurrence_insert_calls, 1)
+        self.assertEqual(connection.delivery_insert_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(self.database_snapshot(), before)
@@ -1103,6 +1212,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
         occurrence = self.occurrence_rows(notice_id)[0]
         self.assertEqual(occurrence["due_at_utc"], "2026-08-05T07:00:00Z")
         self.assertEqual(occurrence["due_at_is_provisional"], 0)
+        delivery = self.delivery_rows(notice_id)[0]
+        self.assertEqual(delivery["due_at_utc"], "2026-08-05T07:00:00Z")
 
     def test_calendar_recurrence_modes_create_only_applicable_publish_date(self):
         configurations = (
@@ -1148,6 +1259,16 @@ class StaffNoticePublicationTests(unittest.TestCase):
                     "2026-08-01T06:59:59Z"
                 )
                 self.assertEqual(occurrence["occurrence_status"], "Active")
+                delivery = self.delivery_rows(notice_id)[0]
+                self.assertEqual(delivery["user_id"], 4)
+                self.assertEqual(
+                    delivery["eligibility_cutoff_at_utc"],
+                    self.FIXED_TIMESTAMP
+                )
+                self.assertEqual(
+                    delivery["due_at_utc"],
+                    "2026-08-01T06:59:59Z"
+                )
 
     def test_calendar_boundaries_are_inclusive_without_future_precreation(self):
         today_notice_id = self.create_notice()
@@ -1321,6 +1442,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
             scheduled_start_time="23:00",
             scheduled_end_time="07:00"
         )
+        self.add_shift_assignment(30, 4)
 
         app.publish_staff_notice(notice_id, 1)
 
@@ -1331,6 +1453,14 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(occurrence["visible_from_at_utc"], "2026-08-02T06:00:00Z")
         self.assertEqual(occurrence["due_at_utc"], "2026-08-02T14:00:00Z")
         self.assertEqual(occurrence["due_at_is_provisional"], 1)
+        delivery = self.delivery_rows(notice_id)[0]
+        self.assertEqual(delivery["user_id"], 4)
+        self.assertEqual(delivery["shift_id"], 30)
+        self.assertEqual(
+            delivery["eligibility_cutoff_at_utc"],
+            "2026-08-02T06:00:00Z"
+        )
+        self.assertEqual(delivery["due_at_utc"], "2026-08-02T14:00:00Z")
 
     def test_future_specific_shift_without_record_creates_pending_shift(self):
         notice_id = self.create_notice()
@@ -1356,6 +1486,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertIsNone(occurrence["visible_from_at_utc"])
         self.assertIsNone(occurrence["due_at_utc"])
         self.assertIsNone(occurrence["shift_bound_at_utc"])
+        self.assertEqual(self.delivery_rows(notice_id), [])
+        self.assertEqual(self.delivery_history_rows(notice_id), [])
         self.assert_no_later_publication_rows()
 
     def test_occurrence_calculation_failure_rolls_back_publication(self):
@@ -1433,6 +1565,142 @@ class StaffNoticePublicationTests(unittest.TestCase):
         app.publish_staff_notice(notice_id, 1)
 
         self.assertEqual(len(self.occurrence_rows(notice_id)), 1)
+        self.assert_no_later_publication_rows()
+
+    def test_shift_deliveries_require_active_assignment_and_audience(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("Core Organization", None, None),
+            ("Selected Individual", None, 2)
+        ))
+        self.make_notice_shift_scheduled(notice_id)
+        self.add_shift(200, "2026-08-01", "Day")
+        self.add_shift_assignment(200, 2)
+        self.add_shift_assignment(200, 3)
+        self.add_shift_assignment(200, 4, active=0)
+
+        app.publish_staff_notice(notice_id, 1)
+
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual([row["user_id"] for row in deliveries], [2])
+        self.assertEqual(deliveries[0]["shift_id"], 200)
+
+    def test_applicable_shift_staff_includes_active_operational_manager(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("Applicable Shift Staff", None, None),
+        ))
+        self.make_notice_shift_scheduled(notice_id)
+        self.add_shift(201, "2026-08-01", "Day")
+        self.add_shift_assignment(201, 2)
+        self.add_shift_assignment(201, 3)
+
+        app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(self.eligibility_rows(notice_id), [])
+        self.assertEqual(
+            [row["user_id"] for row in self.delivery_rows(notice_id)],
+            [2]
+        )
+
+    def test_worker_receives_one_delivery_for_each_actual_shift_occurrence(self):
+        notice_id = self.create_notice()
+        self.make_notice_shift_scheduled(notice_id)
+        self.add_shift(210, "2026-08-01", "Day")
+        self.add_shift(211, "2026-08-01", "Day")
+        self.add_shift_assignment(210, 4)
+        self.add_shift_assignment(210, 4)
+        self.add_shift_assignment(211, 4)
+
+        app.publish_staff_notice(notice_id, 1)
+
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual(
+            [(row["shift_id"], row["user_id"]) for row in deliveries],
+            [(210, 4), (211, 4)]
+        )
+        self.assertEqual(
+            len({row["occurrence_id"] for row in deliveries}),
+            2
+        )
+
+    def test_delivery_uniqueness_rejects_duplicate_occurrence_user(self):
+        notice_id = self.create_notice()
+        app.publish_staff_notice(notice_id, 1)
+        delivery = self.delivery_rows(notice_id)[0]
+        conn = self.open_database()
+
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("""
+                    INSERT INTO staff_notice_deliveries
+                    (
+                        occurrence_id,
+                        user_id,
+                        requirement_status,
+                        assigned_at_utc,
+                        eligibility_cutoff_at_utc
+                    )
+                    VALUES (?, ?, 'Required', ?, ?)
+                """, (
+                    delivery["occurrence_id"],
+                    delivery["user_id"],
+                    self.FIXED_TIMESTAMP,
+                    delivery["eligibility_cutoff_at_utc"]
+                ))
+        finally:
+            conn.close()
+
+    def test_delivery_calculation_failure_rolls_back_entire_publication(self):
+        notice_id = self.create_notice()
+        before = self.database_snapshot()
+
+        with mock.patch.object(
+            app,
+            "_load_initial_staff_notice_delivery_user_ids",
+            side_effect=ValueError("controlled delivery calculation failure")
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "controlled delivery calculation failure"
+            ):
+                app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_delivery_insert_failure_rolls_back_entire_publication(self):
+        notice_id = self.create_notice(audience_rules=(
+            ("Core Organization", None, None),
+        ))
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_delivery_insert
+                BEFORE INSERT ON staff_notice_deliveries
+                WHEN NEW.user_id = 2
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled delivery failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "controlled delivery failure"
+        ):
+            app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_initial_delivery_creation_has_no_history_or_later_state(self):
+        notice_id = self.create_notice()
+
+        app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(len(self.delivery_rows(notice_id)), 1)
+        self.assertEqual(self.delivery_history_rows(notice_id), [])
         self.assert_no_later_publication_rows()
 
 

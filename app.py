@@ -4406,6 +4406,156 @@ def _create_initial_staff_notice_occurrences(
         )
 
 
+def _staff_notice_delivery_eligibility_cutoff(
+    occurrence,
+    assigned_at_utc
+):
+    cutoff = occurrence["visible_from_at_utc"] or assigned_at_utc
+    return format_staff_notice_utc_datetime(cutoff)
+
+
+def _load_initial_staff_notice_delivery_user_ids(
+    conn,
+    notice_id,
+    occurrence,
+    eligibility_cutoff_at_utc
+):
+    if occurrence["occurrence_kind"] != "Shift":
+        return [
+            row["user_id"]
+            for row in conn.execute("""
+                SELECT DISTINCT ep.user_id
+                FROM staff_notice_audience_eligibility_periods ep
+                JOIN staff_notice_audiences a
+                    ON ep.audience_id = a.audience_id
+                JOIN users u
+                    ON ep.user_id = u.user_id
+                WHERE a.notice_id = ?
+                  AND u.active = 1
+                  AND ep.eligible_from_at_utc <= ?
+                  AND (
+                      ep.eligible_until_at_utc IS NULL
+                      OR ep.eligible_until_at_utc >= ?
+                  )
+                ORDER BY ep.user_id
+            """, (
+                notice_id,
+                eligibility_cutoff_at_utc,
+                eligibility_cutoff_at_utc
+            )).fetchall()
+        ]
+
+    if occurrence["shift_id"] is None:
+        return []
+
+    return [
+        row["user_id"]
+        for row in conn.execute("""
+            SELECT DISTINCT ss.user_id
+            FROM shift_staff ss
+            JOIN users u
+                ON ss.user_id = u.user_id
+            WHERE ss.shift_id = ?
+              AND ss.active = 1
+              AND u.active = 1
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM staff_notice_audiences a
+                      JOIN staff_notice_audience_rules ar
+                          ON ar.audience_id = a.audience_id
+                      WHERE a.notice_id = ?
+                        AND ar.rule_type = 'Applicable Shift Staff'
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM staff_notice_audiences a
+                      JOIN staff_notice_audience_eligibility_periods ep
+                          ON ep.audience_id = a.audience_id
+                      WHERE a.notice_id = ?
+                        AND ep.user_id = ss.user_id
+                        AND ep.eligible_from_at_utc <= ?
+                        AND (
+                            ep.eligible_until_at_utc IS NULL
+                            OR ep.eligible_until_at_utc >= ?
+                        )
+                  )
+              )
+            ORDER BY ss.user_id
+        """, (
+            occurrence["shift_id"],
+            notice_id,
+            notice_id,
+            eligibility_cutoff_at_utc,
+            eligibility_cutoff_at_utc
+        )).fetchall()
+    ]
+
+
+def _create_initial_staff_notice_deliveries(
+    conn,
+    preview,
+    assigned_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice delivery creation requires an active "
+            "transaction."
+        )
+
+    notice = preview["notice"]
+    occurrences = conn.execute("""
+        SELECT o.*
+        FROM staff_notice_occurrences o
+        WHERE o.schedule_id = ?
+        ORDER BY o.occurrence_id
+    """, (notice["schedule"]["schedule_id"],)).fetchall()
+
+    for row in occurrences:
+        occurrence = dict(row)
+        if occurrence["occurrence_status"] == "Pending Shift":
+            continue
+        eligibility_cutoff_at_utc = (
+            _staff_notice_delivery_eligibility_cutoff(
+                occurrence,
+                assigned_at_utc
+            )
+        )
+        user_ids = _load_initial_staff_notice_delivery_user_ids(
+            conn,
+            notice["notice_id"],
+            occurrence,
+            eligibility_cutoff_at_utc
+        )
+
+        for user_id in user_ids:
+            conn.execute("""
+                INSERT INTO staff_notice_deliveries
+                (
+                    occurrence_id,
+                    user_id,
+                    requirement_status,
+                    assigned_at_utc,
+                    eligibility_cutoff_at_utc,
+                    first_viewed_at_utc,
+                    viewed_by_user_id,
+                    recipient_access,
+                    status_changed_at_utc,
+                    status_changed_by_user_id,
+                    current_reason_code,
+                    current_reason_text,
+                    access_revoked_at_utc
+                )
+                VALUES (?, ?, 'Required', ?, ?, NULL, NULL, 1,
+                        NULL, NULL, NULL, NULL, NULL)
+            """, (
+                occurrence["occurrence_id"],
+                user_id,
+                assigned_at_utc,
+                eligibility_cutoff_at_utc
+            ))
+
+
 def _publish_staff_notice_in_transaction(
     conn,
     notice_id,
@@ -4438,6 +4588,11 @@ def _publish_staff_notice_in_transaction(
         published_at_utc
     )
     _create_initial_staff_notice_occurrences(
+        conn,
+        preview,
+        published_at_utc
+    )
+    _create_initial_staff_notice_deliveries(
         conn,
         preview,
         published_at_utc
