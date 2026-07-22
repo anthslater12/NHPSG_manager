@@ -433,6 +433,18 @@ class StaffNoticeDraftChangeCommittedCloseError(RuntimeError):
         self.retry_safe = False
 
 
+class StaffNoticePublicationCommittedCloseError(RuntimeError):
+
+    def __init__(self, notice_id):
+        super().__init__(
+            f"Staff Notice {notice_id} was published, but its database "
+            "connection could not be closed. Do not retry publication."
+        )
+        self.notice_id = notice_id
+        self.committed = True
+        self.retry_safe = False
+
+
 class StaffNoticeNotFoundError(LookupError):
     pass
 
@@ -442,6 +454,19 @@ class StaffNoticeNotEditableError(ValueError):
 
 
 class StaffNoticeStaleEditError(ValueError):
+    pass
+
+
+class StaffNoticePublicationNotReadyError(ValueError):
+
+    def __init__(self, blocking_errors):
+        self.blocking_errors = tuple(blocking_errors)
+        super().__init__(
+            "Staff Notice draft is not ready for publication."
+        )
+
+
+class StaffNoticeStalePublicationError(ValueError):
     pass
 
 
@@ -3990,6 +4015,126 @@ def get_staff_notice_publish_preview(
 
     preview.pop("_publication_audience_candidates", None)
     return preview
+
+
+def _publish_staff_notice_in_transaction(
+    conn,
+    notice_id,
+    actor_user_id,
+    now_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice publication requires an active transaction."
+        )
+
+    now_utc = parse_staff_notice_utc_datetime(now_utc)
+    preview = _build_staff_notice_publish_preview(
+        conn,
+        notice_id,
+        actor_user_id,
+        now_utc
+    )
+
+    if not preview["ready_for_publication"]:
+        raise StaffNoticePublicationNotReadyError(
+            preview["blocking_errors"]
+        )
+
+    published_at_utc = format_staff_notice_utc_datetime(now_utc)
+    cursor = conn.execute("""
+        UPDATE staff_notices
+        SET status = 'Published',
+            draft_active = 0,
+            published_by_user_id = ?,
+            published_at_utc = ?
+        WHERE notice_id = ?
+          AND status = 'Draft'
+          AND draft_active = 1
+          AND published_by_user_id IS NULL
+          AND published_at_utc IS NULL
+    """, (
+        actor_user_id,
+        published_at_utc,
+        notice_id
+    ))
+
+    if cursor.rowcount != 1:
+        raise StaffNoticeStalePublicationError(
+            "Staff Notice publication state changed before it could be "
+            "published. Reload it and try again."
+        )
+
+    return {
+        "notice_id": notice_id,
+        "published_by_user_id": actor_user_id,
+        "published_at_utc": published_at_utc,
+        "_publication_preview": preview
+    }
+
+
+def publish_staff_notice(notice_id, actor_user_id):
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise PermissionError("Staff Notice management access denied.")
+    if not _is_valid_staff_notice_identifier(notice_id):
+        raise StaffNoticeNotFoundError("Staff Notice draft not found.")
+
+    conn = None
+    primary_error = None
+    commit_succeeded = False
+
+    try:
+        conn = get_db()
+        conn.execute("BEGIN IMMEDIATE")
+        result = _publish_staff_notice_in_transaction(
+            conn,
+            notice_id,
+            actor_user_id,
+            get_application_now_utc()
+        )
+        conn.commit()
+        commit_succeeded = True
+        result.pop("_publication_preview", None)
+        return result
+
+    except BaseException as error:
+        primary_error = error
+
+        if conn is not None:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except BaseException as rollback_error:
+                _preserve_staff_notice_cleanup_error(
+                    error,
+                    "staff_notice_rollback_error",
+                    rollback_error,
+                    "Staff Notice publication rollback also failed: "
+                    f"{rollback_error}"
+                )
+
+        raise
+
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except BaseException as close_error:
+                if primary_error is None:
+                    if commit_succeeded:
+                        raise StaffNoticePublicationCommittedCloseError(
+                            notice_id
+                        ) from close_error
+
+                    raise
+
+                _preserve_staff_notice_cleanup_error(
+                    primary_error,
+                    "staff_notice_close_error",
+                    close_error,
+                    "Staff Notice database close also failed: "
+                    f"{close_error}"
+                )
 
 
 def _staff_notice_management_choices(conn, notice=None):
