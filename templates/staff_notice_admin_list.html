@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Staff Notice Drafts</h2>
+
+    <p>
+        <a href="{{ url_for('staff_notice_new') }}">
+            + Create Staff Notice Draft
+        </a>
+    </p>
+
+    {% if notices %}
+
+        <div class="table-scroll">
+
+            <table>
+                <tr>
+                    <th>Title</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Scope</th>
+                    <th>Created By</th>
+                    <th>Created</th>
+                    <th>Last Updated</th>
+                    <th>State</th>
+                    <th>View</th>
+                    <th>Edit</th>
+                </tr>
+
+                {% for notice in notices %}
+                    <tr class="{% if notice.draft_active %}row-active{% else %}row-inactive{% endif %}">
+                        <td>{{ notice.title }}</td>
+                        <td>{{ notice.priority }}</td>
+                        <td>{{ notice.status }}</td>
+                        <td>
+                            {{ notice.client_name or "Organization-wide" }}
+                        </td>
+                        <td>{{ notice.created_by }}</td>
+                        <td>{{ notice.created_at_utc }}</td>
+                        <td>{{ notice.updated_at_utc or "—" }}</td>
+                        <td>
+                            {% if notice.draft_active %}
+                                <span class="status-active">Active Draft</span>
+                            {% else %}
+                                <span class="status-inactive">Inactive Draft</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <a href="{{ url_for(
+                                'staff_notice_admin_detail',
+                                notice_id=notice.notice_id
+                            ) }}">
+                                View
+                            </a>
+                        </td>
+                        <td>
+                            {% if notice.draft_active %}
+                                <a href="{{ url_for(
+                                    'staff_notice_edit',
+                                    notice_id=notice.notice_id
+                                ) }}">
+                                    Edit
+                                </a>
+                            {% else %}
+                                —
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+
+        </div>
+
+    {% else %}
+
+        <p>No Staff Notice drafts have been created.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}

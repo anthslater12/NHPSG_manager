@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>
+        {% if notice %}
+            Edit Staff Notice Draft
+        {% else %}
+            Create Staff Notice Draft
+        {% endif %}
+    </h2>
+
+    <p>
+        <a href="{{ url_for('staff_notice_admin_list') }}">
+            ← Back to Staff Notice Drafts
+        </a>
+    </p>
+
+    {% if error %}
+        <div class="error-message">{{ error }}</div>
+    {% endif %}
+
+    <form method="post">
+
+        {% if notice %}
+            <input
+                type="hidden"
+                name="expected_updated_at_utc"
+                value="{{ expected_updated_at_utc }}"
+            >
+        {% endif %}
+
+        <h3>Notice</h3>
+
+        <label for="title">Title</label>
+        <input
+            type="text"
+            id="title"
+            name="title"
+            value="{{ form_data.title }}"
+            required
+        >
+
+        <label for="notice_text">Notice Text</label>
+        <textarea
+            id="notice_text"
+            name="notice_text"
+            rows="8"
+            required
+        >{{ form_data.notice_text }}</textarea>
+
+        <label for="priority">Priority</label>
+        <select id="priority" name="priority" required>
+            {% for priority in priorities %}
+                <option
+                    value="{{ priority }}"
+                    {% if form_data.priority == priority %}selected{% endif %}
+                >
+                    {{ priority }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="client_id">Scope</label>
+        <select id="client_id" name="client_id">
+            <option value="">Organization-wide</option>
+            {% for client in clients %}
+                <option
+                    value="{{ client.client_id }}"
+                    {% if form_data.client_id|string == client.client_id|string %}selected{% endif %}
+                >
+                    {{ client.client_name }}{% if not client.active %} (Inactive){% endif %}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="effective_start_local">Effective Start</label>
+        <input
+            type="datetime-local"
+            id="effective_start_local"
+            name="effective_start_local"
+            value="{{ form_data.effective_start_local }}"
+        >
+
+        <label for="expires_local">Expiry</label>
+        <input
+            type="datetime-local"
+            id="expires_local"
+            name="expires_local"
+            value="{{ form_data.expires_local }}"
+        >
+
+        <div class="checkbox-group">
+            <label class="checkbox-option">
+                <input
+                    type="checkbox"
+                    name="until_withdrawn"
+                    value="1"
+                    {% if form_data.until_withdrawn %}checked{% endif %}
+                >
+                <span>Continue until withdrawn</span>
+            </label>
+        </div>
+
+        <h3>Audience</h3>
+
+        <p>Select at least one audience rule.</p>
+
+        <div class="checkbox-group">
+            {% for rule_type in audience_rule_types %}
+                <label class="checkbox-option">
+                    <input
+                        type="checkbox"
+                        name="audience_rule_types"
+                        value="{{ rule_type }}"
+                        {% if rule_type in form_data.audience_rule_types %}checked{% endif %}
+                    >
+                    <span>{{ rule_type }}</span>
+                </label>
+            {% endfor %}
+        </div>
+
+        <label for="selected_roles">Selected Roles</label>
+        <select id="selected_roles" name="selected_roles" multiple>
+            {% for role_name in selectable_roles %}
+                <option
+                    value="{{ role_name }}"
+                    {% if role_name in form_data.selected_roles %}selected{% endif %}
+                >
+                    {{ role_name }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="selected_user_ids">Selected People</label>
+        <select
+            id="selected_user_ids"
+            name="selected_user_ids"
+            multiple
+        >
+            {% for user in users %}
+                <option
+                    value="{{ user.user_id }}"
+                    {% if user.user_id|string in form_data.selected_user_ids %}selected{% endif %}
+                >
+                    {{ user.full_name }} — {{ user.role }}{% if not user.active %} (Inactive){% endif %}
+                </option>
+            {% endfor %}
+        </select>
+
+        <h3>Schedule</h3>
+
+        <div class="checkbox-group">
+            <label class="checkbox-option">
+                <input
+                    type="checkbox"
+                    name="schedule_enabled"
+                    value="1"
+                    {% if form_data.schedule_enabled %}checked{% endif %}
+                >
+                <span>Schedule configured</span>
+            </label>
+        </div>
+
+        <label for="occurrence_basis">Occurrence Basis</label>
+        <select id="occurrence_basis" name="occurrence_basis">
+            <option value="">Select occurrence basis</option>
+            {% for value in occurrence_bases %}
+                <option
+                    value="{{ value }}"
+                    {% if form_data.occurrence_basis == value %}selected{% endif %}
+                >
+                    {{ value }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="recurrence_pattern">Recurrence Pattern</label>
+        <select id="recurrence_pattern" name="recurrence_pattern">
+            <option value="">Select recurrence pattern</option>
+            {% for value in recurrence_patterns %}
+                <option
+                    value="{{ value }}"
+                    {% if form_data.recurrence_pattern == value %}selected{% endif %}
+                >
+                    {{ value }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="shift_applicability">Shift Applicability</label>
+        <select id="shift_applicability" name="shift_applicability">
+            <option value="">Select shift applicability</option>
+            {% for value in shift_applicability_values %}
+                <option
+                    value="{{ value }}"
+                    {% if form_data.shift_applicability == value %}selected{% endif %}
+                >
+                    {{ value }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="interval_days">Interval Days</label>
+        <input
+            type="number"
+            id="interval_days"
+            name="interval_days"
+            min="2"
+            value="{{ form_data.interval_days }}"
+        >
+
+        <label for="recurrence_anchor_date">Recurrence Anchor Date</label>
+        <input
+            type="date"
+            id="recurrence_anchor_date"
+            name="recurrence_anchor_date"
+            value="{{ form_data.recurrence_anchor_date }}"
+        >
+
+        <label for="specific_calendar_date">Specific Calendar Date</label>
+        <input
+            type="date"
+            id="specific_calendar_date"
+            name="specific_calendar_date"
+            value="{{ form_data.specific_calendar_date }}"
+        >
+
+        <label for="specific_shift_client_id">Specific Shift Client</label>
+        <select
+            id="specific_shift_client_id"
+            name="specific_shift_client_id"
+        >
+            <option value="">Select client</option>
+            {% for client in clients %}
+                <option
+                    value="{{ client.client_id }}"
+                    {% if form_data.specific_shift_client_id|string == client.client_id|string %}selected{% endif %}
+                >
+                    {{ client.client_name }}{% if not client.active %} (Inactive){% endif %}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="specific_shift_date">Specific Shift Date</label>
+        <input
+            type="date"
+            id="specific_shift_date"
+            name="specific_shift_date"
+            value="{{ form_data.specific_shift_date }}"
+        >
+
+        <label for="specific_shift_type">Specific Shift Type</label>
+        <select id="specific_shift_type" name="specific_shift_type">
+            <option value="">Select shift type</option>
+            {% for shift_type in shift_types %}
+                <option
+                    value="{{ shift_type }}"
+                    {% if form_data.specific_shift_type == shift_type %}selected{% endif %}
+                >
+                    {{ shift_type }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="one_time_due_local">One-Time Due Date and Time</label>
+        <input
+            type="datetime-local"
+            id="one_time_due_local"
+            name="one_time_due_local"
+            value="{{ form_data.one_time_due_local }}"
+        >
+
+        <fieldset class="checkbox-group">
+            <legend>Selected Shift Types</legend>
+            {% for shift_type in shift_types %}
+                <label class="checkbox-option">
+                    <input
+                        type="checkbox"
+                        name="shift_types"
+                        value="{{ shift_type }}"
+                        {% if shift_type in form_data.shift_types %}checked{% endif %}
+                    >
+                    <span>{{ shift_type }}</span>
+                </label>
+            {% endfor %}
+        </fieldset>
+
+        <fieldset class="checkbox-group">
+            <legend>Selected Weekdays</legend>
+            {% for weekday_number, weekday_name in weekdays %}
+                <label class="checkbox-option">
+                    <input
+                        type="checkbox"
+                        name="weekdays"
+                        value="{{ weekday_number }}"
+                        {% if weekday_number|string in form_data.weekdays %}checked{% endif %}
+                    >
+                    <span>{{ weekday_name }}</span>
+                </label>
+            {% endfor %}
+        </fieldset>
+
+        <button type="submit">
+            {% if notice %}Save Draft{% else %}Create Draft{% endif %}
+        </button>
+
+        <a href="{% if notice %}{{ url_for(
+            'staff_notice_admin_detail',
+            notice_id=notice.notice_id
+        ) }}{% else %}{{ url_for('staff_notice_admin_list') }}{% endif %}">
+            Cancel
+        </a>
+
+    </form>
+
+</div>
+
+{% endblock %}
