@@ -4635,6 +4635,53 @@ def _publish_staff_notice_in_transaction(
             "published. Reload it and try again."
         )
 
+    publication_counts = conn.execute("""
+        SELECT
+            (
+                SELECT COUNT(*)
+                FROM staff_notice_audience_eligibility_periods ep
+                JOIN staff_notice_audiences a
+                    ON ep.audience_id = a.audience_id
+                WHERE a.notice_id = ?
+            ) AS eligibility_count,
+            (
+                SELECT COUNT(*)
+                FROM staff_notice_occurrences o
+                JOIN staff_notice_schedules s
+                    ON o.schedule_id = s.schedule_id
+                WHERE s.notice_id = ?
+            ) AS occurrence_count,
+            (
+                SELECT COUNT(*)
+                FROM staff_notice_deliveries d
+                JOIN staff_notice_occurrences o
+                    ON d.occurrence_id = o.occurrence_id
+                JOIN staff_notice_schedules s
+                    ON o.schedule_id = s.schedule_id
+                WHERE s.notice_id = ?
+            ) AS delivery_count
+    """, (notice_id, notice_id, notice_id)).fetchone()
+    notice = preview["notice"]
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_published",
+        summary=f"Staff Notice published: {notice['title']}",
+        user_id=actor_user_id,
+        client_id=notice["client_id"],
+        shift_id=None,
+        related_table="staff_notices",
+        related_id=notice_id,
+        details=(
+            f"Priority: {notice['priority']}; "
+            "Eligibility periods: "
+            f"{publication_counts['eligibility_count']}; "
+            f"Occurrences: {publication_counts['occurrence_count']}; "
+            f"Deliveries: {publication_counts['delivery_count']}"
+        ),
+        success=1
+    )
+
     return {
         "notice_id": notice_id,
         "published_by_user_id": actor_user_id,
