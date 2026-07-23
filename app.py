@@ -4302,12 +4302,14 @@ def _create_initial_staff_notice_occurrences(
         effective_local_date = effective_start.astimezone(
             STAFF_NOTICE_TIMEZONE
         ).date()
-        expires_at = parse_staff_notice_utc_datetime(
-            notice["expires_at_utc"]
+        expires_at = (
+            parse_staff_notice_utc_datetime(notice["expires_at_utc"])
+            if notice["expires_at_utc"] is not None else None
         )
-        expiry_local_date = expires_at.astimezone(
-            STAFF_NOTICE_TIMEZONE
-        ).date()
+        expiry_local_date = (
+            expires_at.astimezone(STAFF_NOTICE_TIMEZONE).date()
+            if expires_at is not None else None
+        )
         recurrence_anchor = schedule.get("recurrence_anchor_date")
         recurrence_anchor_date = (
             datetime.strptime(recurrence_anchor, "%Y-%m-%d").date()
@@ -4315,7 +4317,11 @@ def _create_initial_staff_notice_occurrences(
         )
 
         if (
-            effective_local_date <= local_date <= expiry_local_date
+            effective_local_date <= local_date
+            and (
+                expiry_local_date is None
+                or local_date <= expiry_local_date
+            )
             and _staff_notice_schedule_applies_on_date(
                 schedule,
                 local_date,
@@ -4558,6 +4564,580 @@ def _create_initial_staff_notice_deliveries(
                 assigned_at_utc,
                 eligibility_cutoff_at_utc
             ))
+
+
+def _staff_notice_reconciliation_result():
+    return {
+        "eligibility_started": 0,
+        "eligibility_ended": 0,
+        "eligibility_sources_updated": 0,
+        "occurrences_created": 0,
+        "deliveries_assigned": 0
+    }
+
+
+def _merge_staff_notice_reconciliation_result(target, source):
+    for key in target:
+        target[key] += source[key]
+
+
+def reconcile_staff_notice_audience_eligibility(
+    conn,
+    notice,
+    reconciled_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice eligibility reconciliation requires an active "
+            "transaction."
+        )
+
+    result = _staff_notice_reconciliation_result()
+    reconciled_at_utc = format_staff_notice_utc_datetime(
+        reconciled_at_utc
+    )
+    audience_id = notice["audience"]["audience_id"]
+    candidates, _ = _resolve_staff_notice_audience_candidates(
+        conn,
+        notice["audience_rules"]
+    )
+    open_periods = {
+        row["user_id"]: dict(row)
+        for row in conn.execute("""
+            SELECT *
+            FROM staff_notice_audience_eligibility_periods
+            WHERE audience_id = ?
+              AND eligible_until_at_utc IS NULL
+            ORDER BY user_id
+        """, (audience_id,)).fetchall()
+    }
+    close_reason = (
+        "No longer matches the current non-shift Staff Notice audience."
+    )
+
+    for user_id in sorted(set(open_periods) - set(candidates)):
+        period = open_periods[user_id]
+        cursor = conn.execute("""
+            UPDATE staff_notice_audience_eligibility_periods
+            SET eligible_until_at_utc = ?,
+                closed_by_user_id = NULL,
+                close_reason = ?,
+                updated_at_utc = ?
+            WHERE eligibility_period_id = ?
+              AND eligible_until_at_utc IS NULL
+        """, (
+            reconciled_at_utc,
+            close_reason,
+            reconciled_at_utc,
+            period["eligibility_period_id"]
+        ))
+        if cursor.rowcount != 1:
+            continue
+
+        result["eligibility_ended"] += 1
+        log_activity(
+            conn,
+            activity_class="STAFF_NOTICE",
+            activity_type="staff_notice_audience_eligibility_ended",
+            summary=(
+                "Staff Notice audience eligibility ended: "
+                f"{notice['title']}"
+            ),
+            user_id=None,
+            client_id=notice["client_id"],
+            shift_id=None,
+            related_table="staff_notice_audience_eligibility_periods",
+            related_id=period["eligibility_period_id"],
+            details=(
+                f"Notice ID: {notice['notice_id']}; "
+                f"Recipient user ID: {user_id}; "
+                f"Reason: {close_reason}"
+            ),
+            success=1
+        )
+
+    for user_id in sorted(candidates):
+        sources = ", ".join(dict.fromkeys(
+            candidates[user_id]["qualification_sources"]
+        ))
+        period = open_periods.get(user_id)
+
+        if period is not None:
+            if period["eligibility_source_summary"] != sources:
+                cursor = conn.execute("""
+                    UPDATE staff_notice_audience_eligibility_periods
+                    SET eligibility_source_summary = ?,
+                        updated_at_utc = ?
+                    WHERE eligibility_period_id = ?
+                      AND eligible_until_at_utc IS NULL
+                      AND eligibility_source_summary <> ?
+                """, (
+                    sources,
+                    reconciled_at_utc,
+                    period["eligibility_period_id"],
+                    sources
+                ))
+                result["eligibility_sources_updated"] += cursor.rowcount
+            continue
+
+        cursor = conn.execute("""
+            INSERT INTO staff_notice_audience_eligibility_periods
+            (
+                audience_id,
+                user_id,
+                eligible_from_at_utc,
+                eligible_until_at_utc,
+                eligibility_source_summary,
+                opened_by_user_id,
+                closed_by_user_id,
+                close_reason,
+                created_at_utc,
+                updated_at_utc
+            )
+            VALUES (?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, NULL)
+            ON CONFLICT DO NOTHING
+        """, (
+            audience_id,
+            user_id,
+            reconciled_at_utc,
+            sources,
+            reconciled_at_utc
+        ))
+        if cursor.rowcount != 1:
+            continue
+
+        eligibility_period_id = cursor.lastrowid
+        result["eligibility_started"] += 1
+        log_activity(
+            conn,
+            activity_class="STAFF_NOTICE",
+            activity_type="staff_notice_audience_eligibility_started",
+            summary=(
+                "Staff Notice audience eligibility started: "
+                f"{notice['title']}"
+            ),
+            user_id=None,
+            client_id=notice["client_id"],
+            shift_id=None,
+            related_table="staff_notice_audience_eligibility_periods",
+            related_id=eligibility_period_id,
+            details=(
+                f"Notice ID: {notice['notice_id']}; "
+                f"Recipient user ID: {user_id}; Sources: {sources}"
+            ),
+            success=1
+        )
+
+    return result
+
+
+def _staff_notice_calendar_occurrence_visible_from(
+    occurrence_date,
+    notice
+):
+    local_midnight = datetime.combine(
+        occurrence_date,
+        datetime.min.time(),
+        tzinfo=STAFF_NOTICE_TIMEZONE
+    ).astimezone(timezone.utc)
+    return max(
+        local_midnight,
+        parse_staff_notice_utc_datetime(notice["published_at_utc"]),
+        parse_staff_notice_utc_datetime(notice["effective_start_at_utc"])
+    )
+
+
+def generate_due_staff_notice_occurrences(
+    conn,
+    notice,
+    reconciled_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice occurrence reconciliation requires an active "
+            "transaction."
+        )
+
+    result = _staff_notice_reconciliation_result()
+    schedule = notice["schedule"]
+    if schedule["occurrence_basis"] != "Calendar":
+        return result
+
+    now_utc = parse_staff_notice_utc_datetime(reconciled_at_utc)
+    created_at_utc = format_staff_notice_utc_datetime(now_utc)
+    published_at = parse_staff_notice_utc_datetime(
+        notice["published_at_utc"]
+    )
+    effective_start = parse_staff_notice_utc_datetime(
+        notice["effective_start_at_utc"]
+    )
+    expires_at = (
+        parse_staff_notice_utc_datetime(notice["expires_at_utc"])
+        if notice["expires_at_utc"] is not None else None
+    )
+    first_date = max(
+        published_at.astimezone(STAFF_NOTICE_TIMEZONE).date(),
+        effective_start.astimezone(STAFF_NOTICE_TIMEZONE).date()
+    )
+    last_date = now_utc.astimezone(STAFF_NOTICE_TIMEZONE).date()
+    if expires_at is not None:
+        last_date = min(
+            last_date,
+            expires_at.astimezone(STAFF_NOTICE_TIMEZONE).date()
+        )
+    recurrence_anchor = schedule.get("recurrence_anchor_date")
+    recurrence_anchor_date = (
+        datetime.strptime(recurrence_anchor, "%Y-%m-%d").date()
+        if recurrence_anchor is not None else None
+    )
+    occurrence_date = first_date
+
+    while occurrence_date <= last_date:
+        if _staff_notice_schedule_applies_on_date(
+            schedule,
+            occurrence_date,
+            notice.get("weekdays", []),
+            recurrence_anchor_date
+        ):
+            visible_from = _staff_notice_calendar_occurrence_visible_from(
+                occurrence_date,
+                notice
+            )
+            if visible_from <= now_utc:
+                due_at = _staff_notice_calendar_day_end_utc(
+                    occurrence_date
+                )
+                cursor = conn.execute("""
+                    INSERT INTO staff_notice_occurrences
+                    (
+                        schedule_id,
+                        occurrence_kind,
+                        occurrence_date,
+                        visible_from_at_utc,
+                        due_at_utc,
+                        due_at_is_provisional,
+                        occurrence_status,
+                        created_at_utc
+                    )
+                    VALUES (?, 'Calendar', ?, ?, ?, 0, ?, ?)
+                    ON CONFLICT DO NOTHING
+                """, (
+                    schedule["schedule_id"],
+                    occurrence_date.isoformat(),
+                    format_staff_notice_utc_datetime(visible_from),
+                    format_staff_notice_utc_datetime(due_at),
+                    _staff_notice_occurrence_status(visible_from, now_utc),
+                    created_at_utc
+                ))
+                if cursor.rowcount == 1:
+                    occurrence_id = cursor.lastrowid
+                    result["occurrences_created"] += 1
+                    log_activity(
+                        conn,
+                        activity_class="STAFF_NOTICE",
+                        activity_type="staff_notice_occurrence_created",
+                        summary=(
+                            "Staff Notice occurrence created: "
+                            f"{notice['title']}"
+                        ),
+                        user_id=None,
+                        client_id=notice["client_id"],
+                        shift_id=None,
+                        related_table="staff_notice_occurrences",
+                        related_id=occurrence_id,
+                        details=(
+                            f"Notice ID: {notice['notice_id']}; "
+                            f"Kind: Calendar; Date: "
+                            f"{occurrence_date.isoformat()}; Visible from: "
+                            f"{format_staff_notice_utc_datetime(visible_from)}; "
+                            "Due at: "
+                            f"{format_staff_notice_utc_datetime(due_at)}"
+                        ),
+                        success=1
+                    )
+
+        occurrence_date += timedelta(days=1)
+
+    return result
+
+
+def _assign_reconciled_staff_notice_delivery(
+    conn,
+    notice,
+    occurrence,
+    user_id,
+    assigned_at_utc,
+    eligibility_cutoff_at_utc
+):
+    cursor = conn.execute("""
+        INSERT INTO staff_notice_deliveries
+        (
+            occurrence_id,
+            user_id,
+            requirement_status,
+            assigned_at_utc,
+            eligibility_cutoff_at_utc,
+            recipient_access
+        )
+        VALUES (?, ?, 'Required', ?, ?, 1)
+        ON CONFLICT (occurrence_id, user_id) DO NOTHING
+    """, (
+        occurrence["occurrence_id"],
+        user_id,
+        assigned_at_utc,
+        eligibility_cutoff_at_utc
+    ))
+    if cursor.rowcount != 1:
+        return 0
+
+    delivery_id = cursor.lastrowid
+    conn.execute("""
+        INSERT INTO staff_notice_delivery_history
+        (
+            delivery_id,
+            event_type,
+            previous_requirement_status,
+            new_requirement_status,
+            previous_recipient_access,
+            new_recipient_access,
+            reason_code,
+            reason_text,
+            changed_by_user_id,
+            changed_at_utc
+        )
+        VALUES (?, 'Assigned', NULL, 'Required', NULL, 1,
+                NULL, NULL, NULL, ?)
+    """, (delivery_id, assigned_at_utc))
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_delivery_assigned",
+        summary=f"Staff Notice delivery assigned: {notice['title']}",
+        user_id=None,
+        client_id=notice["client_id"],
+        shift_id=None,
+        related_table="staff_notice_deliveries",
+        related_id=delivery_id,
+        details=(
+            f"Notice ID: {notice['notice_id']}; "
+            f"Occurrence ID: {occurrence['occurrence_id']}; "
+            f"Recipient user ID: {user_id}; Eligibility cutoff: "
+            f"{eligibility_cutoff_at_utc}"
+        ),
+        success=1
+    )
+    return 1
+
+
+def _load_current_one_time_staff_notice_delivery_user_ids(
+    conn,
+    notice_id,
+    eligibility_cutoff_at_utc
+):
+    return [
+        row["user_id"]
+        for row in conn.execute("""
+            SELECT DISTINCT ep.user_id
+            FROM staff_notice_audience_eligibility_periods ep
+            JOIN staff_notice_audiences a
+                ON ep.audience_id = a.audience_id
+            JOIN users u
+                ON ep.user_id = u.user_id
+            WHERE a.notice_id = ?
+              AND u.active = 1
+              AND ep.eligible_from_at_utc <= ?
+              AND ep.eligible_until_at_utc IS NULL
+            ORDER BY ep.user_id
+        """, (
+            notice_id,
+            eligibility_cutoff_at_utc
+        )).fetchall()
+    ]
+
+
+def reconcile_staff_notice_deliveries(
+    conn,
+    notice,
+    reconciled_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice delivery reconciliation requires an active "
+            "transaction."
+        )
+
+    result = _staff_notice_reconciliation_result()
+    now_utc = parse_staff_notice_utc_datetime(reconciled_at_utc)
+    assigned_at_utc = format_staff_notice_utc_datetime(now_utc)
+    schedule = notice["schedule"]
+    occurrence_basis = schedule["occurrence_basis"]
+
+    if occurrence_basis not in {"One Time", "Calendar"}:
+        return result
+
+    occurrences = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT *
+            FROM staff_notice_occurrences
+            WHERE schedule_id = ?
+              AND occurrence_kind IN ('One Time', 'Calendar')
+            ORDER BY occurrence_id
+        """, (schedule["schedule_id"],)).fetchall()
+    ]
+
+    for occurrence in occurrences:
+        if occurrence["occurrence_kind"] == "One Time":
+            visible_from = parse_staff_notice_utc_datetime(
+                occurrence["visible_from_at_utc"]
+            )
+            expires_at = (
+                parse_staff_notice_utc_datetime(notice["expires_at_utc"])
+                if notice["expires_at_utc"] is not None else None
+            )
+            if (
+                visible_from > now_utc
+                or (expires_at is not None and expires_at < now_utc)
+            ):
+                continue
+            eligibility_cutoff_at_utc = assigned_at_utc
+            user_ids = (
+                _load_current_one_time_staff_notice_delivery_user_ids(
+                    conn,
+                    notice["notice_id"],
+                    eligibility_cutoff_at_utc
+                )
+            )
+        else:
+            visible_from = parse_staff_notice_utc_datetime(
+                occurrence["visible_from_at_utc"]
+            )
+            if visible_from > now_utc:
+                continue
+            eligibility_cutoff_at_utc = format_staff_notice_utc_datetime(
+                visible_from
+            )
+            user_ids = _load_initial_staff_notice_delivery_user_ids(
+                conn,
+                notice["notice_id"],
+                occurrence,
+                eligibility_cutoff_at_utc
+            )
+        for user_id in user_ids:
+            result["deliveries_assigned"] += (
+                _assign_reconciled_staff_notice_delivery(
+                    conn,
+                    notice,
+                    occurrence,
+                    user_id,
+                    assigned_at_utc,
+                    eligibility_cutoff_at_utc
+                )
+            )
+
+    return result
+
+
+def _load_published_staff_notices_for_reconciliation(conn):
+    notice_ids = [
+        row["notice_id"]
+        for row in conn.execute("""
+            SELECT sn.notice_id
+            FROM staff_notices sn
+            WHERE sn.status = 'Published'
+            ORDER BY sn.notice_id
+        """).fetchall()
+    ]
+    return [
+        _load_staff_notice_publish_record(conn, notice_id)
+        for notice_id in notice_ids
+    ]
+
+
+def reconcile_staff_notice_non_shift_requirements(now_utc=None):
+    if now_utc is None:
+        now_utc = get_application_now_utc()
+    else:
+        now_utc = parse_staff_notice_utc_datetime(now_utc)
+
+    reconciled_at_utc = format_staff_notice_utc_datetime(now_utc)
+    result = _staff_notice_reconciliation_result()
+    conn = None
+    primary_error = None
+
+    try:
+        conn = get_db()
+        conn.execute("BEGIN IMMEDIATE")
+
+        for notice in _load_published_staff_notices_for_reconciliation(
+            conn
+        ):
+            if parse_staff_notice_utc_datetime(
+                notice["published_at_utc"]
+            ) > now_utc:
+                continue
+
+            _merge_staff_notice_reconciliation_result(
+                result,
+                reconcile_staff_notice_audience_eligibility(
+                    conn,
+                    notice,
+                    reconciled_at_utc
+                )
+            )
+            _merge_staff_notice_reconciliation_result(
+                result,
+                generate_due_staff_notice_occurrences(
+                    conn,
+                    notice,
+                    reconciled_at_utc
+                )
+            )
+            _merge_staff_notice_reconciliation_result(
+                result,
+                reconcile_staff_notice_deliveries(
+                    conn,
+                    notice,
+                    reconciled_at_utc
+                )
+            )
+
+        conn.commit()
+        return result
+
+    except BaseException as error:
+        primary_error = error
+
+        if conn is not None:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except BaseException as rollback_error:
+                _preserve_staff_notice_cleanup_error(
+                    error,
+                    "staff_notice_rollback_error",
+                    rollback_error,
+                    "Staff Notice reconciliation rollback also failed: "
+                    f"{rollback_error}"
+                )
+
+        raise
+
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except BaseException as close_error:
+                if primary_error is None:
+                    raise
+
+                _preserve_staff_notice_cleanup_error(
+                    primary_error,
+                    "staff_notice_close_error",
+                    close_error,
+                    "Staff Notice database close also failed: "
+                    f"{close_error}"
+                )
 
 
 def _publish_staff_notice_in_transaction(
