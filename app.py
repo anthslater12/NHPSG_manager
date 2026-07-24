@@ -432,10 +432,12 @@ def _behaviour_categories_for_row(row):
 def _behaviour_week_occurrences(conn, monday):
     start_utc, end_utc = get_behaviour_operational_week_range(monday)
     rows = conn.execute("""
-        SELECT bo.*, c.client_name, u.full_name AS recorder_name
+        SELECT bo.*, c.client_name, u.full_name AS recorder_name,
+               voided_by.full_name AS voided_by_name
         FROM behaviour_occurrences bo
         JOIN clients c ON c.client_id = bo.client_id
         JOIN users u ON u.user_id = bo.recorded_by_user_id
+        LEFT JOIN users voided_by ON voided_by.user_id = bo.voided_by_user_id
         WHERE bo.occurred_at_utc >= ? AND bo.occurred_at_utc < ?
         ORDER BY bo.occurred_at_utc, bo.behaviour_occurrence_id
     """, (start_utc, end_utc)).fetchall()
@@ -504,13 +506,14 @@ def behaviour_weekly(monday):
         return redirect(url_for("login"))
     conn = get_db()
     try:
-        get_active_authenticated_user(conn, session["user_id"])
+        user = get_active_authenticated_user(conn, session["user_id"])
         week_start = _parse_behaviour_monday(monday)
         return render_template("behaviour_weekly.html", monday=week_start,
             days=_behaviour_week_context(conn, week_start),
             previous_monday=week_start - timedelta(days=7),
             next_monday=week_start + timedelta(days=7),
-            category_labels=BEHAVIOUR_CATEGORY_LABELS)
+            category_labels=BEHAVIOUR_CATEGORY_LABELS,
+            can_void=user["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES)
     except PermissionError:
         return "Access denied", 403
     except ValueError as error:
@@ -623,6 +626,85 @@ def behaviour_record():
             conn.rollback()
         conn.close()
         raise
+
+
+@app.route("/behaviour/occurrences/<int:occurrence_id>/void", methods=["POST"])
+def behaviour_occurrence_void(occurrence_id):
+    """Void one incorrect Behaviour occurrence without changing its original data."""
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        if (set(request.form.keys()) != {"void_reason"} or
+                len(request.form.getlist("void_reason")) != 1):
+            raise ValueError("Behaviour void input is invalid.")
+        void_reason = request.form["void_reason"].strip()
+        if not void_reason:
+            raise ValueError("A behaviour void reason is required.")
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor = validate_behaviour_void_authority(conn, session["user_id"])
+            occurrence = conn.execute("""
+                SELECT behaviour_occurrence_id, client_id, occurred_at_utc, status,
+                       aggression_towards_others, injury_to_others, self_harm,
+                       injury_to_self, property_damage
+                FROM behaviour_occurrences
+                WHERE behaviour_occurrence_id = ?
+            """, (occurrence_id,)).fetchone()
+            if occurrence is None:
+                raise LookupError("Behaviour occurrence not found.")
+            if occurrence["status"] != "Recorded":
+                raise RuntimeError("Behaviour occurrence has already been voided.")
+
+            voided_at_utc = serialize_behaviour_utc(
+                datetime.now(timezone.utc).replace(microsecond=0)
+            )
+            updated = conn.execute("""
+                UPDATE behaviour_occurrences
+                SET status = 'Voided', voided_by_user_id = ?,
+                    voided_at_utc = ?, void_reason = ?
+                WHERE behaviour_occurrence_id = ? AND status = 'Recorded'
+            """, (actor["user_id"], voided_at_utc, void_reason, occurrence_id))
+            if updated.rowcount != 1:
+                raise RuntimeError("Behaviour occurrence has already been voided.")
+
+            categories = ", ".join(
+                BEHAVIOUR_CATEGORY_LABELS[field]
+                for field in BEHAVIOUR_CATEGORY_FIELDS if occurrence[field]
+            )
+            log_activity(
+                conn, "BEHAVIOUR", "behaviour_occurrence_voided",
+                "Behaviour occurrence voided", user_id=actor["user_id"],
+                client_id=occurrence["client_id"],
+                related_table="behaviour_occurrences",
+                related_id=occurrence_id,
+                details=(
+                    f"Occurrence UTC: {occurrence['occurred_at_utc']}; "
+                    f"Categories: {categories}; Void reason: {void_reason}"
+                ), success=1
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        week = get_behaviour_operational_week_start(
+            behaviour_utc_to_vancouver(occurrence["occurred_at_utc"])
+        )
+        return redirect(url_for("behaviour_weekly", monday=week.isoformat()))
+    except PermissionError:
+        return "Access denied", 403
+    except LookupError as error:
+        return str(error), 404
+    except RuntimeError as error:
+        return str(error), 409
+    except ValueError as error:
+        return str(error), 400
+    finally:
+        conn.close()
 
 def log_activity(
     conn,
