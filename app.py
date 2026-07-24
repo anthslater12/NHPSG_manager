@@ -5,10 +5,12 @@
 from flask import Flask, render_template, request, redirect, session, url_for
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime, time as datetime_time, timedelta, timezone
+from datetime import datetime, date, time as datetime_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 import os
 import time
+import re
+import secrets
 
 app = Flask(__name__)
 app.secret_key = "change-this-later"
@@ -150,6 +152,15 @@ BEHAVIOUR_VOID_AUTHORITY_ROLES = frozenset((
     "Program Manager",
     "Director",
 ))
+BEHAVIOUR_CATEGORY_LABELS = {
+    "aggression_towards_others": "Aggression towards others",
+    "injury_to_others": "Injury to others",
+    "self_harm": "Self-Harm",
+    "injury_to_self": "Injury to Self",
+    "property_damage": "Property Damage",
+}
+BEHAVIOUR_NOTES_MAX_LENGTH = 2000
+BEHAVIOUR_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
 #####################################################################
 # DATABASE & CORE HELPER FUNCTIONS
@@ -381,6 +392,237 @@ def _valid_vancouver_utc_candidates(local_naive):
             candidates.append(candidate_utc)
 
     return sorted(candidates)
+
+
+def is_vancouver_occurrence_input_ambiguous(local_input):
+    """Return whether a valid Vancouver wall time has two UTC instants."""
+    return len(_valid_vancouver_utc_candidates(
+        _parse_vancouver_local_input(local_input)
+    )) == 2
+
+
+def get_behaviour_operational_week_range(monday):
+    """Return canonical UTC bounds for a named Monday operational week."""
+    if not isinstance(monday, date) or monday.weekday() != 0:
+        raise ValueError("Behaviour week must start on a Monday.")
+    start_local = datetime.combine(
+        monday - timedelta(days=1), datetime_time(23, 0), VANCOUVER_TIMEZONE
+    )
+    end_local = datetime.combine(
+        monday + timedelta(days=6), datetime_time(23, 0), VANCOUVER_TIMEZONE
+    )
+    return serialize_behaviour_utc(start_local), serialize_behaviour_utc(end_local)
+
+
+def _parse_behaviour_monday(value):
+    try:
+        monday = date.fromisoformat(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Behaviour week must be a valid ISO Monday.") from error
+    if monday.weekday() != 0:
+        raise ValueError("Behaviour week must start on a Monday.")
+    return monday
+
+
+def _behaviour_categories_for_row(row):
+    return [BEHAVIOUR_CATEGORY_LABELS[field] for field in BEHAVIOUR_CATEGORY_FIELDS
+            if row[field]]
+
+
+def _behaviour_week_occurrences(conn, monday):
+    start_utc, end_utc = get_behaviour_operational_week_range(monday)
+    rows = conn.execute("""
+        SELECT bo.*, c.client_name, u.full_name AS recorder_name
+        FROM behaviour_occurrences bo
+        JOIN clients c ON c.client_id = bo.client_id
+        JOIN users u ON u.user_id = bo.recorded_by_user_id
+        WHERE bo.occurred_at_utc >= ? AND bo.occurred_at_utc < ?
+        ORDER BY bo.occurred_at_utc, bo.behaviour_occurrence_id
+    """, (start_utc, end_utc)).fetchall()
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        item["local_time"] = local.strftime("%Y-%m-%d %H:%M")
+        item["operational_day"] = get_behaviour_operational_day(local)
+        item["band"] = get_behaviour_operational_band(local)
+        item["categories"] = _behaviour_categories_for_row(row)
+        occurrences.append(item)
+    return occurrences
+
+
+def _behaviour_week_context(conn, monday):
+    occurrences = _behaviour_week_occurrences(conn, monday)
+    days = []
+    for offset in range(7):
+        operational_day = monday + timedelta(days=offset)
+        bands = []
+        for band in ("Night", "Day", "Evening"):
+            matching = [item for item in occurrences if item["operational_day"] == operational_day and item["band"] == band]
+            counts = {field: sum(item[field] for item in matching if item["status"] != "Voided") for field in BEHAVIOUR_CATEGORY_FIELDS}
+            bands.append({"name": band, "counts": counts, "occurrences": matching})
+        days.append({"date": operational_day, "bands": bands})
+    return days
+
+
+def _behaviour_recent_occurrences(conn, client_id):
+    if not client_id:
+        return []
+    rows = conn.execute("""
+        SELECT bo.*, u.full_name AS recorder_name FROM behaviour_occurrences bo
+        JOIN users u ON u.user_id = bo.recorded_by_user_id
+        WHERE bo.client_id = ? AND bo.status != 'Voided'
+        ORDER BY bo.occurred_at_utc DESC, bo.behaviour_occurrence_id DESC LIMIT 10
+    """, (client_id,)).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["local_time"] = behaviour_utc_to_vancouver(item["occurred_at_utc"]).strftime("%Y-%m-%d %H:%M")
+        item["categories"] = _behaviour_categories_for_row(row)
+        result.append(item)
+    return result
+
+
+def _render_behaviour_record(conn, selected_client_id=None, error=None, values=None):
+    clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
+    if selected_client_id is not None:
+        try:
+            validate_active_behaviour_client(conn, selected_client_id)
+        except ValueError:
+            selected_client_id = None
+    values = values or {}
+    return render_template("behaviour_record.html", clients=clients,
+        selected_client_id=selected_client_id, recent_occurrences=_behaviour_recent_occurrences(conn, selected_client_id),
+        submission_token=secrets.token_urlsafe(32), error=error,
+        category_fields=BEHAVIOUR_CATEGORY_FIELDS, category_labels=BEHAVIOUR_CATEGORY_LABELS,
+        now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"), values=values)
+
+
+@app.route("/behaviour/week/<monday>")
+def behaviour_weekly(monday):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        get_active_authenticated_user(conn, session["user_id"])
+        week_start = _parse_behaviour_monday(monday)
+        return render_template("behaviour_weekly.html", monday=week_start,
+            days=_behaviour_week_context(conn, week_start),
+            previous_monday=week_start - timedelta(days=7),
+            next_monday=week_start + timedelta(days=7),
+            category_labels=BEHAVIOUR_CATEGORY_LABELS)
+    except PermissionError:
+        return "Access denied", 403
+    except ValueError as error:
+        return str(error), 404
+    finally:
+        conn.close()
+
+
+@app.route("/behaviour/record", methods=["GET", "POST"])
+def behaviour_record():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        user = get_active_authenticated_user(conn, session["user_id"])
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
+
+    if request.method == "GET":
+        selected = request.args.get("client_id", type=int)
+        response = _render_behaviour_record(conn, selected)
+        conn.close()
+        return response
+
+    values = {}
+    try:
+        approved_fields = {
+            "client_id", "occurrence_local", "repeated_hour_choice", "notes",
+            "submission_token", *BEHAVIOUR_CATEGORY_FIELDS
+        }
+        submitted_fields = set(request.form.keys())
+        if not submitted_fields.issubset(approved_fields):
+            raise ValueError("Behaviour form input is invalid.")
+        for field_name in (
+            "client_id", "occurrence_local", "notes",
+            "submission_token"
+        ):
+            if len(request.form.getlist(field_name)) != 1:
+                raise ValueError("Behaviour form input is invalid.")
+        ambiguity_values = request.form.getlist("repeated_hour_choice")
+        if len(ambiguity_values) > 1:
+            raise ValueError("Behaviour form input is invalid.")
+        values = request.form.to_dict()
+        client_id = int(request.form.get("client_id", ""))
+        validate_active_behaviour_client(conn, client_id)
+        flags = {}
+        for field in BEHAVIOUR_CATEGORY_FIELDS:
+            values_for_field = request.form.getlist(field)
+            if not values_for_field:
+                flags[field] = 0
+            elif len(values_for_field) == 1 and values_for_field[0] == "1":
+                flags[field] = 1
+            else:
+                raise ValueError("Behaviour category input is invalid.")
+        flags = validate_behaviour_category_flags(flags)
+        local_input = request.form.get("occurrence_local", "")
+        ambiguity_choice = ambiguity_values[0] if ambiguity_values else ""
+        if is_vancouver_occurrence_input_ambiguous(local_input):
+            if ambiguity_choice not in ("first", "second"):
+                raise ValueError("Repeated Vancouver times require a first or second choice.")
+        elif ambiguity_choice:
+            raise ValueError("Ambiguity choice is only allowed for a repeated Vancouver time.")
+        occurrence_utc = convert_vancouver_occurrence_input_to_utc(
+            local_input, ambiguity_choice or None
+        )
+        notes = request.form.get("notes", "").strip() or None
+        if notes and len(notes) > BEHAVIOUR_NOTES_MAX_LENGTH:
+            raise ValueError("Behaviour notes cannot exceed 2,000 characters.")
+        token = request.form.get("submission_token", "")
+        if not BEHAVIOUR_TOKEN_PATTERN.fullmatch(token):
+            raise ValueError("Behaviour submission token is invalid.")
+        recorded_utc = serialize_behaviour_utc(datetime.now(timezone.utc).replace(microsecond=0))
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute("""
+                INSERT INTO behaviour_occurrences
+                (client_id, occurred_at_utc, aggression_towards_others,
+                 injury_to_others, self_harm, injury_to_self, property_damage,
+                 notes, recorded_by_user_id, recorded_at_utc, submission_token)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (client_id, occurrence_utc, *(flags[field] for field in BEHAVIOUR_CATEGORY_FIELDS),
+                  notes, user["user_id"], recorded_utc, token))
+            occurrence_id = cur.lastrowid
+            category_text = ", ".join(BEHAVIOUR_CATEGORY_LABELS[field] for field in BEHAVIOUR_CATEGORY_FIELDS if flags[field])
+            log_activity(conn, "BEHAVIOUR", "behaviour_occurrence_created",
+                "Behaviour occurrence recorded", user_id=user["user_id"], client_id=client_id,
+                related_table="behaviour_occurrences", related_id=occurrence_id,
+                details=f"Occurrence UTC: {occurrence_utc}; Categories: {category_text}", success=1)
+            conn.commit()
+        except sqlite3.IntegrityError as error:
+            conn.rollback()
+            if "UNIQUE constraint failed: behaviour_occurrences.submission_token" not in str(error):
+                raise
+            existing = conn.execute("SELECT occurred_at_utc, recorded_by_user_id FROM behaviour_occurrences WHERE submission_token = ?", (token,)).fetchone()
+            if existing and existing["recorded_by_user_id"] == user["user_id"]:
+                week = get_behaviour_operational_week_start(behaviour_utc_to_vancouver(existing["occurred_at_utc"]))
+                conn.close()
+                return redirect(url_for("behaviour_weekly", monday=week.isoformat()))
+            raise ValueError("Behaviour submission token is invalid.")
+        week = get_behaviour_operational_week_start(behaviour_utc_to_vancouver(occurrence_utc))
+        conn.close()
+        return redirect(url_for("behaviour_weekly", monday=week.isoformat()))
+    except (ValueError, PermissionError) as error:
+        response = _render_behaviour_record(conn, request.form.get("client_id", type=int), str(error), values)
+        conn.close()
+        return response, 400
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+        raise
 
 def log_activity(
     conn,
