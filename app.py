@@ -5,7 +5,8 @@
 from flask import Flask, render_template, request, redirect, session, url_for
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
+from datetime import datetime, time as datetime_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 import os
 import time
 
@@ -134,6 +135,22 @@ def inject_session_timeout_settings():
 
 DB_NAME = "nhpsg.db"
 
+VANCOUVER_TIMEZONE = ZoneInfo("America/Vancouver")
+
+BEHAVIOUR_CATEGORY_FIELDS = (
+    "aggression_towards_others",
+    "injury_to_others",
+    "self_harm",
+    "injury_to_self",
+    "property_damage",
+)
+
+BEHAVIOUR_VOID_AUTHORITY_ROLES = frozenset((
+    "Admin",
+    "Program Manager",
+    "Director",
+))
+
 #####################################################################
 # DATABASE & CORE HELPER FUNCTIONS
 #####################################################################
@@ -143,6 +160,227 @@ def get_db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+#####################################################################
+# BEHAVIOUR MODULE V1: SCHEMA-LEVEL BUSINESS RULE HELPERS
+#####################################################################
+
+def behaviour_utc_to_vancouver(stored_utc):
+    """Return a stored UTC instant as an aware Vancouver datetime."""
+    if isinstance(stored_utc, str):
+        stored_utc = parse_behaviour_utc(stored_utc)
+    elif isinstance(stored_utc, datetime):
+        stored_utc = parse_behaviour_utc(
+            serialize_behaviour_utc(stored_utc)
+        )
+    else:
+        raise ValueError("Stored UTC instant is required.")
+
+    return stored_utc.astimezone(VANCOUVER_TIMEZONE)
+
+
+def serialize_behaviour_utc(value):
+    """Serialize an aware instant in Behaviour V1's canonical UTC format."""
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError("A timezone-aware datetime is required.")
+    if value.microsecond != 0:
+        raise ValueError("Behaviour UTC timestamps cannot include fractions.")
+
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_behaviour_utc(value):
+    """Parse one canonical Behaviour V1 UTC timestamp."""
+    if not isinstance(value, str) or len(value) != 20:
+        raise ValueError("Behaviour UTC timestamp must use YYYY-MM-DDTHH:MM:SSZ.")
+
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as error:
+        raise ValueError(
+            "Behaviour UTC timestamp must use YYYY-MM-DDTHH:MM:SSZ."
+        ) from error
+
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise ValueError("Behaviour UTC timestamp must be canonical.")
+
+    return parsed.replace(tzinfo=timezone.utc)
+
+
+def get_behaviour_operational_day(vancouver_datetime):
+    """Return the named operational day for an aware Vancouver instant."""
+    local_datetime = _require_vancouver_datetime(vancouver_datetime)
+
+    if local_datetime.timetz().replace(tzinfo=None) >= datetime_time(23, 0):
+        return local_datetime.date() + timedelta(days=1)
+
+    return local_datetime.date()
+
+
+def get_behaviour_operational_band(vancouver_datetime):
+    """Return Night, Day, or Evening for an aware Vancouver instant."""
+    local_datetime = _require_vancouver_datetime(vancouver_datetime)
+    local_time = local_datetime.timetz().replace(tzinfo=None)
+
+    if local_time >= datetime_time(23, 0) or local_time < datetime_time(7, 30):
+        return "Night"
+    if local_time < datetime_time(15, 30):
+        return "Day"
+    return "Evening"
+
+
+def get_behaviour_operational_week_start(vancouver_datetime):
+    """Return the Monday date for the instant's named operational week."""
+    operational_day = get_behaviour_operational_day(vancouver_datetime)
+    return operational_day - timedelta(days=operational_day.weekday())
+
+
+def convert_vancouver_occurrence_input_to_utc(
+    local_input,
+    repeated_hour_choice=None,
+    now_utc=None
+):
+    """Validate a Vancouver wall time and return its UTC instant.
+
+    A repeated fall-back wall time requires ``first`` or ``second``.
+    Nonexistent spring-forward times and future instants are rejected.
+    """
+    local_naive = _parse_vancouver_local_input(local_input)
+    candidates = _valid_vancouver_utc_candidates(local_naive)
+
+    if not candidates:
+        raise ValueError("Occurrence time does not exist in Vancouver time.")
+
+    if len(candidates) == 2:
+        if repeated_hour_choice not in ("first", "second"):
+            raise ValueError(
+                "Repeated Vancouver times require a first or second choice."
+            )
+        occurrence_utc = candidates[0 if repeated_hour_choice == "first" else 1]
+    else:
+        occurrence_utc = candidates[0]
+
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif not isinstance(now_utc, datetime) or now_utc.tzinfo is None:
+        raise ValueError("Current UTC instant must include a UTC offset.")
+    else:
+        now_utc = now_utc.astimezone(timezone.utc)
+
+    if occurrence_utc > now_utc:
+        raise ValueError("Occurrence time cannot be in the future.")
+
+    return serialize_behaviour_utc(occurrence_utc)
+
+
+def validate_behaviour_category_flags(category_flags):
+    """Return normalised category flags and require at least one selection."""
+    if not isinstance(category_flags, dict):
+        raise ValueError("Behaviour category flags are required.")
+
+    if set(category_flags) != set(BEHAVIOUR_CATEGORY_FIELDS):
+        raise ValueError("Behaviour category flags are incomplete.")
+
+    normalised = {}
+    for field_name in BEHAVIOUR_CATEGORY_FIELDS:
+        value = category_flags[field_name]
+        if isinstance(value, bool):
+            normalised[field_name] = int(value)
+        elif type(value) is int and value in (0, 1):
+            normalised[field_name] = value
+        else:
+            raise ValueError("Behaviour category flags must be boolean.")
+
+    if not any(normalised.values()):
+        raise ValueError("At least one behaviour category is required.")
+
+    return normalised
+
+
+def get_active_authenticated_user(conn, user_id):
+    """Return the current active database user or reject the request."""
+    user = conn.execute("""
+        SELECT user_id, role, active
+        FROM users
+        WHERE user_id = ?
+          AND active = 1
+    """, (user_id,)).fetchone()
+
+    if user is None:
+        raise PermissionError("An active authenticated user is required.")
+
+    return user
+
+
+def validate_active_behaviour_client(conn, client_id):
+    """Return an active client or reject the request."""
+    client = conn.execute("""
+        SELECT client_id, active
+        FROM clients
+        WHERE client_id = ?
+          AND active = 1
+    """, (client_id,)).fetchone()
+
+    if client is None:
+        raise ValueError("An active client is required.")
+
+    return client
+
+
+def validate_behaviour_void_authority(conn, user_id):
+    """Return a current active management user allowed to void occurrences."""
+    user = get_active_authenticated_user(conn, user_id)
+
+    if user["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+        raise PermissionError("Current user is not allowed to void behaviour.")
+
+    return user
+
+
+def _require_vancouver_datetime(value):
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError("An aware Vancouver datetime is required.")
+
+    return value.astimezone(VANCOUVER_TIMEZONE)
+
+
+def _parse_vancouver_local_input(local_input):
+    if isinstance(local_input, datetime):
+        if local_input.tzinfo is not None:
+            raise ValueError("Occurrence input must be a Vancouver local wall time.")
+        return local_input
+
+    if not isinstance(local_input, str):
+        raise ValueError("Occurrence date and time is required.")
+
+    try:
+        parsed = datetime.strptime(local_input, "%Y-%m-%dT%H:%M")
+    except ValueError as error:
+        raise ValueError("Occurrence date and time is invalid.") from error
+
+    if parsed.strftime("%Y-%m-%dT%H:%M") != local_input:
+        raise ValueError("Occurrence date and time is invalid.")
+
+    return parsed
+
+
+def _valid_vancouver_utc_candidates(local_naive):
+    candidates = []
+    for fold in (0, 1):
+        local_aware = local_naive.replace(
+            tzinfo=VANCOUVER_TIMEZONE,
+            fold=fold
+        )
+        candidate_utc = local_aware.astimezone(timezone.utc)
+        round_trip = candidate_utc.astimezone(VANCOUVER_TIMEZONE)
+
+        if round_trip.replace(tzinfo=None) != local_naive:
+            continue
+        if candidate_utc not in candidates:
+            candidates.append(candidate_utc)
+
+    return sorted(candidates)
 
 def log_activity(
     conn,
