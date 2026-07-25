@@ -436,12 +436,14 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
         self.assertRegex(
             markup,
             re.compile(
+                r'<div>\s*'
                 r'<label\s+for="physically_thrown">\s*'
                 r'<input\s+type="checkbox"\s+'
                 r'id="physically_thrown"\s+'
                 r'name="physically_thrown"\s+'
                 r'value="1"\s+style="width:auto;"[^>]*>\s*'
-                r'Physically thrown\s*</label>',
+                r'Physically thrown\s*</label>\s*</div>\s*'
+                r'<label\s+for="additional_details">',
                 re.DOTALL
             )
         )
