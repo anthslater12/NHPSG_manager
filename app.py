@@ -162,6 +162,19 @@ BEHAVIOUR_CATEGORY_LABELS = {
 BEHAVIOUR_NOTES_MAX_LENGTH = 2000
 BEHAVIOUR_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
+FOOD_FLUID_INTERACTION_TYPES = ("Offered", "Requested")
+FOOD_FLUID_OUTCOMES = (
+    "All consumed",
+    "Partially consumed",
+    "Refused",
+    "Item not available",
+)
+FOOD_FLUID_THROWN_OUTCOMES = (
+    "Partially consumed",
+    "Refused",
+)
+FOOD_FLUID_ASCII_WHITESPACE = " \t\n\r\v\f"
+
 #####################################################################
 # DATABASE & CORE HELPER FUNCTIONS
 #####################################################################
@@ -399,6 +412,137 @@ def is_vancouver_occurrence_input_ambiguous(local_input):
     return len(_valid_vancouver_utc_candidates(
         _parse_vancouver_local_input(local_input)
     )) == 2
+
+
+#####################################################################
+# FOOD & FLUID V1: WORKER RECORDING HELPERS
+#####################################################################
+
+def strip_food_fluid_ascii_whitespace(value):
+    """Trim supported ASCII whitespace from a Food & Fluid form value."""
+    if not isinstance(value, str):
+        raise ValueError("Food & Fluid form input is invalid.")
+    return value.strip(FOOD_FLUID_ASCII_WHITESPACE)
+
+
+def get_active_food_fluid_shift_context(conn, shift_id, user_id):
+    """Return authoritative context for an active Support Worker shift."""
+    user = get_active_authenticated_user(conn, user_id)
+    if user["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may record Food & Fluid."
+        )
+
+    context = conn.execute("""
+        SELECT
+            s.shift_id,
+            s.client_id,
+            s.shift_date,
+            s.shift_type,
+            s.status AS shift_status,
+            c.client_name,
+            c.active AS client_active,
+            ss.shift_staff_id,
+            ss.active AS participation_active,
+            u.user_id AS recorded_by_user_id,
+            u.role AS recorded_by_role,
+            u.active AS recorded_by_active
+        FROM shifts s
+        JOIN clients c
+            ON c.client_id = s.client_id
+        JOIN shift_staff ss
+            ON ss.shift_id = s.shift_id
+           AND ss.user_id = ?
+        JOIN users u
+            ON u.user_id = ss.user_id
+        WHERE s.shift_id = ?
+          AND s.status = 'Open'
+          AND c.active = 1
+          AND ss.active = 1
+          AND u.active = 1
+          AND u.role = 'Support Worker'
+        ORDER BY ss.shift_staff_id
+        LIMIT 1
+    """, (user["user_id"], shift_id)).fetchone()
+
+    if context is None:
+        raise PermissionError(
+            "Active participation in this open shift is required."
+        )
+
+    return context
+
+
+def get_food_fluid_shift_window(shift):
+    """Return the half-open Vancouver interval for an authoritative shift."""
+    try:
+        shift_date = date.fromisoformat(shift["shift_date"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("The shift date is invalid.") from error
+
+    shift_type = shift["shift_type"]
+    if shift_type == "Day":
+        start_time = datetime_time(7, 0)
+        end_date = shift_date
+        end_time = datetime_time(15, 0)
+    elif shift_type == "Afternoon":
+        start_time = datetime_time(15, 0)
+        end_date = shift_date
+        end_time = datetime_time(23, 0)
+    elif shift_type == "Overnight":
+        start_time = datetime_time(23, 0)
+        end_date = shift_date + timedelta(days=1)
+        end_time = datetime_time(7, 0)
+    else:
+        raise ValueError("The shift type is invalid.")
+
+    start_local = datetime.combine(
+        shift_date,
+        start_time,
+        VANCOUVER_TIMEZONE
+    )
+    end_local = datetime.combine(
+        end_date,
+        end_time,
+        VANCOUVER_TIMEZONE
+    )
+    return start_local, end_local
+
+
+def convert_food_fluid_event_input_to_utc(
+    shift,
+    local_input,
+    repeated_hour_choice=None,
+    now_utc=None
+):
+    """Validate a shift-local Food & Fluid event and return canonical UTC."""
+    ambiguous = is_vancouver_occurrence_input_ambiguous(local_input)
+    if ambiguous:
+        if repeated_hour_choice not in ("first", "second"):
+            raise ValueError(
+                "Repeated Vancouver times require a first or second choice."
+            )
+    elif repeated_hour_choice:
+        raise ValueError(
+            "Repeated-hour choice is allowed only for a repeated time."
+        )
+
+    event_at_utc = convert_vancouver_occurrence_input_to_utc(
+        local_input,
+        repeated_hour_choice,
+        now_utc
+    )
+    event_utc = parse_behaviour_utc(event_at_utc)
+    start_local, end_local = get_food_fluid_shift_window(shift)
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+
+    if not start_utc <= event_utc < end_utc:
+        raise ValueError(
+            "Event time must fall within the selected shift."
+        )
+
+    return event_at_utc
 
 
 def get_behaviour_operational_week_range(monday):
@@ -752,9 +896,10 @@ def log_activity(
         success
     ))
 
-def get_current_shift_type():
-    now = datetime.now()
-    hour = now.hour
+def get_current_shift_type(current_datetime=None):
+    if current_datetime is None:
+        current_datetime = datetime.now(VANCOUVER_TIMEZONE)
+    hour = current_datetime.hour
 
     if 7 <= hour < 15:
         return "Day"
@@ -764,9 +909,21 @@ def get_current_shift_type():
         return "Overnight"
     
 
+def get_current_shift_date(current_datetime=None):
+    """Return the start date for the current Vancouver shift."""
+    if current_datetime is None:
+        current_datetime = datetime.now(VANCOUVER_TIMEZONE)
+
+    shift_date = current_datetime.date()
+    if current_datetime.hour < 7:
+        shift_date -= timedelta(days=1)
+    return shift_date
+
+
 def get_active_shift_staff():
-    shift_type = get_current_shift_type()
-    shift_date = datetime.now().strftime("%Y-%m-%d")
+    current_datetime = datetime.now(VANCOUVER_TIMEZONE)
+    shift_type = get_current_shift_type(current_datetime)
+    shift_date = get_current_shift_date(current_datetime).isoformat()
 
     conn = get_db()
 
@@ -1561,9 +1718,10 @@ def client_new():
 #####################################################################
 
 def auto_sign_on_user(user_id):
-    shift_type = get_current_shift_type()
-    shift_date = datetime.now().strftime("%Y-%m-%d")
-    actual_start_time = datetime.now().strftime("%H:%M")
+    current_datetime = datetime.now(VANCOUVER_TIMEZONE)
+    shift_type = get_current_shift_type(current_datetime)
+    shift_date = get_current_shift_date(current_datetime).isoformat()
+    actual_start_time = current_datetime.strftime("%H:%M")
 
     conn = get_db()
 
@@ -2152,6 +2310,225 @@ def toileting_event_new(shift_id):
         "toileting_event_new.html",
         shift=shift
     )
+
+
+#####################################################################
+# FOOD & FLUID V1: WORKER RECORDING
+#####################################################################
+
+@app.route(
+    "/shift/<int:shift_id>/food-fluid/new",
+    methods=["GET", "POST"]
+)
+def food_fluid_entry_new(shift_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    shift_context = None
+    values = {}
+
+    try:
+        shift_context = get_active_food_fluid_shift_context(
+            conn,
+            shift_id,
+            session["user_id"]
+        )
+
+        if request.method == "GET":
+            return render_template(
+                "food_fluid_entry_new.html",
+                shift=shift_context,
+                values=values,
+                error=None,
+                interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+                outcomes=FOOD_FLUID_OUTCOMES,
+                default_event_local=datetime.now(
+                    VANCOUVER_TIMEZONE
+                ).strftime("%Y-%m-%dT%H:%M")
+            )
+
+        approved_fields = {
+            "event_local",
+            "repeated_hour_choice",
+            "interaction_type",
+            "item_description",
+            "outcome",
+            "physically_thrown",
+            "additional_details",
+        }
+        if not set(request.form).issubset(approved_fields):
+            raise ValueError("Food & Fluid form input is invalid.")
+
+        required_fields = (
+            "event_local",
+            "interaction_type",
+            "item_description",
+            "outcome",
+        )
+        for field_name in required_fields:
+            if len(request.form.getlist(field_name)) != 1:
+                raise ValueError("Food & Fluid form input is invalid.")
+
+        for field_name in (
+            "repeated_hour_choice",
+            "additional_details",
+        ):
+            if len(request.form.getlist(field_name)) > 1:
+                raise ValueError("Food & Fluid form input is invalid.")
+
+        thrown_values = request.form.getlist("physically_thrown")
+        if not thrown_values:
+            physically_thrown = 0
+        elif thrown_values == ["1"]:
+            physically_thrown = 1
+        else:
+            raise ValueError("Physically thrown input is invalid.")
+
+        values = request.form.to_dict()
+        event_local = strip_food_fluid_ascii_whitespace(
+            request.form["event_local"]
+        )
+        repeated_hour_choice = strip_food_fluid_ascii_whitespace(
+            request.form.get("repeated_hour_choice", "")
+        )
+        interaction_type = strip_food_fluid_ascii_whitespace(
+            request.form["interaction_type"]
+        )
+        item_description = strip_food_fluid_ascii_whitespace(
+            request.form["item_description"]
+        )
+        outcome = strip_food_fluid_ascii_whitespace(
+            request.form["outcome"]
+        )
+        additional_details = strip_food_fluid_ascii_whitespace(
+            request.form.get("additional_details", "")
+        ) or None
+
+        if interaction_type not in FOOD_FLUID_INTERACTION_TYPES:
+            raise ValueError(
+                "Interaction type must be Offered or Requested."
+            )
+        if not item_description:
+            raise ValueError("Food or beverage item is required.")
+        if outcome not in FOOD_FLUID_OUTCOMES:
+            raise ValueError("A valid outcome is required.")
+        if (
+            outcome == "Item not available"
+            and interaction_type != "Requested"
+        ):
+            raise ValueError(
+                "Item not available is valid only for a request."
+            )
+        if (
+            physically_thrown
+            and outcome not in FOOD_FLUID_THROWN_OUTCOMES
+        ):
+            raise ValueError(
+                "Physically thrown is valid only when partially "
+                "consumed or refused."
+            )
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            shift_context = get_active_food_fluid_shift_context(
+                conn,
+                shift_id,
+                session["user_id"]
+            )
+            event_at_utc = convert_food_fluid_event_input_to_utc(
+                shift_context,
+                event_local,
+                repeated_hour_choice or None
+            )
+            submitted_at_utc = serialize_behaviour_utc(
+                datetime.now(timezone.utc).replace(microsecond=0)
+            )
+            submission_token = secrets.token_urlsafe(32)
+
+            cursor = conn.execute("""
+                INSERT INTO food_fluid_entries
+                (
+                    shift_id,
+                    client_id,
+                    recorded_by_user_id,
+                    event_at_utc,
+                    interaction_type,
+                    item_description,
+                    outcome,
+                    physically_thrown,
+                    additional_details,
+                    submitted_at_utc,
+                    submission_token
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                shift_context["shift_id"],
+                shift_context["client_id"],
+                shift_context["recorded_by_user_id"],
+                event_at_utc,
+                interaction_type,
+                item_description,
+                outcome,
+                physically_thrown,
+                additional_details,
+                submitted_at_utc,
+                submission_token,
+            ))
+            entry_id = cursor.lastrowid
+
+            log_activity(
+                conn,
+                activity_class="FOOD_FLUID",
+                activity_type="food_fluid_entry_created",
+                summary="Food & Fluid entry recorded",
+                user_id=shift_context["recorded_by_user_id"],
+                client_id=shift_context["client_id"],
+                shift_id=shift_context["shift_id"],
+                related_table="food_fluid_entries",
+                related_id=entry_id,
+                details=(
+                    f"Event UTC: {event_at_utc}; "
+                    f"Interaction: {interaction_type}; "
+                    f"Outcome: {outcome}"
+                ),
+                success=1
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        return redirect(
+            url_for(
+                "food_fluid_entry_new",
+                shift_id=shift_context["shift_id"],
+                created=1
+            )
+        )
+
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return render_template(
+            "food_fluid_entry_new.html",
+            shift=shift_context,
+            values=values,
+            error=str(error),
+            interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+            outcomes=FOOD_FLUID_OUTCOMES,
+            default_event_local=datetime.now(
+                VANCOUVER_TIMEZONE
+            ).strftime("%Y-%m-%dT%H:%M")
+        ), 400
+    finally:
+        conn.close()
+
 
 @app.route("/shift-staff/<int:shift_staff_id>/manager-sign-off", methods=["GET", "POST"])
 def manager_sign_off(shift_staff_id):

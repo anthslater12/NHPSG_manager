@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Record Food &amp; Fluid</h2>
+
+    <p>
+        <strong>Client:</strong> {{ shift.client_name }}<br>
+        <strong>Shift:</strong>
+        {{ shift.shift_date }} {{ shift.shift_type }}
+    </p>
+
+    {% if request.args.get("created") == "1" %}
+        <p class="success-message">
+            Food &amp; Fluid entry recorded.
+        </p>
+    {% endif %}
+
+    {% if error %}
+        <p class="error-message">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+
+        <label for="event_local">
+            Event date and time
+        </label>
+        <input
+            type="datetime-local"
+            id="event_local"
+            name="event_local"
+            value="{{ values.get('event_local', default_event_local) }}"
+            required
+        >
+
+        <label for="repeated_hour_choice">
+            Repeated fall-back hour
+        </label>
+        <select
+            id="repeated_hour_choice"
+            name="repeated_hour_choice"
+        >
+            <option value="">Not applicable</option>
+            <option
+                value="first"
+                {% if values.get("repeated_hour_choice") == "first" %}
+                    selected
+                {% endif %}
+            >
+                First occurrence
+            </option>
+            <option
+                value="second"
+                {% if values.get("repeated_hour_choice") == "second" %}
+                    selected
+                {% endif %}
+            >
+                Second occurrence
+            </option>
+        </select>
+
+        <label for="interaction_type">Interaction type</label>
+        <select
+            id="interaction_type"
+            name="interaction_type"
+            required
+        >
+            <option value="">Select interaction</option>
+            {% for interaction_type in interaction_types %}
+                <option
+                    value="{{ interaction_type }}"
+                    {% if values.get("interaction_type")
+                          == interaction_type %}
+                        selected
+                    {% endif %}
+                >
+                    {{ interaction_type }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label for="item_description">
+            Food or beverage item
+        </label>
+        <input
+            type="text"
+            id="item_description"
+            name="item_description"
+            value="{{ values.get('item_description', '') }}"
+            required
+        >
+
+        <label for="outcome">Outcome</label>
+        <select id="outcome" name="outcome" required>
+            <option value="">Select outcome</option>
+            {% for outcome in outcomes %}
+                <option
+                    value="{{ outcome }}"
+                    {% if values.get("outcome") == outcome %}
+                        selected
+                    {% endif %}
+                >
+                    {{ outcome }}
+                </option>
+            {% endfor %}
+        </select>
+
+        <label>
+            <input
+                type="checkbox"
+                name="physically_thrown"
+                value="1"
+                {% if values.get("physically_thrown") == "1" %}
+                    checked
+                {% endif %}
+            >
+            Physically thrown
+        </label>
+
+        <label for="additional_details">
+            Additional details
+        </label>
+        <textarea
+            id="additional_details"
+            name="additional_details"
+            rows="4"
+        >{{ values.get("additional_details", "") }}</textarea>
+
+        <button type="submit">
+            Record Food &amp; Fluid
+        </button>
+
+    </form>
+
+</div>
+
+{% endblock %}

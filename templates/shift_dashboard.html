@@ -52,7 +52,15 @@
             + Toileting
         </a>
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/medication">+ Medication</a>
-        <a class="quick-button" href="/shift/{{ shift.shift_id }}/meal">+ Meal</a>
+        <a
+            class="quick-button"
+            href="{{ url_for(
+                'food_fluid_entry_new',
+                shift_id=shift.shift_id
+            ) }}"
+        >
+            + Food &amp; Fluid
+        </a>
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/activity">+ Activity</a>
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
         <a class="quick-button" href="/incident/new">+ Incident</a>
