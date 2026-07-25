@@ -545,6 +545,68 @@ def convert_food_fluid_event_input_to_utc(
     return event_at_utc
 
 
+def get_food_fluid_shift_entries(conn, shift_id, limit=None):
+    """Return Food & Fluid entries for one shift in display order."""
+    sql = """
+        SELECT
+            ffe.food_fluid_entry_id,
+            ffe.shift_id,
+            ffe.client_id,
+            ffe.event_at_utc,
+            ffe.interaction_type,
+            ffe.item_description,
+            ffe.outcome,
+            ffe.physically_thrown,
+            ffe.additional_details,
+            ffe.submitted_at_utc,
+            ffe.status,
+            ffe.voided_at_utc,
+            ffe.void_reason,
+            recorded_by.full_name AS recorded_by_name,
+            voided_by.full_name AS voided_by_name
+        FROM food_fluid_entries ffe
+        JOIN shifts entry_shift
+            ON entry_shift.shift_id = ffe.shift_id
+           AND entry_shift.client_id = ffe.client_id
+        JOIN clients entry_client
+            ON entry_client.client_id = entry_shift.client_id
+           AND entry_client.active = 1
+        JOIN users recorded_by
+            ON recorded_by.user_id = ffe.recorded_by_user_id
+        LEFT JOIN users voided_by
+            ON voided_by.user_id = ffe.voided_by_user_id
+        WHERE ffe.shift_id = ?
+        ORDER BY
+            ffe.event_at_utc DESC,
+            ffe.food_fluid_entry_id DESC
+    """
+    parameters = [shift_id]
+    if limit is not None:
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("Food & Fluid entry limit is invalid.")
+        sql += "\nLIMIT ?"
+        parameters.append(limit)
+
+    rows = conn.execute(sql, parameters).fetchall()
+    entries = []
+    for row in rows:
+        entry = dict(row)
+        entry["event_local_display"] = behaviour_utc_to_vancouver(
+            entry["event_at_utc"]
+        ).strftime("%Y-%m-%d %H:%M")
+        entry["submitted_local_display"] = behaviour_utc_to_vancouver(
+            entry["submitted_at_utc"]
+        ).strftime("%Y-%m-%d %H:%M")
+        entry["voided_local_display"] = None
+        if entry["voided_at_utc"]:
+            entry["voided_local_display"] = behaviour_utc_to_vancouver(
+                entry["voided_at_utc"]
+            ).strftime("%Y-%m-%d %H:%M")
+        entries.append(entry)
+
+    return entries
+
+
 def get_behaviour_operational_week_range(monday):
     """Return canonical UTC bounds for a named Monday operational week."""
     if not isinstance(monday, date) or monday.weekday() != 0:
@@ -1875,6 +1937,23 @@ def shift_dashboard(shift_id):
       conn.close()
       return "Shift not found", 404
 
+    food_fluid_authorized = False
+    recent_food_fluid_entries = []
+    try:
+        get_active_food_fluid_shift_context(
+            conn,
+            shift_id,
+            session["user_id"]
+        )
+        food_fluid_authorized = True
+        recent_food_fluid_entries = get_food_fluid_shift_entries(
+            conn,
+            shift_id,
+            limit=5
+        )
+    except PermissionError:
+        pass
+
     staff = conn.execute("""
         SELECT ss.*, u.full_name, u.role
         FROM shift_staff ss
@@ -1970,6 +2049,8 @@ def shift_dashboard(shift_id):
         shift=shift,
         staff=staff,
         notes=notes,
+        food_fluid_authorized=food_fluid_authorized,
+        recent_food_fluid_entries=recent_food_fluid_entries,
 
         care_tasks=care_tasks,
         care_task_entries=care_task_entries,
@@ -2313,8 +2394,32 @@ def toileting_event_new(shift_id):
 
 
 #####################################################################
-# FOOD & FLUID V1: WORKER RECORDING
+# FOOD & FLUID V1: WORKER WORKFLOWS
 #####################################################################
+
+@app.route("/shift/<int:shift_id>/food-fluid")
+def food_fluid_shift_list(shift_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        shift_context = get_active_food_fluid_shift_context(
+            conn,
+            shift_id,
+            session["user_id"]
+        )
+        entries = get_food_fluid_shift_entries(conn, shift_id)
+        return render_template(
+            "food_fluid_shift_list.html",
+            shift=shift_context,
+            entries=entries
+        )
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
 
 @app.route(
     "/shift/<int:shift_id>/food-fluid/new",
