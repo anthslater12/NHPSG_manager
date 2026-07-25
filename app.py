@@ -4363,6 +4363,118 @@ def review_food_fluid_entry(entry_id):
     ))
 
 
+@app.route(
+    "/manager-review/food-fluid/<int:entry_id>/void",
+    methods=["GET", "POST"]
+)
+def void_food_fluid_entry(entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        if request.method == "GET":
+            get_food_fluid_management_actor(conn, session["user_id"])
+            entry = get_food_fluid_management_entry(conn, entry_id)
+            if entry is None:
+                raise LookupError("Food & Fluid entry not found.")
+            if entry["status"] != "Recorded":
+                raise RuntimeError("Food & Fluid entry has already been voided.")
+            return render_template(
+                "food_fluid_void_confirm.html",
+                entry=entry,
+                state_filter=get_food_fluid_review_filter()
+            )
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor = get_food_fluid_management_actor(
+                conn,
+                session["user_id"]
+            )
+            if (
+                set(request.form.keys()) != {"void_reason"}
+                or len(request.form.getlist("void_reason")) != 1
+            ):
+                raise ValueError("Food & Fluid void input is invalid.")
+
+            void_reason = request.form["void_reason"].strip()
+            if not void_reason:
+                raise ValueError("A Food & Fluid void reason is required.")
+
+            entry = get_food_fluid_management_entry(conn, entry_id)
+            if entry is None:
+                raise LookupError("Food & Fluid entry not found.")
+            if entry["status"] != "Recorded":
+                raise RuntimeError(
+                    "Food & Fluid entry has already been voided."
+                )
+
+            voided_at_utc = serialize_behaviour_utc(
+                datetime.now(timezone.utc).replace(microsecond=0)
+            )
+            updated = conn.execute("""
+                UPDATE food_fluid_entries
+                SET
+                    status = 'Voided',
+                    voided_by_user_id = ?,
+                    voided_at_utc = ?,
+                    void_reason = ?
+                WHERE food_fluid_entry_id = ?
+                  AND status = 'Recorded'
+            """, (
+                actor["user_id"],
+                voided_at_utc,
+                void_reason,
+                entry_id
+            ))
+            if updated.rowcount != 1:
+                raise RuntimeError(
+                    "Food & Fluid entry has already been voided."
+                )
+
+            log_activity(
+                conn,
+                activity_class="FOOD_FLUID",
+                activity_type="food_fluid_entry_voided",
+                summary="Food & Fluid entry voided",
+                user_id=actor["user_id"],
+                client_id=entry["client_id"],
+                shift_id=entry["shift_id"],
+                related_table="food_fluid_entries",
+                related_id=entry_id,
+                details=(
+                    f"Event UTC: {entry['event_at_utc']}; "
+                    f"Interaction: {entry['interaction_type']}; "
+                    f"Item: {entry['item_description']}; "
+                    f"Outcome: {entry['outcome']}; "
+                    f"Void reason: {void_reason}"
+                ),
+                success=1
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        return redirect(url_for(
+            "food_fluid_review_detail",
+            entry_id=entry_id,
+            state=get_food_fluid_review_filter()
+        ))
+    except PermissionError:
+        return "Access denied", 403
+    except LookupError as error:
+        return str(error), 404
+    except RuntimeError as error:
+        return str(error), 409
+    except ValueError as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
+
 #
 # Care Review
 #

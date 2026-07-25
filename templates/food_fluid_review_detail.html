@@ -30,6 +30,18 @@
         <strong>Management State:</strong> {{ entry.management_state }}
     </p>
 
+    {% if entry.status == "Recorded" %}
+        <p>
+            <a href="{{ url_for(
+                'void_food_fluid_entry',
+                entry_id=entry.food_fluid_entry_id,
+                state=state_filter
+            ) }}">
+                Void this entry
+            </a>
+        </p>
+    {% endif %}
+
     <table>
         <tr>
             <th>Client</th>

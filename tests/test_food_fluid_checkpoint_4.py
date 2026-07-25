@@ -484,7 +484,7 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
         self.assertIn("Entered in error", voided)
         self.assertIn("2024-01-15 09:02", voided)
 
-    def test_no_management_void_controls(self):
+    def test_no_inline_management_void_controls(self):
         self.login(1)
         list_text = self.client.get(
             "/manager-review/food-fluid"
@@ -493,7 +493,8 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
             "/manager-review/food-fluid/1"
         ).get_data(as_text=True)
         self.assertNotIn("/void", list_text)
-        self.assertNotIn("/void", detail_text)
+        self.assertIn("/void", detail_text)
+        self.assertNotIn("Confirm Void", detail_text)
         self.assertNotRegex(detail_text, re.compile(r"<button[^>]*>Void"))
 
     def test_worker_access_has_not_regressed(self):
