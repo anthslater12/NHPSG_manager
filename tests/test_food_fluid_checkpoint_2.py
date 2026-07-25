@@ -427,6 +427,37 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
             1
         )
 
+    def test_checkbox_and_additional_details_have_distinct_labels(self):
+        self.login(1)
+        response = self.client.get("/shift/10/food-fluid/new")
+        self.assertEqual(response.status_code, 200)
+        markup = response.get_data(as_text=True)
+
+        self.assertRegex(
+            markup,
+            re.compile(
+                r'<label\s+for="physically_thrown">\s*'
+                r'<input\s+type="checkbox"\s+'
+                r'id="physically_thrown"\s+'
+                r'name="physically_thrown"\s+'
+                r'value="1"\s+style="width:auto;"[^>]*>\s*'
+                r'Physically thrown\s*</label>',
+                re.DOTALL
+            )
+        )
+        self.assertRegex(
+            markup,
+            re.compile(
+                r'<label\s+for="additional_details">\s*'
+                r'Additional details\s*</label>\s*'
+                r'<textarea\s+id="additional_details"\s+'
+                r'name="additional_details"',
+                re.DOTALL
+            )
+        )
+        self.assertEqual(markup.count("Physically thrown"), 1)
+        self.assertEqual(markup.count("Additional details"), 1)
+
     def test_server_generates_submission_timestamp_and_unique_tokens(self):
         self.login(1)
         before = datetime.now(timezone.utc).replace(microsecond=0)

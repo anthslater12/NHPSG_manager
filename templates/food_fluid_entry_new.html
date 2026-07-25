@@ -107,11 +107,13 @@
             {% endfor %}
         </select>
 
-        <label>
+        <label for="physically_thrown">
             <input
                 type="checkbox"
+                id="physically_thrown"
                 name="physically_thrown"
                 value="1"
+                style="width:auto;"
                 {% if values.get("physically_thrown") == "1" %}
                     checked
                 {% endif %}
