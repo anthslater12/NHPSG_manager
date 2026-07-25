@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Food &amp; Fluid Entry Detail</h2>
+
+    <p>
+        <a href="{{ url_for(
+            'food_fluid_review_list',
+            state=state_filter
+        ) }}">
+            Back to Food &amp; Fluid Review
+        </a>
+        &nbsp;|&nbsp;
+        <a href="{{ url_for('manager_review_hub') }}">
+            Management Review
+        </a>
+    </p>
+
+    <p>
+        <strong>Record Status:</strong>
+        {% if entry.status == "Voided" %}
+            <span class="status-inactive">Voided</span>
+        {% else %}
+            <span class="status-active">Active</span>
+        {% endif %}
+        <br>
+        <strong>Management State:</strong> {{ entry.management_state }}
+    </p>
+
+    <table>
+        <tr>
+            <th>Client</th>
+            <td>{{ entry.client_name }}</td>
+        </tr>
+        <tr>
+            <th>Shift</th>
+            <td>{{ entry.shift_date }} {{ entry.shift_type }}</td>
+        </tr>
+        <tr>
+            <th>Event</th>
+            <td>{{ entry.event_local_display }}</td>
+        </tr>
+        <tr>
+            <th>Interaction</th>
+            <td>{{ entry.interaction_type }}</td>
+        </tr>
+        <tr>
+            <th>Item</th>
+            <td>{{ entry.item_description }}</td>
+        </tr>
+        <tr>
+            <th>Outcome</th>
+            <td>{{ entry.outcome }}</td>
+        </tr>
+        <tr>
+            <th>Physically Thrown</th>
+            <td>{% if entry.physically_thrown %}Yes{% else %}No{% endif %}</td>
+        </tr>
+        <tr>
+            <th>Additional Details</th>
+            <td>{{ entry.additional_details or "—" }}</td>
+        </tr>
+        <tr>
+            <th>Recorded By</th>
+            <td>{{ entry.recorded_by_name }}</td>
+        </tr>
+        <tr>
+            <th>Submitted</th>
+            <td>{{ entry.submitted_local_display }}</td>
+        </tr>
+        {% if entry.status == "Voided" %}
+            <tr>
+                <th>Voided By</th>
+                <td>{{ entry.voided_by_name }}</td>
+            </tr>
+            <tr>
+                <th>Voided At</th>
+                <td>{{ entry.voided_local_display }}</td>
+            </tr>
+            <tr>
+                <th>Void Reason</th>
+                <td>{{ entry.void_reason }}</td>
+            </tr>
+        {% endif %}
+    </table>
+
+</div>
+
+<div class="card">
+
+    <h3>Viewed</h3>
+
+    <p>
+        Opening this full detail records a View once for each authorized
+        management user.
+    </p>
+
+    <ul>
+        {% for view in view_history %}
+            <li>
+                {{ view.viewer_name }} — {{ view.activity_datetime }}
+            </li>
+        {% endfor %}
+    </ul>
+
+</div>
+
+<div class="card">
+
+    <h3>Reviewed</h3>
+
+    {% if review_history %}
+        <ul>
+            {% for review in review_history %}
+                <li>
+                    {{ review.reviewer_name }} —
+                    {{ review.acknowledged_at }}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>Not yet reviewed.</p>
+    {% endif %}
+
+    {% if reviewed_by_current_user %}
+        <p>You have reviewed this entry.</p>
+    {% else %}
+        <form
+            method="post"
+            action="{{ url_for(
+                'review_food_fluid_entry',
+                entry_id=entry.food_fluid_entry_id,
+                state=state_filter
+            ) }}">
+            <button type="submit">Mark Reviewed</button>
+        </form>
+    {% endif %}
+
+</div>
+
+{% endblock %}

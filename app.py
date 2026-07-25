@@ -152,6 +152,7 @@ BEHAVIOUR_VOID_AUTHORITY_ROLES = frozenset((
     "Program Manager",
     "Director",
 ))
+FOOD_FLUID_MANAGEMENT_ROLES = BEHAVIOUR_VOID_AUTHORITY_ROLES
 BEHAVIOUR_CATEGORY_LABELS = {
     "aggression_towards_others": "Aggression towards others",
     "injury_to_others": "Injury to others",
@@ -605,6 +606,175 @@ def get_food_fluid_shift_entries(conn, shift_id, limit=None):
         entries.append(entry)
 
     return entries
+
+
+def get_food_fluid_management_actor(conn, user_id):
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in FOOD_FLUID_MANAGEMENT_ROLES:
+        raise PermissionError("Current user is not allowed to review Food & Fluid.")
+    return actor
+
+
+def get_food_fluid_management_entry(conn, entry_id):
+    row = conn.execute("""
+        SELECT
+            ffe.food_fluid_entry_id,
+            ffe.shift_id,
+            ffe.client_id,
+            ffe.recorded_by_user_id,
+            ffe.event_at_utc,
+            ffe.interaction_type,
+            ffe.item_description,
+            ffe.outcome,
+            ffe.physically_thrown,
+            ffe.additional_details,
+            ffe.submitted_at_utc,
+            ffe.status,
+            ffe.voided_at_utc,
+            ffe.void_reason,
+            c.client_name,
+            s.shift_date,
+            s.shift_type,
+            recorder.full_name AS recorded_by_name,
+            voider.full_name AS voided_by_name
+        FROM food_fluid_entries AS ffe
+        JOIN shifts AS s
+          ON s.shift_id = ffe.shift_id
+         AND s.client_id = ffe.client_id
+        JOIN clients AS c ON c.client_id = ffe.client_id
+        JOIN users AS recorder ON recorder.user_id = ffe.recorded_by_user_id
+        LEFT JOIN users AS voider ON voider.user_id = ffe.voided_by_user_id
+        WHERE ffe.food_fluid_entry_id = ?
+    """, (entry_id,)).fetchone()
+    if row is None:
+        return None
+
+    entry = dict(row)
+    entry["event_local_display"] = behaviour_utc_to_vancouver(
+        entry["event_at_utc"]
+    ).strftime("%Y-%m-%d %H:%M")
+    entry["submitted_local_display"] = behaviour_utc_to_vancouver(
+        entry["submitted_at_utc"]
+    ).strftime("%Y-%m-%d %H:%M")
+    entry["voided_local_display"] = (
+        behaviour_utc_to_vancouver(entry["voided_at_utc"]).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        if entry["voided_at_utc"]
+        else None
+    )
+    return entry
+
+
+def get_food_fluid_management_entries(conn):
+    rows = conn.execute("""
+        SELECT
+            ffe.food_fluid_entry_id,
+            ffe.event_at_utc,
+            ffe.interaction_type,
+            ffe.item_description,
+            ffe.outcome,
+            ffe.status,
+            c.client_name,
+            s.shift_date,
+            s.shift_type,
+            recorder.full_name AS recorded_by_name,
+            EXISTS (
+                SELECT 1
+                FROM activity_log AS al
+                WHERE al.activity_class = 'FOOD_FLUID'
+                  AND al.activity_type = 'food_fluid_entry_viewed'
+                  AND al.related_table = 'food_fluid_entries'
+                  AND al.related_id = ffe.food_fluid_entry_id
+                  AND al.success = 1
+            ) AS has_view,
+            EXISTS (
+                SELECT 1
+                FROM acknowledgements AS ack
+                WHERE ack.source_table = 'food_fluid_entries'
+                  AND ack.source_id = ffe.food_fluid_entry_id
+                  AND ack.acknowledgement_type = 'Review'
+                  AND ack.active = 1
+            ) AS has_review
+        FROM food_fluid_entries AS ffe
+        JOIN shifts AS s
+          ON s.shift_id = ffe.shift_id
+         AND s.client_id = ffe.client_id
+        JOIN clients AS c ON c.client_id = ffe.client_id
+        JOIN users AS recorder ON recorder.user_id = ffe.recorded_by_user_id
+        ORDER BY ffe.event_at_utc DESC, ffe.food_fluid_entry_id DESC
+    """).fetchall()
+
+    entries = []
+    for row in rows:
+        entry = dict(row)
+        entry["event_local_display"] = behaviour_utc_to_vancouver(
+            entry["event_at_utc"]
+        ).strftime("%Y-%m-%d %H:%M")
+        if entry["has_review"]:
+            entry["management_state"] = "Reviewed"
+        elif entry["has_view"]:
+            entry["management_state"] = "Viewed – Awaiting Review"
+        else:
+            entry["management_state"] = "Not Viewed"
+        entries.append(entry)
+    return entries
+
+
+def record_food_fluid_view(conn, entry, viewer_user_id):
+    existing = conn.execute("""
+        SELECT activity_id
+        FROM activity_log
+        WHERE activity_class = 'FOOD_FLUID'
+          AND activity_type = 'food_fluid_entry_viewed'
+          AND user_id = ?
+          AND related_table = 'food_fluid_entries'
+          AND related_id = ?
+          AND success = 1
+        LIMIT 1
+    """, (viewer_user_id, entry["food_fluid_entry_id"])).fetchone()
+    if existing is not None:
+        return
+
+    log_activity(
+        conn,
+        activity_class="FOOD_FLUID",
+        activity_type="food_fluid_entry_viewed",
+        summary="Food & Fluid entry viewed",
+        user_id=viewer_user_id,
+        client_id=entry["client_id"],
+        shift_id=entry["shift_id"],
+        related_table="food_fluid_entries",
+        related_id=entry["food_fluid_entry_id"],
+        success=1
+    )
+
+
+def get_food_fluid_view_history(conn, entry_id):
+    return conn.execute("""
+        SELECT al.activity_datetime, u.full_name AS viewer_name
+        FROM activity_log AS al
+        JOIN users AS u ON u.user_id = al.user_id
+        WHERE al.activity_class = 'FOOD_FLUID'
+          AND al.activity_type = 'food_fluid_entry_viewed'
+          AND al.related_table = 'food_fluid_entries'
+          AND al.related_id = ?
+          AND al.success = 1
+        ORDER BY al.activity_datetime ASC, al.activity_id ASC
+    """, (entry_id,)).fetchall()
+
+
+def get_food_fluid_review_history(conn, entry_id):
+    return conn.execute("""
+        SELECT ack.acknowledged_at, ack.user_id, u.full_name AS reviewer_name
+        FROM acknowledgements AS ack
+        JOIN users AS u ON u.user_id = ack.user_id
+        WHERE ack.source_table = 'food_fluid_entries'
+          AND ack.source_id = ?
+          AND ack.acknowledgement_type = 'Review'
+          AND ack.active = 1
+        ORDER BY ack.acknowledged_at ASC, ack.acknowledgement_id ASC
+    """, (entry_id,)).fetchall()
 
 
 def get_behaviour_operational_week_range(monday):
@@ -4042,6 +4212,157 @@ def manager_review_hub():
         "manager_review_hub.html"
     )
 
+
+FOOD_FLUID_REVIEW_FILTERS = frozenset((
+    "all",
+    "not_viewed",
+    "awaiting_review",
+    "reviewed",
+    "voided",
+))
+
+
+def get_food_fluid_review_filter():
+    requested = request.args.get("state", "all")
+    return requested if requested in FOOD_FLUID_REVIEW_FILTERS else "all"
+
+
+@app.route("/manager-review/food-fluid")
+def food_fluid_review_list():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        get_food_fluid_management_actor(conn, session["user_id"])
+        entries = get_food_fluid_management_entries(conn)
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
+
+    state_filter = get_food_fluid_review_filter()
+    if state_filter == "not_viewed":
+        entries = [
+            entry for entry in entries
+            if entry["management_state"] == "Not Viewed"
+        ]
+    elif state_filter == "awaiting_review":
+        entries = [
+            entry for entry in entries
+            if entry["management_state"] == "Viewed – Awaiting Review"
+        ]
+    elif state_filter == "reviewed":
+        entries = [
+            entry for entry in entries
+            if entry["management_state"] == "Reviewed"
+        ]
+    elif state_filter == "voided":
+        entries = [
+            entry for entry in entries
+            if entry["status"] == "Voided"
+        ]
+
+    conn.close()
+    return render_template(
+        "food_fluid_review_list.html",
+        entries=entries,
+        state_filter=state_filter
+    )
+
+
+@app.route("/manager-review/food-fluid/<int:entry_id>")
+def food_fluid_review_detail(entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_food_fluid_management_actor(conn, session["user_id"])
+        entry = get_food_fluid_management_entry(conn, entry_id)
+        if entry is None:
+            conn.rollback()
+            conn.close()
+            return "Food & Fluid entry not found", 404
+        record_food_fluid_view(conn, entry, actor["user_id"])
+        conn.commit()
+
+        view_history = get_food_fluid_view_history(conn, entry_id)
+        review_history = get_food_fluid_review_history(conn, entry_id)
+    except PermissionError:
+        conn.rollback()
+        conn.close()
+        return "Access denied", 403
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+    reviewed_by_current_user = any(
+        review["user_id"] == actor["user_id"]
+        for review in review_history
+    )
+    entry["management_state"] = (
+        "Reviewed" if review_history else "Viewed – Awaiting Review"
+    )
+    conn.close()
+    return render_template(
+        "food_fluid_review_detail.html",
+        entry=entry,
+        view_history=view_history,
+        review_history=review_history,
+        reviewed_by_current_user=reviewed_by_current_user,
+        state_filter=get_food_fluid_review_filter()
+    )
+
+
+@app.route(
+    "/manager-review/food-fluid/<int:entry_id>/review",
+    methods=["POST"]
+)
+def review_food_fluid_entry(entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    if request.form:
+        return "Invalid review request", 400
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_food_fluid_management_actor(conn, session["user_id"])
+        entry = get_food_fluid_management_entry(conn, entry_id)
+        if entry is None:
+            conn.rollback()
+            conn.close()
+            return "Food & Fluid entry not found", 404
+
+        create_acknowledgement(
+            conn,
+            source_table="food_fluid_entries",
+            source_id=entry_id,
+            user_id=actor["user_id"],
+            acknowledgement_type="Review",
+            client_id=entry["client_id"],
+            shift_id=entry["shift_id"]
+        )
+        conn.commit()
+    except PermissionError:
+        conn.rollback()
+        conn.close()
+        return "Access denied", 403
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+    conn.close()
+    return redirect(url_for(
+        "food_fluid_review_detail",
+        entry_id=entry_id,
+        state=get_food_fluid_review_filter()
+    ))
+
+
 #
 # Care Review
 #
@@ -5652,7 +5973,9 @@ def create_acknowledgement(
     source_id,
     user_id,
     acknowledgement_type="Read",
-    comment=None
+    comment=None,
+    client_id=None,
+    shift_id=None
 ):
     existing = conn.execute("""
         SELECT acknowledgement_id
@@ -5701,6 +6024,8 @@ def create_acknowledgement(
         activity_type="record_acknowledged",
         summary=f"{acknowledgement_type} acknowledgement recorded",
         user_id=user_id,
+        client_id=client_id,
+        shift_id=shift_id,
         related_table="acknowledgements",
         related_id=acknowledgement_id,
         details=f"{source_table} #{source_id}",

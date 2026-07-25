@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Food &amp; Fluid Management Review</h2>
+
+    <p>
+        <a href="{{ url_for('manager_review_hub') }}">
+            Back to Management Review
+        </a>
+    </p>
+
+    <p>
+        <strong>Show:</strong>
+        <a href="{{ url_for('food_fluid_review_list', state='all') }}">
+            All
+        </a>
+        &nbsp;|&nbsp;
+        <a href="{{ url_for(
+            'food_fluid_review_list',
+            state='not_viewed'
+        ) }}">
+            Not Viewed
+        </a>
+        &nbsp;|&nbsp;
+        <a href="{{ url_for(
+            'food_fluid_review_list',
+            state='awaiting_review'
+        ) }}">
+            Viewed – Awaiting Review
+        </a>
+        &nbsp;|&nbsp;
+        <a href="{{ url_for(
+            'food_fluid_review_list',
+            state='reviewed'
+        ) }}">
+            Reviewed
+        </a>
+        &nbsp;|&nbsp;
+        <a href="{{ url_for(
+            'food_fluid_review_list',
+            state='voided'
+        ) }}">
+            Voided
+        </a>
+    </p>
+
+    {% if entries %}
+
+        <div class="table-scroll">
+            <table>
+                <tr>
+                    <th>Event</th>
+                    <th>Client</th>
+                    <th>Shift</th>
+                    <th>Interaction</th>
+                    <th>Item</th>
+                    <th>Outcome</th>
+                    <th>Recorded By</th>
+                    <th>Record Status</th>
+                    <th>Management State</th>
+                    <th>Detail</th>
+                </tr>
+
+                {% for entry in entries %}
+                    <tr
+                        id="food-fluid-entry-{{ entry.food_fluid_entry_id }}"
+                        class="{% if entry.status == 'Voided' %}
+                                   row-inactive
+                               {% else %}
+                                   row-active
+                               {% endif %}">
+                        <td>{{ entry.event_local_display }}</td>
+                        <td>{{ entry.client_name }}</td>
+                        <td>
+                            {{ entry.shift_date }} {{ entry.shift_type }}
+                        </td>
+                        <td>{{ entry.interaction_type }}</td>
+                        <td>{{ entry.item_description }}</td>
+                        <td>{{ entry.outcome }}</td>
+                        <td>{{ entry.recorded_by_name }}</td>
+                        <td>
+                            {% if entry.status == "Voided" %}
+                                <span class="status-inactive">Voided</span>
+                            {% else %}
+                                <span class="status-active">Active</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ entry.management_state }}</td>
+                        <td>
+                            <a
+                                class="preserve-detail-position"
+                                href="{{ url_for(
+                                    'food_fluid_review_detail',
+                                    entry_id=entry.food_fluid_entry_id,
+                                    state=state_filter
+                                ) }}">
+                                View Full Detail
+                            </a>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+        </div>
+
+    {% else %}
+
+        <p>No Food &amp; Fluid entries match this filter.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}
