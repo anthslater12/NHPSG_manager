@@ -409,8 +409,7 @@ class BehaviourCheckpointOneTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.validate_behaviour_category_flags(extra)
 
-    def test_behaviour_checkpoint_has_no_staff_notice_dependency(self):
-        self.assertFalse(hasattr(app, "reconcile_staff_notice_non_shift_requirements"))
+    def test_behaviour_migration_does_not_create_staff_notice_tables(self):
         behaviour_migration.migrate(self.conn)
         self.assertIsNone(self.conn.execute("""
             SELECT name

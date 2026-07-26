@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Staff Notice Draft</h2>
+
+    <p>
+        <a href="{{ url_for('staff_notice_admin_list') }}">
+            ← Back to Staff Notice Drafts
+        </a>
+    </p>
+
+    <h3>Draft Summary</h3>
+
+    <table class="management-detail-table">
+        <tr>
+            <th>State</th>
+            <td>{{ summary.state }}</td>
+        </tr>
+        <tr>
+            <th>Priority</th>
+            <td>{{ summary.priority }}</td>
+        </tr>
+        <tr>
+            <th>Scope</th>
+            <td>{{ summary.scope }}</td>
+        </tr>
+        <tr>
+            <th>Audience</th>
+            <td>{{ summary.audience }}</td>
+        </tr>
+        <tr>
+            <th>Application Period</th>
+            <td>{{ summary.period }}</td>
+        </tr>
+        <tr>
+            <th>Schedule</th>
+            <td>{{ summary.schedule }}</td>
+        </tr>
+    </table>
+
+    <h3>Notice</h3>
+
+    <table class="management-detail-table">
+        <tr>
+            <th>Title</th>
+            <td>{{ notice.title }}</td>
+        </tr>
+        <tr>
+            <th>Notice Text</th>
+            <td>{{ notice.notice_text }}</td>
+        </tr>
+        <tr>
+            <th>Status</th>
+            <td>{{ notice.status }}</td>
+        </tr>
+        <tr>
+            <th>Created By</th>
+            <td>{{ notice.created_by }}</td>
+        </tr>
+        <tr>
+            <th>Created</th>
+            <td>{{ notice.created_at_utc }}</td>
+        </tr>
+        <tr>
+            <th>Last Updated By</th>
+            <td>{{ notice.updated_by or "—" }}</td>
+        </tr>
+        <tr>
+            <th>Last Updated</th>
+            <td>{{ notice.updated_at_utc or "—" }}</td>
+        </tr>
+    </table>
+
+    <h3>Audience Rules</h3>
+
+    {% if notice.audience_rules %}
+        <ul>
+            {% for rule in notice.audience_rules %}
+                <li>
+                    {{ rule.rule_type }}
+                    {% if rule.role_name %}
+                        — {{ rule.role_name }}
+                    {% elif rule.selected_user_name %}
+                        — {{ rule.selected_user_name }}
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No audience rules are configured.</p>
+    {% endif %}
+
+    <h3>Schedule Configuration</h3>
+
+    {% if notice.schedule %}
+        <table class="management-detail-table">
+            <tr>
+                <th>Occurrence Basis</th>
+                <td>{{ notice.schedule.occurrence_basis }}</td>
+            </tr>
+            <tr>
+                <th>Recurrence Pattern</th>
+                <td>{{ notice.schedule.recurrence_pattern }}</td>
+            </tr>
+            <tr>
+                <th>Shift Applicability</th>
+                <td>{{ notice.schedule.shift_applicability }}</td>
+            </tr>
+            <tr>
+                <th>Interval Days</th>
+                <td>{{ notice.schedule.interval_days or "—" }}</td>
+            </tr>
+            <tr>
+                <th>Recurrence Anchor Date</th>
+                <td>{{ notice.schedule.recurrence_anchor_date or "—" }}</td>
+            </tr>
+            <tr>
+                <th>Specific Calendar Date</th>
+                <td>{{ notice.schedule.specific_calendar_date or "—" }}</td>
+            </tr>
+            <tr>
+                <th>Specific Shift</th>
+                <td>
+                    {% if notice.schedule.specific_shift_date %}
+                        {{ notice.schedule.specific_shift_client_name }} —
+                        {{ notice.schedule.specific_shift_date }} —
+                        {{ notice.schedule.specific_shift_type }}
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Selected Shift Types</th>
+                <td>
+                    {{ notice.shift_types|join(", ") if notice.shift_types else "—" }}
+                </td>
+            </tr>
+            <tr>
+                <th>Selected Weekdays</th>
+                <td>
+                    {% set weekday_names = [
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                        "Saturday",
+                        "Sunday"
+                    ] %}
+                    {% if notice.weekdays %}
+                        {% for weekday in notice.weekdays %}
+                            {{ weekday_names[weekday] }}{% if not loop.last %}, {% endif %}
+                        {% endfor %}
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>One-Time Due</th>
+                <td>
+                    {% if notice.schedule.one_time_due_at_utc %}
+                        {{ notice.schedule.one_time_due_local }}
+                        (America/Vancouver)
+                    {% else %}
+                        —
+                    {% endif %}
+                </td>
+            </tr>
+        </table>
+    {% else %}
+        <p>No schedule is configured.</p>
+    {% endif %}
+
+    {% if notice.draft_active %}
+        <p>
+            <a href="{{ url_for(
+                'staff_notice_publish_review',
+                notice_id=notice.notice_id
+            ) }}">
+                Review for Publication
+            </a>
+        </p>
+
+        <p>
+            <a href="{{ url_for(
+                'staff_notice_edit',
+                notice_id=notice.notice_id
+            ) }}">
+                Edit Draft
+            </a>
+        </p>
+
+        <form
+            method="post"
+            action="{{ url_for(
+                'staff_notice_draft_deactivate',
+                notice_id=notice.notice_id
+            ) }}"
+            class="inline-form"
+        >
+            <button type="submit">Deactivate Draft</button>
+        </form>
+    {% endif %}
+
+</div>
+
+{% endblock %}
