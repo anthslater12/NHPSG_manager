@@ -93,6 +93,20 @@
 </div>
 
     <div class="card">
+        <h3>Staff Notices</h3>
+
+        <p>
+            Create, review, and publish notices for Support Workers.
+        </p>
+
+        <p>
+            <a href="{{ url_for('staff_notice_admin_list') }}">
+                Manage Staff Notices &rarr;
+            </a>
+        </p>
+    </div>
+
+    <div class="card">
         <h3>Shift Notes Awaiting Review</h3>
         <h1>{{ notes_to_review }}</h1>
 

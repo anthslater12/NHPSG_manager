@@ -339,6 +339,53 @@ class StaffNoticeDraftManagementTests(unittest.TestCase):
                     302
                 )
 
+    def test_management_dashboard_links_to_staff_notice_management(self):
+        self.login(1, "Admin")
+
+        dashboard_stats = {
+            "outstanding_action_count": 0,
+            "outstanding_actions": [],
+            "notes_to_review": 0,
+            "open_incidents": 0,
+            "recent_activity": 0
+        }
+        management_inbox = {
+            "notes_to_review_list": [],
+            "recent_incidents": [],
+            "recent_activity_list": []
+        }
+
+        with (
+            mock.patch.object(
+                app,
+                "get_dashboard_stats",
+                return_value=dashboard_stats
+            ),
+            mock.patch.object(
+                app,
+                "get_management_inbox",
+                return_value=management_inbox
+            ),
+            mock.patch.object(
+                app,
+                "get_active_shift_staff",
+                return_value=[]
+            ),
+            mock.patch.object(
+                app,
+                "get_manager_alerts",
+                return_value=[]
+            )
+        ):
+            response = self.client.get("/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Staff Notices", response.data)
+        self.assertIn(
+            b'href="/staff-notices/manage"',
+            response.data
+        )
+
     def test_unauthenticated_routes_redirect_to_login(self):
         notice_id = self.create_draft()
         requests = (
