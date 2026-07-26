@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Confirm Food &amp; Fluid Void</h2>
+
+    <p>
+        This action preserves the original entry and marks it Voided.
+        It cannot be undone from this workflow.
+    </p>
+
+    <table>
+        <tr>
+            <th>Client</th>
+            <td>{{ entry.client_name }}</td>
+        </tr>
+        <tr>
+            <th>Shift</th>
+            <td>{{ entry.shift_date }} {{ entry.shift_type }}</td>
+        </tr>
+        <tr>
+            <th>Event</th>
+            <td>{{ entry.event_local_display }}</td>
+        </tr>
+        <tr>
+            <th>Interaction</th>
+            <td>{{ entry.interaction_type }}</td>
+        </tr>
+        <tr>
+            <th>Item</th>
+            <td>{{ entry.item_description }}</td>
+        </tr>
+        <tr>
+            <th>Outcome</th>
+            <td>{{ entry.outcome }}</td>
+        </tr>
+        <tr>
+            <th>Recorded By</th>
+            <td>{{ entry.recorded_by_name }}</td>
+        </tr>
+    </table>
+
+    <form
+        method="post"
+        action="{{ url_for(
+            'void_food_fluid_entry',
+            entry_id=entry.food_fluid_entry_id,
+            state=state_filter
+        ) }}">
+
+        <label for="void_reason">
+            Void reason
+        </label>
+
+        <textarea
+            id="void_reason"
+            name="void_reason"
+            required
+        ></textarea>
+
+        <button type="submit">
+            Confirm Void
+        </button>
+
+        <a href="{{ url_for(
+            'food_fluid_review_detail',
+            entry_id=entry.food_fluid_entry_id,
+            state=state_filter
+        ) }}">
+            Cancel
+        </a>
+
+    </form>
+
+</div>
+
+{% endblock %}

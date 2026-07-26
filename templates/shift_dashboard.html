@@ -52,12 +52,77 @@
             + Toileting
         </a>
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/medication">+ Medication</a>
-        <a class="quick-button" href="/shift/{{ shift.shift_id }}/meal">+ Meal</a>
+        {% if food_fluid_authorized %}
+            <a
+                class="quick-button"
+                href="{{ url_for(
+                    'food_fluid_entry_new',
+                    shift_id=shift.shift_id
+                ) }}"
+            >
+                + Food &amp; Fluid
+            </a>
+        {% endif %}
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/activity">+ Activity</a>
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
         <a class="quick-button" href="/incident/new">+ Incident</a>
     </div>
 </div>
+
+{% if food_fluid_authorized %}
+
+    <div class="card">
+        <h3>Food &amp; Fluid</h3>
+
+        {% if recent_food_fluid_entries %}
+
+            <table>
+                <tr>
+                    <th>Event</th>
+                    <th>Interaction</th>
+                    <th>Item</th>
+                    <th>Outcome</th>
+                    <th>Status</th>
+                </tr>
+
+                {% for entry in recent_food_fluid_entries %}
+                    <tr class="{% if entry.status == 'Voided' %}
+                                   row-inactive
+                               {% else %}
+                                   row-active
+                               {% endif %}">
+                        <td>{{ entry.event_local_display }}</td>
+                        <td>{{ entry.interaction_type }}</td>
+                        <td>{{ entry.item_description }}</td>
+                        <td>{{ entry.outcome }}</td>
+                        <td>
+                            {% if entry.status == "Voided" %}
+                                <span class="status-inactive">Voided</span>
+                            {% else %}
+                                <span class="status-active">Active</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+
+        {% else %}
+
+            <p>No Food &amp; Fluid entries recorded for this shift.</p>
+
+        {% endif %}
+
+        <p>
+            <a href="{{ url_for(
+                'food_fluid_shift_list',
+                shift_id=shift.shift_id
+            ) }}">
+                View all Food &amp; Fluid entries
+            </a>
+        </p>
+    </div>
+
+{% endif %}
 
 <div class="card">
     <h3>Care Routine</h3>

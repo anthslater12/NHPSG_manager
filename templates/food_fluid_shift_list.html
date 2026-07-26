@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Food &amp; Fluid Entries</h2>
+
+    <p>
+        <strong>Client:</strong> {{ shift.client_name }}<br>
+        <strong>Shift:</strong>
+        {{ shift.shift_date }} {{ shift.shift_type }}
+    </p>
+
+    <p>
+        <a href="{{ url_for(
+            'shift_dashboard',
+            shift_id=shift.shift_id
+        ) }}">
+            Back to Current Shift
+        </a>
+        &nbsp;|&nbsp;
+        <a href="{{ url_for(
+            'food_fluid_entry_new',
+            shift_id=shift.shift_id
+        ) }}">
+            + Food &amp; Fluid
+        </a>
+    </p>
+
+    {% if entries %}
+
+        <div class="table-scroll">
+            <table>
+                <tr>
+                    <th>Event</th>
+                    <th>Interaction</th>
+                    <th>Item</th>
+                    <th>Outcome</th>
+                    <th>Physically Thrown</th>
+                    <th>Additional Details</th>
+                    <th>Recorded By</th>
+                    <th>Submitted</th>
+                    <th>Status</th>
+                    <th>Void Details</th>
+                </tr>
+
+                {% for entry in entries %}
+                    <tr class="{% if entry.status == 'Voided' %}
+                                   row-inactive
+                               {% else %}
+                                   row-active
+                               {% endif %}">
+                        <td>{{ entry.event_local_display }}</td>
+                        <td>{{ entry.interaction_type }}</td>
+                        <td>{{ entry.item_description }}</td>
+                        <td>{{ entry.outcome }}</td>
+                        <td>
+                            {% if entry.physically_thrown %}
+                                Yes
+                            {% else %}
+                                No
+                            {% endif %}
+                        </td>
+                        <td>{{ entry.additional_details or "—" }}</td>
+                        <td>{{ entry.recorded_by_name }}</td>
+                        <td>{{ entry.submitted_local_display }}</td>
+                        <td>
+                            {% if entry.status == "Voided" %}
+                                <span class="status-inactive">Voided</span>
+                            {% else %}
+                                <span class="status-active">Active</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if entry.status == "Voided" %}
+                                <strong>Reason:</strong>
+                                {{ entry.void_reason }}<br>
+                                <strong>Voided by:</strong>
+                                {{ entry.voided_by_name }}<br>
+                                <strong>Voided at:</strong>
+                                {{ entry.voided_local_display }}
+                            {% else %}
+                                —
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+        </div>
+
+    {% else %}
+
+        <p>No Food &amp; Fluid entries recorded for this shift.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}
