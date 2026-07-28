@@ -6582,6 +6582,285 @@ def remove_shift_staff_assignment(
     return result
 
 
+def _staff_notice_deadline_adjustment_details(
+    occurrence,
+    old_due_at_utc,
+    new_due_at_utc,
+    old_due_was_provisional,
+    reconciled_at_utc,
+    reason
+):
+    return (
+        f"Notice ID: {occurrence['notice_id']}; "
+        f"Occurrence ID: {occurrence['occurrence_id']}; "
+        f"Shift ID: {occurrence['shift_id']}; "
+        f"Old due at: {old_due_at_utc}; "
+        f"New due at: {new_due_at_utc}; "
+        f"Prior deadline provisional: {old_due_was_provisional}; "
+        f"Reason: {reason}; Effective at UTC: {reconciled_at_utc}"
+    )
+
+
+def _log_staff_notice_occurrence_due_at_adjusted(
+    conn,
+    occurrence,
+    old_due_at_utc,
+    new_due_at_utc,
+    old_due_was_provisional,
+    actor_user_id,
+    reconciled_at_utc,
+    reason
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_occurrence_due_at_adjusted",
+        summary=(
+            "Staff Notice occurrence deadline adjusted: "
+            f"{occurrence['title']}"
+        ),
+        user_id=actor_user_id,
+        client_id=occurrence["client_id"],
+        shift_id=occurrence["shift_id"],
+        related_table="staff_notice_occurrences",
+        related_id=occurrence["occurrence_id"],
+        details=_staff_notice_deadline_adjustment_details(
+            occurrence,
+            old_due_at_utc,
+            new_due_at_utc,
+            old_due_was_provisional,
+            reconciled_at_utc,
+            reason
+        ),
+        success=1
+    )
+
+
+def _log_staff_notice_acknowledgement_classification_changed(
+    conn,
+    occurrence,
+    acknowledgement,
+    old_classification,
+    new_classification,
+    old_due_at_utc,
+    new_due_at_utc,
+    actor_user_id,
+    reconciled_at_utc,
+    reason
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type=(
+            "staff_notice_acknowledgement_classification_changed"
+        ),
+        summary=(
+            "Staff Notice acknowledgement classification changed: "
+            f"{occurrence['title']}"
+        ),
+        user_id=actor_user_id,
+        client_id=occurrence["client_id"],
+        shift_id=occurrence["shift_id"],
+        related_table="acknowledgements",
+        related_id=acknowledgement["acknowledgement_id"],
+        details=(
+            f"Notice ID: {occurrence['notice_id']}; "
+            f"Acknowledgement ID: "
+            f"{acknowledgement['acknowledgement_id']}; "
+            f"Delivery ID: {acknowledgement['delivery_id']}; "
+            f"Occurrence ID: {occurrence['occurrence_id']}; "
+            f"Shift ID: {occurrence['shift_id']}; "
+            f"Old classification: {old_classification}; "
+            f"New classification: {new_classification}; "
+            f"Old due at: {old_due_at_utc}; "
+            f"New due at: {new_due_at_utc}; "
+            f"Acknowledged at: "
+            f"{acknowledgement['acknowledged_at']}; "
+            f"Reason: {reason}; "
+            f"Effective at UTC: {reconciled_at_utc}"
+        ),
+        success=1
+    )
+
+
+def finalize_shift_notice_due_at(
+    conn,
+    shift_id,
+    actual_end_at_utc,
+    actor_user_id,
+    reconciled_at_utc,
+    reason=None
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Shift deadline finalization requires an active transaction."
+        )
+    if not _is_valid_staff_notice_identifier(shift_id):
+        raise ValueError("A valid shift is required.")
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise ValueError("A valid actor is required.")
+    if reason is None:
+        reason = "Actual shift end recorded."
+    elif not isinstance(reason, str) or not reason.strip():
+        raise ValueError(
+            "A supplied shift-end correction reason cannot be empty."
+        )
+    else:
+        reason = reason.strip()
+
+    actual_end_at_utc = format_staff_notice_utc_datetime(
+        actual_end_at_utc
+    )
+    reconciled_at_utc = format_staff_notice_utc_datetime(
+        reconciled_at_utc
+    )
+    shift = conn.execute("""
+        SELECT shift_id, client_id, actual_end_at_utc
+        FROM shifts
+        WHERE shift_id = ?
+    """, (shift_id,)).fetchone()
+    if shift is None:
+        raise LookupError("Shift not found.")
+
+    shift_cursor = conn.execute("""
+        UPDATE shifts
+        SET actual_end_at_utc = ?
+        WHERE shift_id = ?
+          AND actual_end_at_utc IS NOT ?
+    """, (
+        actual_end_at_utc,
+        shift_id,
+        actual_end_at_utc
+    ))
+    result = {
+        "shift_end_updated": shift_cursor.rowcount,
+        "occurrences_adjusted": 0,
+        "acknowledgement_classifications_changed": 0
+    }
+    occurrences = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT
+                o.*,
+                sn.notice_id,
+                sn.title,
+                sn.client_id
+            FROM staff_notice_occurrences o
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            JOIN staff_notices sn
+                ON sns.notice_id = sn.notice_id
+            WHERE o.occurrence_kind = 'Shift'
+              AND o.shift_id = ?
+            ORDER BY o.occurrence_id
+        """, (shift_id,)).fetchall()
+    ]
+
+    for occurrence in occurrences:
+        old_due_at_utc = occurrence["due_at_utc"]
+        old_due_was_provisional = occurrence["due_at_is_provisional"]
+        acknowledgements = [
+            dict(row)
+            for row in conn.execute("""
+                SELECT
+                    ack.acknowledgement_id,
+                    ack.acknowledged_at,
+                    d.delivery_id,
+                    d.requirement_status,
+                    d.first_viewed_at_utc
+                FROM staff_notice_deliveries d
+                JOIN acknowledgements ack
+                    ON ack.source_table = 'staff_notice_deliveries'
+                   AND ack.source_id = d.delivery_id
+                   AND ack.user_id = d.user_id
+                   AND ack.active = 1
+                WHERE d.occurrence_id = ?
+                ORDER BY d.delivery_id, ack.acknowledgement_id
+            """, (occurrence["occurrence_id"],)).fetchall()
+        ]
+        old_classifications = {
+            acknowledgement["acknowledgement_id"]:
+                get_recipient_staff_notice_status(
+                    active_acknowledgement_at_utc=(
+                        acknowledgement["acknowledged_at"]
+                    ),
+                    due_at_utc=old_due_at_utc,
+                    requirement_status=(
+                        acknowledgement["requirement_status"]
+                    ),
+                    first_viewed_at_utc=(
+                        acknowledgement["first_viewed_at_utc"]
+                    )
+                )
+            for acknowledgement in acknowledgements
+        }
+        occurrence_cursor = conn.execute("""
+            UPDATE staff_notice_occurrences
+            SET due_at_utc = ?,
+                due_at_is_provisional = 0,
+                due_at_updated_at_utc = ?
+            WHERE occurrence_id = ?
+              AND (
+                  due_at_utc IS NOT ?
+                  OR due_at_is_provisional <> 0
+              )
+        """, (
+            actual_end_at_utc,
+            reconciled_at_utc,
+            occurrence["occurrence_id"],
+            actual_end_at_utc
+        ))
+        if occurrence_cursor.rowcount != 1:
+            continue
+
+        result["occurrences_adjusted"] += 1
+        _log_staff_notice_occurrence_due_at_adjusted(
+            conn,
+            occurrence,
+            old_due_at_utc,
+            actual_end_at_utc,
+            old_due_was_provisional,
+            actor_user_id,
+            reconciled_at_utc,
+            reason
+        )
+
+        for acknowledgement in acknowledgements:
+            new_classification = get_recipient_staff_notice_status(
+                active_acknowledgement_at_utc=(
+                    acknowledgement["acknowledged_at"]
+                ),
+                due_at_utc=actual_end_at_utc,
+                requirement_status=(
+                    acknowledgement["requirement_status"]
+                ),
+                first_viewed_at_utc=(
+                    acknowledgement["first_viewed_at_utc"]
+                )
+            )
+            old_classification = old_classifications[
+                acknowledgement["acknowledgement_id"]
+            ]
+            if new_classification == old_classification:
+                continue
+
+            _log_staff_notice_acknowledgement_classification_changed(
+                conn,
+                occurrence,
+                acknowledgement,
+                old_classification,
+                new_classification,
+                old_due_at_utc,
+                actual_end_at_utc,
+                actor_user_id,
+                reconciled_at_utc,
+                reason
+            )
+            result["acknowledgement_classifications_changed"] += 1
+
+    return result
+
+
 def _load_published_staff_notices_for_reconciliation(conn):
     notice_ids = [
         row["notice_id"]

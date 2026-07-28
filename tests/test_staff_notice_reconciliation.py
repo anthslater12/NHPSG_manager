@@ -79,7 +79,9 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     shift_type TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'Open',
                     scheduled_start_time TEXT,
-                    scheduled_end_time TEXT
+                    scheduled_end_time TEXT,
+                    actual_end_at_utc TEXT,
+                    closed_at TEXT
                 );
 
                 CREATE TABLE shift_staff (
@@ -88,6 +90,8 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     user_id INTEGER NOT NULL,
                     actual_start_time TEXT,
                     actual_end_time TEXT,
+                    actual_end_at_utc TEXT,
+                    sign_off_at TEXT,
                     start_checklist_completed INTEGER NOT NULL DEFAULT 0,
                     end_checklist_completed INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL
@@ -409,15 +413,27 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def seed_shift(self, *, date="2026-08-03", shift_type="Day"):
+    def seed_shift(
+        self,
+        *,
+        date="2026-08-03",
+        shift_type="Day",
+        scheduled_end_time=None
+    ):
         conn = self.open_database()
 
         try:
             cursor = conn.execute("""
                 INSERT INTO shifts
-                (client_id, shift_date, shift_type, status)
-                VALUES (1, ?, ?, 'Open')
-            """, (date, shift_type))
+                (
+                    client_id,
+                    shift_date,
+                    shift_type,
+                    status,
+                    scheduled_end_time
+                )
+                VALUES (1, ?, ?, 'Open', ?)
+            """, (date, shift_type, scheduled_end_time))
             conn.commit()
             return cursor.lastrowid
         finally:
@@ -478,13 +494,17 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         recurrence_pattern="Daily",
         shift_date="2026-08-03",
         shift_type="Day",
-        user_id=2
+        user_id=2,
+        effective_start="2026-08-01T07:00:00Z",
+        expires_at="2026-08-10T06:59:59Z"
     ):
         notice_arguments = {
             "occurrence_basis": occurrence_basis,
             "recurrence_pattern": recurrence_pattern,
             "shift_applicability": shift_applicability,
-            "audience_rules": (("Applicable Shift Staff", None, None),)
+            "audience_rules": (("Applicable Shift Staff", None, None),),
+            "effective_start": effective_start,
+            "expires_at": expires_at
         }
         if shift_applicability == "Specific Shift":
             notice_arguments.update({
@@ -2284,6 +2304,617 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             ["Assigned"]
         )
         self.assertNotEqual(shift_staff_id, second_assignment)
+
+    def test_shift_deadline_finalizes_provisional_and_preserves_delivery(self):
+        fixture, shift_id, _ = self.create_shift_notice_delivery()
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = '2026-08-03T23:00:00Z',
+                    due_at_is_provisional = 1
+                WHERE occurrence_id = ?
+            """, (delivery["occurrence_id"],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T16:00:00Z',
+                    viewed_by_user_id = 2
+                WHERE delivery_id = ?
+            """, (delivery["delivery_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        original_delivery = self.delivery_rows(fixture)[0]
+        original_history = self.delivery_history_rows(fixture)
+        baseline_activity_count = len(self.activity_rows())
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = app.finalize_shift_notice_due_at(
+                conn,
+                shift_id,
+                "2026-08-03T22:00:00Z",
+                1,
+                "2026-08-04T01:00:00Z",
+                "Manager supplied the genuine operational end."
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        occurrence = self.occurrence_rows(fixture)[0]
+        activities = self.activity_rows()[baseline_activity_count:]
+        self.assertEqual(result, {
+            "shift_end_updated": 1,
+            "occurrences_adjusted": 1,
+            "acknowledgement_classifications_changed": 0
+        })
+        self.assertEqual(occurrence["due_at_utc"], "2026-08-03T22:00:00Z")
+        self.assertEqual(occurrence["due_at_is_provisional"], 0)
+        self.assertEqual(
+            occurrence["due_at_updated_at_utc"],
+            "2026-08-04T01:00:00Z"
+        )
+        self.assertEqual(self.delivery_rows(fixture)[0], original_delivery)
+        self.assertEqual(self.delivery_history_rows(fixture), original_history)
+        self.assertEqual(
+            [row["activity_type"] for row in activities],
+            ["staff_notice_occurrence_due_at_adjusted"]
+        )
+        activity = activities[0]
+        self.assertEqual(activity["user_id"], 1)
+        self.assertEqual(activity["shift_id"], shift_id)
+        self.assertEqual(
+            activity["related_table"],
+            "staff_notice_occurrences"
+        )
+        self.assertEqual(
+            activity["related_id"],
+            occurrence["occurrence_id"]
+        )
+        self.assertEqual(
+            activity["summary"],
+            "Staff Notice occurrence deadline adjusted: "
+            "Reconciliation Notice"
+        )
+        self.assertEqual(
+            activity["details"],
+            f"Notice ID: {fixture['notice_id']}; "
+            f"Occurrence ID: {occurrence['occurrence_id']}; "
+            f"Shift ID: {shift_id}; "
+            "Old due at: 2026-08-03T23:00:00Z; "
+            "New due at: 2026-08-03T22:00:00Z; "
+            "Prior deadline provisional: 1; "
+            "Reason: Manager supplied the genuine operational end.; "
+            "Effective at UTC: 2026-08-04T01:00:00Z"
+        )
+        conn = self.open_database()
+        try:
+            shift = conn.execute(
+                "SELECT actual_end_at_utc, closed_at FROM shifts "
+                "WHERE shift_id = ?",
+                (shift_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(shift["actual_end_at_utc"], "2026-08-03T22:00:00Z")
+        self.assertIsNone(shift["closed_at"])
+
+    def test_shift_deadline_finalizes_later_or_initially_missing_deadline(self):
+        fixtures = []
+        for index, old_due in enumerate(
+            ("2026-08-03T20:00:00Z", None)
+        ):
+            fixture, shift_id, _ = self.create_shift_notice_delivery(
+                shift_date=f"2026-08-0{index + 3}"
+            )
+            occurrence = self.occurrence_rows(fixture)[0]
+            conn = self.open_database()
+            try:
+                conn.execute("""
+                    UPDATE staff_notice_occurrences
+                    SET due_at_utc = ?,
+                        due_at_is_provisional = ?
+                    WHERE occurrence_id = ?
+                """, (
+                    old_due,
+                    int(old_due is not None),
+                    occurrence["occurrence_id"]
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+            fixtures.append((fixture, shift_id))
+
+        for fixture, shift_id in fixtures:
+            conn = self.open_database()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                app.finalize_shift_notice_due_at(
+                    conn,
+                    shift_id,
+                    "2026-08-04T02:00:00Z",
+                    1,
+                    "2026-08-04T03:00:00Z"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            occurrence = self.occurrence_rows(fixture)[0]
+            self.assertEqual(
+                occurrence["due_at_utc"],
+                "2026-08-04T02:00:00Z"
+            )
+            self.assertEqual(occurrence["due_at_is_provisional"], 0)
+
+    def test_shift_deadline_same_final_value_is_no_op_and_repairs_drift(self):
+        fixture, shift_id, _ = self.create_shift_notice_delivery()
+        occurrence = self.occurrence_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE shifts
+                SET actual_end_at_utc = '2026-08-03T22:00:00Z'
+                WHERE shift_id = ?
+            """, (shift_id,))
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = '2026-08-03T22:00:00Z',
+                    due_at_is_provisional = 1
+                WHERE occurrence_id = ?
+            """, (occurrence["occurrence_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        baseline_activity_count = len(self.activity_rows())
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            repaired = app.finalize_shift_notice_due_at(
+                conn,
+                shift_id,
+                "2026-08-03T22:00:00Z",
+                1,
+                "2026-08-04T01:00:00Z"
+            )
+            repeated = app.finalize_shift_notice_due_at(
+                conn,
+                shift_id,
+                "2026-08-03T22:00:00Z",
+                1,
+                "2026-08-04T02:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(repaired, {
+            "shift_end_updated": 0,
+            "occurrences_adjusted": 1,
+            "acknowledgement_classifications_changed": 0
+        })
+        self.assertEqual(repeated, {
+            "shift_end_updated": 0,
+            "occurrences_adjusted": 0,
+            "acknowledgement_classifications_changed": 0
+        })
+        self.assertEqual(
+            len(self.activity_rows()) - baseline_activity_count,
+            1
+        )
+
+    def test_shift_deadline_adjusts_multiple_notices_not_workers(self):
+        first, shift_id, _ = self.create_shift_notice_delivery()
+        second = self.create_published_notice(
+            occurrence_basis="Shift",
+            shift_applicability="Every Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),)
+        )
+        self.seed_shift_staff(shift_id, 3)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn,
+                shift_id,
+                3,
+                "2026-08-03T16:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        baseline_activity_count = len(self.activity_rows())
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = app.finalize_shift_notice_due_at(
+                conn,
+                shift_id,
+                "2026-08-03T23:00:00Z",
+                1,
+                "2026-08-04T00:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(result["occurrences_adjusted"], 2)
+        self.assertEqual(
+            [row["due_at_utc"] for row in self.occurrence_rows(first)],
+            ["2026-08-03T23:00:00Z"]
+        )
+        self.assertEqual(
+            [row["due_at_utc"] for row in self.occurrence_rows(second)],
+            ["2026-08-03T23:00:00Z"]
+        )
+        conn = self.open_database()
+        try:
+            worker_ends = conn.execute("""
+                SELECT actual_end_at_utc
+                FROM shift_staff
+                WHERE shift_id = ?
+                ORDER BY shift_staff_id
+            """, (shift_id,)).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([row[0] for row in worker_ends], [None, None])
+        self.assertEqual(
+            [
+                row["activity_type"]
+                for row in self.activity_rows()[baseline_activity_count:]
+            ],
+            [
+                "staff_notice_occurrence_due_at_adjusted",
+                "staff_notice_occurrence_due_at_adjusted"
+            ]
+        )
+
+    def assert_shift_deadline_acknowledgement_classification(
+        self,
+        old_due_at_utc,
+        new_due_at_utc,
+        acknowledged_at_utc,
+        expected_old,
+        expected_new,
+        expected_change_count
+    ):
+        fixture, shift_id, _ = self.create_shift_notice_delivery()
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = ?,
+                    due_at_is_provisional = 1
+                WHERE occurrence_id = ?
+            """, (old_due_at_utc, delivery["occurrence_id"]))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T15:00:00Z',
+                    viewed_by_user_id = 2
+                WHERE delivery_id = ?
+            """, (delivery["delivery_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        acknowledgement_id = self.seed_staff_notice_acknowledgement(
+            delivery["delivery_id"],
+            2,
+            acknowledged_at_utc
+        )
+        original_delivery = self.delivery_rows(fixture)[0]
+        original_history = self.delivery_history_rows(fixture)
+        baseline_activity_count = len(self.activity_rows())
+
+        self.assertEqual(
+            app.get_recipient_staff_notice_status(
+                active_acknowledgement_at_utc=acknowledged_at_utc,
+                due_at_utc=old_due_at_utc,
+                requirement_status="Required",
+                first_viewed_at_utc="2026-08-03T15:00:00Z"
+            ),
+            expected_old
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = app.finalize_shift_notice_due_at(
+                conn,
+                shift_id,
+                new_due_at_utc,
+                1,
+                "2026-08-04T01:00:00Z",
+                "Corrected actual shift end."
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        activities = self.activity_rows()[baseline_activity_count:]
+        self.assertEqual(
+            result["acknowledgement_classifications_changed"],
+            expected_change_count
+        )
+        self.assertEqual(
+            [row["activity_type"] for row in activities],
+            ["staff_notice_occurrence_due_at_adjusted"]
+            + (
+                [
+                    "staff_notice_acknowledgement_classification_changed"
+                ]
+                if expected_change_count else []
+            )
+        )
+        if expected_change_count:
+            classification_activity = activities[1]
+            occurrence = self.occurrence_rows(fixture)[0]
+            self.assertEqual(
+                classification_activity["related_table"],
+                "acknowledgements"
+            )
+            self.assertEqual(
+                classification_activity["related_id"],
+                acknowledgement_id
+            )
+            self.assertEqual(
+                classification_activity["activity_class"],
+                "STAFF_NOTICE"
+            )
+            self.assertEqual(
+                classification_activity["user_id"],
+                1
+            )
+            self.assertEqual(
+                classification_activity["client_id"],
+                1
+            )
+            self.assertEqual(
+                classification_activity["shift_id"],
+                shift_id
+            )
+            self.assertEqual(
+                classification_activity["summary"],
+                "Staff Notice acknowledgement classification changed: "
+                "Reconciliation Notice"
+            )
+            self.assertEqual(
+                classification_activity["details"],
+                f"Notice ID: {fixture['notice_id']}; "
+                f"Acknowledgement ID: {acknowledgement_id}; "
+                f"Delivery ID: {delivery['delivery_id']}; "
+                f"Occurrence ID: {occurrence['occurrence_id']}; "
+                f"Shift ID: {shift_id}; "
+                f"Old classification: {expected_old}; "
+                f"New classification: {expected_new}; "
+                f"Old due at: {old_due_at_utc}; "
+                f"New due at: {new_due_at_utc}; "
+                f"Acknowledged at: {acknowledged_at_utc}; "
+                "Reason: Corrected actual shift end.; "
+                "Effective at UTC: 2026-08-04T01:00:00Z"
+            )
+        self.assertEqual(self.delivery_rows(fixture)[0], original_delivery)
+        self.assertEqual(self.delivery_history_rows(fixture), original_history)
+        conn = self.open_database()
+        try:
+            acknowledgement = conn.execute("""
+                SELECT acknowledged_at, active
+                FROM acknowledgements
+                WHERE acknowledgement_id = ?
+            """, (acknowledgement_id,)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(
+            acknowledgement["acknowledged_at"],
+            acknowledged_at_utc
+        )
+        self.assertEqual(acknowledgement["active"], 1)
+
+    def test_shift_deadline_acknowledgement_remains_on_time(self):
+        self.assert_shift_deadline_acknowledgement_classification(
+            "2026-08-03T18:00:00Z",
+            "2026-08-03T19:00:00Z",
+            "2026-08-03T17:00:00Z",
+            "Acknowledged",
+            "Acknowledged",
+            0
+        )
+
+    def test_shift_deadline_acknowledgement_changes_to_late(self):
+        self.assert_shift_deadline_acknowledgement_classification(
+            "2026-08-03T19:00:00Z",
+            "2026-08-03T16:00:00Z",
+            "2026-08-03T17:00:00Z",
+            "Acknowledged",
+            "Acknowledged Late",
+            1
+        )
+
+    def test_shift_deadline_late_acknowledgement_changes_to_on_time(self):
+        self.assert_shift_deadline_acknowledgement_classification(
+            "2026-08-03T16:00:00Z",
+            "2026-08-03T19:00:00Z",
+            "2026-08-03T17:00:00Z",
+            "Acknowledged Late",
+            "Acknowledged",
+            1
+        )
+
+    def test_shift_deadline_normalizes_aware_timestamp_and_rejects_naive(self):
+        fixture, shift_id, _ = self.create_shift_notice_delivery(
+            shift_date="2026-11-01",
+            shift_type="Overnight",
+            effective_start="2026-10-30T07:00:00Z",
+            expires_at="2026-11-10T07:59:59Z"
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = app.finalize_shift_notice_due_at(
+                conn,
+                shift_id,
+                "2026-11-02T00:30:00-08:00",
+                1,
+                "2026-11-02T09:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(result["occurrences_adjusted"], 1)
+        self.assertEqual(
+            self.occurrence_rows(fixture)[0]["due_at_utc"],
+            "2026-11-02T08:30:00Z"
+        )
+        before = self.database_snapshot()
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(ValueError, "include a UTC offset"):
+                app.finalize_shift_notice_due_at(
+                    conn,
+                    shift_id,
+                    "2026-11-02T01:30:00",
+                    1,
+                    "2026-11-02T10:00:00Z"
+                )
+            conn.rollback()
+        finally:
+            conn.close()
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_shift_deadline_occurrence_failure_rolls_back_shift_end(self):
+        _, shift_id, _ = self.create_shift_notice_delivery()
+        before = self.database_snapshot()
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_shift_deadline_update_failure
+                BEFORE UPDATE ON staff_notice_occurrences
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled deadline failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled deadline failure"
+            ):
+                app.finalize_shift_notice_due_at(
+                    conn,
+                    shift_id,
+                    "2026-08-03T22:00:00Z",
+                    1,
+                    "2026-08-04T01:00:00Z"
+                )
+            conn.rollback()
+        finally:
+            conn.close()
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_shift_deadline_due_activity_failure_rolls_back_everything(self):
+        _, shift_id, _ = self.create_shift_notice_delivery()
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_due_activity_failure
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type =
+                    'staff_notice_occurrence_due_at_adjusted'
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled due activity failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled due activity failure"
+            ):
+                app.finalize_shift_notice_due_at(
+                    conn,
+                    shift_id,
+                    "2026-08-03T22:00:00Z",
+                    1,
+                    "2026-08-04T01:00:00Z"
+                )
+            conn.rollback()
+        finally:
+            conn.close()
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_shift_deadline_classification_activity_failure_rolls_back(self):
+        fixture, shift_id, _ = self.create_shift_notice_delivery()
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = '2026-08-03T19:00:00Z',
+                    due_at_is_provisional = 1
+                WHERE occurrence_id = ?
+            """, (delivery["occurrence_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        self.seed_staff_notice_acknowledgement(
+            delivery["delivery_id"],
+            2,
+            "2026-08-03T17:00:00Z"
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_classification_activity_failure
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type =
+                    'staff_notice_acknowledgement_classification_changed'
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'controlled classification activity failure'
+                    );
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled classification activity failure"
+            ):
+                app.finalize_shift_notice_due_at(
+                    conn,
+                    shift_id,
+                    "2026-08-03T16:00:00Z",
+                    1,
+                    "2026-08-04T01:00:00Z"
+                )
+            conn.rollback()
+        finally:
+            conn.close()
+        self.assertEqual(self.database_snapshot(), before)
 
 
 if __name__ == "__main__":
