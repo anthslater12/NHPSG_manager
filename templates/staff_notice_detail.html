@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <p>
+        <a href="{{ url_for('staff_notice_history') }}">
+            ← All Staff Notices
+        </a>
+    </p>
+
+    {% if acknowledged %}
+        <p class="status-active">
+            Your acknowledgement was recorded.
+        </p>
+    {% endif %}
+
+    <h2>{{ delivery.title }}</h2>
+
+    <p>
+        <strong>Priority:</strong> {{ delivery.priority }}<br>
+        <strong>Status:</strong> {{ delivery.derived_status }}
+    </p>
+
+    {% if delivery.context %}
+        <p><strong>Applies to:</strong> {{ delivery.context }}</p>
+    {% endif %}
+
+    {% if delivery.overdue %}
+        <p class="error">
+            This acknowledgement is overdue, but it is still required.
+        </p>
+    {% elif delivery.due_at_display %}
+        <p><strong>Acknowledgement due:</strong>
+            {{ delivery.due_at_display }}
+        </p>
+    {% endif %}
+
+    <hr>
+
+    <div style="white-space: pre-wrap;">{{ delivery.notice_text }}</div>
+
+    <hr>
+
+    <p>
+        <strong>First viewed:</strong>
+        {{ delivery.first_viewed_at_display or "Not viewed" }}
+    </p>
+
+    {% if delivery.acknowledged_at_display %}
+        <p>
+            <strong>Acknowledged:</strong>
+            {{ delivery.acknowledged_at_display }}
+        </p>
+    {% elif delivery.requirement_status == "Required" %}
+        <form method="post" action="{{ url_for(
+            'acknowledge_staff_notice',
+            delivery_id=delivery.delivery_id
+        ) }}">
+            <label>
+                <input
+                    type="checkbox"
+                    name="acknowledge"
+                    value="yes"
+                    required
+                    style="width: auto;">
+                I acknowledge that I have read this notice.
+            </label>
+
+            <br><br>
+
+            <button type="submit">Acknowledge Staff Notice</button>
+        </form>
+    {% endif %}
+</div>
+
+{% endblock %}

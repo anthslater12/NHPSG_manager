@@ -10,6 +10,52 @@
 </div>
 
 <div class="card">
+    <h3>Staff Notices</h3>
+
+    <p>
+        <strong>Outstanding:</strong>
+        {{ staff_notice_outstanding_count }}
+    </p>
+
+    {% if staff_notices %}
+        <ul class="dashboard-list">
+            {% for notice in staff_notices %}
+                <li>
+                    <a href="{{ url_for(
+                        'staff_notice_detail',
+                        delivery_id=notice.delivery_id
+                    ) }}">
+                        <strong>{{ notice.title }}</strong>
+                    </a>
+                    — {{ notice.priority }}
+                    <br>
+                    {% if notice.context %}
+                        {{ notice.context }}<br>
+                    {% endif %}
+                    <strong>Status:</strong>
+                    {{ notice.derived_status }}
+                    {% if notice.overdue %}
+                        — Overdue; acknowledgement is still required
+                    {% elif notice.due_at_display %}
+                        <br>
+                        <strong>Due:</strong>
+                        {{ notice.due_at_display }}
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No Staff Notices are currently available.</p>
+    {% endif %}
+
+    <p>
+        <a href="{{ url_for('staff_notice_history') }}">
+            View All Staff Notices
+        </a>
+    </p>
+</div>
+
+<div class="card">
     <h3>Staff Currently on Shift</h3>
 
     {% if staff %}

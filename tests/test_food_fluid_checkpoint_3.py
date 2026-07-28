@@ -10,6 +10,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import add_food_fluid_entries_table as migration
+import add_staff_notices_tables as staff_notice_schema
 import app
 
 
@@ -176,6 +177,10 @@ class FoodFluidCheckpointThreeTests(unittest.TestCase):
                 (107, 10, 6, '07:00', '2024-01-15 15:00:00', 0);
         """)
         migration.migrate(conn)
+        for sql in staff_notice_schema.TABLE_SQL.values():
+            conn.execute(sql)
+        for sql in staff_notice_schema.INDEX_SQL.values():
+            conn.execute(sql)
         conn.close()
 
         self.client = app.app.test_client()

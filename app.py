@@ -7159,14 +7159,60 @@ def _load_published_staff_notices_for_reconciliation(conn):
     ]
 
 
+def reconcile_staff_notice_non_shift_requirements_in_transaction(
+    conn,
+    now_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice request reconciliation requires an active "
+            "transaction."
+        )
+
+    now_utc = parse_staff_notice_utc_datetime(now_utc)
+    reconciled_at_utc = format_staff_notice_utc_datetime(now_utc)
+    result = _staff_notice_reconciliation_result()
+
+    for notice in _load_published_staff_notices_for_reconciliation(conn):
+        if parse_staff_notice_utc_datetime(
+            notice["published_at_utc"]
+        ) > now_utc:
+            continue
+
+        _merge_staff_notice_reconciliation_result(
+            result,
+            reconcile_staff_notice_audience_eligibility(
+                conn,
+                notice,
+                reconciled_at_utc
+            )
+        )
+        _merge_staff_notice_reconciliation_result(
+            result,
+            generate_due_staff_notice_occurrences(
+                conn,
+                notice,
+                reconciled_at_utc
+            )
+        )
+        _merge_staff_notice_reconciliation_result(
+            result,
+            reconcile_staff_notice_deliveries(
+                conn,
+                notice,
+                reconciled_at_utc
+            )
+        )
+
+    return result
+
+
 def reconcile_staff_notice_non_shift_requirements(now_utc=None):
     if now_utc is None:
         now_utc = get_application_now_utc()
     else:
         now_utc = parse_staff_notice_utc_datetime(now_utc)
 
-    reconciled_at_utc = format_staff_notice_utc_datetime(now_utc)
-    result = _staff_notice_reconciliation_result()
     conn = None
     primary_error = None
 
@@ -7174,39 +7220,10 @@ def reconcile_staff_notice_non_shift_requirements(now_utc=None):
         conn = get_db()
         conn.execute("BEGIN IMMEDIATE")
 
-        for notice in _load_published_staff_notices_for_reconciliation(
-            conn
-        ):
-            if parse_staff_notice_utc_datetime(
-                notice["published_at_utc"]
-            ) > now_utc:
-                continue
-
-            _merge_staff_notice_reconciliation_result(
-                result,
-                reconcile_staff_notice_audience_eligibility(
-                    conn,
-                    notice,
-                    reconciled_at_utc
-                )
-            )
-            _merge_staff_notice_reconciliation_result(
-                result,
-                generate_due_staff_notice_occurrences(
-                    conn,
-                    notice,
-                    reconciled_at_utc
-                )
-            )
-            _merge_staff_notice_reconciliation_result(
-                result,
-                reconcile_staff_notice_deliveries(
-                    conn,
-                    notice,
-                    reconciled_at_utc
-                )
-            )
-
+        result = reconcile_staff_notice_non_shift_requirements_in_transaction(
+            conn,
+            now_utc
+        )
         conn.commit()
         return result
 
@@ -7243,6 +7260,425 @@ def reconcile_staff_notice_non_shift_requirements(now_utc=None):
                     "Staff Notice database close also failed: "
                     f"{close_error}"
                 )
+
+
+class StaffNoticeRecipientError(ValueError):
+    pass
+
+
+def _get_authenticated_staff_notice_recipient(conn):
+    user_id = session.get("user_id")
+    if not _is_valid_staff_notice_identifier(user_id):
+        raise PermissionError("Staff Notice recipient login required.")
+
+    user = conn.execute("""
+        SELECT user_id, full_name, role, active
+        FROM users
+        WHERE user_id = ?
+          AND active = 1
+    """, (user_id,)).fetchone()
+    if user is None:
+        raise PermissionError("Staff Notice recipient access denied.")
+    return user
+
+
+def _load_recipient_staff_notice_deliveries(
+    conn,
+    user_id,
+    now_utc
+):
+    now_utc = parse_staff_notice_utc_datetime(now_utc)
+    rows = conn.execute("""
+        SELECT
+            d.*,
+            o.occurrence_kind,
+            o.occurrence_date,
+            o.planned_shift_type,
+            o.shift_id,
+            o.due_at_utc,
+            o.occurrence_status,
+            sn.notice_id,
+            sn.title,
+            sn.notice_text,
+            sn.priority,
+            sn.client_id,
+            sn.status AS notice_status,
+            sn.effective_start_at_utc,
+            sn.expires_at_utc,
+            sn.published_at_utc,
+            s.shift_date,
+            s.shift_type,
+            ack.acknowledgement_id,
+            ack.acknowledged_at
+        FROM staff_notice_deliveries d
+        JOIN staff_notice_occurrences o
+            ON d.occurrence_id = o.occurrence_id
+        JOIN staff_notice_schedules sns
+            ON o.schedule_id = sns.schedule_id
+        JOIN staff_notices sn
+            ON sns.notice_id = sn.notice_id
+        LEFT JOIN shifts s
+            ON o.shift_id = s.shift_id
+        LEFT JOIN acknowledgements ack
+            ON ack.source_table = 'staff_notice_deliveries'
+           AND ack.source_id = d.delivery_id
+           AND ack.user_id = d.user_id
+           AND ack.active = 1
+        WHERE d.user_id = ?
+        ORDER BY d.delivery_id
+    """, (user_id,)).fetchall()
+    deliveries = []
+
+    for row in rows:
+        delivery = dict(row)
+        delivery["derived_status"] = get_recipient_staff_notice_status(
+            active_acknowledgement_at_utc=delivery["acknowledged_at"],
+            due_at_utc=delivery["due_at_utc"],
+            requirement_status=delivery["requirement_status"],
+            first_viewed_at_utc=delivery["first_viewed_at_utc"]
+        )
+        delivery["readable"] = (
+            delivery["recipient_access"] == 1
+            and delivery["notice_status"] == "Published"
+            and delivery["occurrence_status"]
+            not in ("No Shift Occurred", "Cancelled")
+        )
+        delivery["overdue"] = (
+            delivery["acknowledged_at"] is None
+            and delivery["requirement_status"] == "Required"
+            and delivery["due_at_utc"] is not None
+            and parse_staff_notice_utc_datetime(
+                delivery["due_at_utc"]
+            ) < now_utc
+        )
+        expires_at = (
+            parse_staff_notice_utc_datetime(
+                delivery["expires_at_utc"]
+            )
+            if delivery["expires_at_utc"] is not None
+            else None
+        )
+        effective_start = parse_staff_notice_utc_datetime(
+            delivery["effective_start_at_utc"]
+        )
+        delivery["notice_is_current"] = (
+            effective_start <= now_utc
+            and (expires_at is None or expires_at >= now_utc)
+            and delivery["notice_status"] == "Published"
+        )
+        delivery["context"] = None
+        if delivery["occurrence_kind"] == "Shift":
+            context_date = (
+                delivery["shift_date"]
+                or delivery["occurrence_date"]
+            )
+            context_type = (
+                delivery["shift_type"]
+                or delivery["planned_shift_type"]
+            )
+            delivery["context"] = (
+                f"{context_type} shift — {context_date}"
+            )
+        elif delivery["occurrence_date"] is not None:
+            delivery["context"] = delivery["occurrence_date"]
+        delivery["due_at_display"] = (
+            format_staff_notice_local_datetime(
+                delivery["due_at_utc"]
+            )
+            if delivery["due_at_utc"] is not None
+            else None
+        )
+        delivery["first_viewed_at_display"] = (
+            format_staff_notice_local_datetime(
+                delivery["first_viewed_at_utc"]
+            )
+            if delivery["first_viewed_at_utc"] is not None
+            else None
+        )
+        delivery["acknowledged_at_display"] = (
+            format_staff_notice_local_datetime(
+                delivery["acknowledged_at"]
+            )
+            if delivery["acknowledged_at"] is not None
+            else None
+        )
+        deliveries.append(delivery)
+
+    return deliveries
+
+
+def _staff_notice_dashboard_sort_key(delivery):
+    status = delivery["derived_status"]
+    acknowledged = status in ("Acknowledged", "Acknowledged Late")
+    if delivery["overdue"] and not acknowledged:
+        group = 0
+    elif (
+        delivery["notice_is_current"]
+        and status == "Not Viewed"
+    ):
+        group = 1
+    elif (
+        delivery["notice_is_current"]
+        and status == "Viewed – Awaiting Acknowledgement"
+    ):
+        group = 2
+    elif (
+        delivery["notice_is_current"]
+        and delivery["requirement_status"] == "Required"
+        and not acknowledged
+    ):
+        group = 3
+    elif delivery["notice_is_current"] and acknowledged:
+        group = 4
+    else:
+        group = 5
+
+    priority_rank = {
+        "Urgent": 0,
+        "Important": 1,
+        "Normal": 2
+    }[delivery["priority"]]
+    due_at = delivery["due_at_utc"] or "9999-12-31T23:59:59Z"
+    published_at_rank = (
+        -parse_staff_notice_utc_datetime(
+            delivery["published_at_utc"]
+        ).timestamp()
+        if delivery["published_at_utc"] is not None
+        else float("inf")
+    )
+    return (
+        group,
+        priority_rank,
+        due_at,
+        published_at_rank,
+        delivery["delivery_id"]
+    )
+
+
+def _get_staff_notice_recipient_collections(
+    conn,
+    user_id,
+    now_utc
+):
+    deliveries = _load_recipient_staff_notice_deliveries(
+        conn,
+        user_id,
+        now_utc
+    )
+    dashboard = sorted(
+        (
+            delivery
+            for delivery in deliveries
+            if delivery["readable"]
+        ),
+        key=_staff_notice_dashboard_sort_key
+    )[:5]
+    current = sorted(
+        (
+            delivery
+            for delivery in deliveries
+            if delivery["derived_status"] in (
+                "Not Viewed",
+                "Viewed – Awaiting Acknowledgement"
+            )
+            and delivery["requirement_status"] == "Required"
+        ),
+        key=_staff_notice_dashboard_sort_key
+    )
+    history = sorted(
+        (
+            delivery
+            for delivery in deliveries
+            if delivery not in current
+        ),
+        key=lambda delivery: (
+            delivery["assigned_at_utc"],
+            delivery["delivery_id"]
+        ),
+        reverse=True
+    )
+    return {
+        "dashboard": dashboard,
+        "current": current,
+        "history": history,
+        "all": deliveries,
+        "outstanding_count": len(current)
+    }
+
+
+def _load_staff_notice_recipient_delivery(
+    conn,
+    delivery_id,
+    user_id,
+    now_utc
+):
+    deliveries = _load_recipient_staff_notice_deliveries(
+        conn,
+        user_id,
+        now_utc
+    )
+    return next(
+        (
+            delivery
+            for delivery in deliveries
+            if delivery["delivery_id"] == delivery_id
+        ),
+        None
+    )
+
+
+def _record_staff_notice_first_view(
+    conn,
+    delivery,
+    viewer_user_id,
+    viewed_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice viewing requires an active transaction."
+        )
+    if (
+        delivery["first_viewed_at_utc"] is None
+        and delivery["viewed_by_user_id"] is not None
+    ) or (
+        delivery["first_viewed_at_utc"] is not None
+        and delivery["viewed_by_user_id"] is None
+    ):
+        raise StaffNoticeRecipientError(
+            "This delivery has inconsistent viewing history."
+        )
+    if (
+        delivery["acknowledgement_id"] is not None
+        and (
+            delivery["first_viewed_at_utc"] is None
+            or parse_staff_notice_utc_datetime(
+                delivery["acknowledged_at"]
+            ) < parse_staff_notice_utc_datetime(
+                delivery["first_viewed_at_utc"]
+            )
+        )
+    ):
+        raise StaffNoticeRecipientError(
+            "This delivery has inconsistent acknowledgement history."
+        )
+    if delivery["first_viewed_at_utc"] is not None:
+        return 0
+
+    viewed_at_utc = format_staff_notice_utc_datetime(viewed_at_utc)
+    cursor = conn.execute("""
+        UPDATE staff_notice_deliveries
+        SET first_viewed_at_utc = ?,
+            viewed_by_user_id = ?
+        WHERE delivery_id = ?
+          AND user_id = ?
+          AND first_viewed_at_utc IS NULL
+          AND viewed_by_user_id IS NULL
+          AND recipient_access = 1
+    """, (
+        viewed_at_utc,
+        viewer_user_id,
+        delivery["delivery_id"],
+        viewer_user_id
+    ))
+    if cursor.rowcount != 1:
+        current = conn.execute("""
+            SELECT first_viewed_at_utc, viewed_by_user_id
+            FROM staff_notice_deliveries
+            WHERE delivery_id = ?
+              AND user_id = ?
+        """, (
+            delivery["delivery_id"],
+            viewer_user_id
+        )).fetchone()
+        if (
+            current is not None
+            and current["first_viewed_at_utc"] is not None
+            and current["viewed_by_user_id"] == viewer_user_id
+        ):
+            return 0
+        raise StaffNoticeRecipientError(
+            "The notice became unavailable while it was being opened."
+        )
+
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_viewed",
+        summary=f"Staff Notice viewed: {delivery['title']}",
+        user_id=viewer_user_id,
+        client_id=delivery["client_id"],
+        shift_id=delivery["shift_id"],
+        related_table="staff_notice_deliveries",
+        related_id=delivery["delivery_id"],
+        details=(
+            f"Notice ID: {delivery['notice_id']}; "
+            f"Occurrence ID: {delivery['occurrence_id']}; "
+            f"Delivery ID: {delivery['delivery_id']}; "
+            f"Recipient User ID: {viewer_user_id}; "
+            f"Viewer User ID: {viewer_user_id}; "
+            f"Viewed at UTC: {viewed_at_utc}"
+        ),
+        success=1
+    )
+    return 1
+
+
+def _acknowledge_staff_notice_delivery(
+    conn,
+    delivery,
+    user_id,
+    acknowledged_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice acknowledgement requires an active transaction."
+        )
+    if delivery["user_id"] != user_id:
+        raise PermissionError("Staff Notice delivery access denied.")
+    if not delivery["readable"]:
+        raise StaffNoticeRecipientError(
+            "This Staff Notice is no longer available to acknowledge."
+        )
+    if delivery["requirement_status"] != "Required":
+        raise StaffNoticeRecipientError(
+            "This Staff Notice no longer requires acknowledgement."
+        )
+    if delivery["first_viewed_at_utc"] is None:
+        raise StaffNoticeRecipientError(
+            "Open the full Staff Notice before acknowledging it."
+        )
+    if delivery["acknowledgement_id"] is not None:
+        return {
+            "acknowledgement_id": delivery["acknowledgement_id"],
+            "created": 0
+        }
+
+    acknowledged_at_utc = format_staff_notice_utc_datetime(
+        acknowledged_at_utc
+    )
+    details = (
+        f"Notice ID: {delivery['notice_id']}; "
+        f"Occurrence ID: {delivery['occurrence_id']}; "
+        f"Delivery ID: {delivery['delivery_id']}; "
+        f"Recipient User ID: {user_id}; "
+        f"Actor User ID: {user_id}; "
+        f"Acknowledged at UTC: {acknowledged_at_utc}"
+    )
+    acknowledgement_id = create_acknowledgement(
+        conn,
+        "staff_notice_deliveries",
+        delivery["delivery_id"],
+        user_id,
+        acknowledgement_type="Acknowledgement",
+        client_id=delivery["client_id"],
+        shift_id=delivery["shift_id"],
+        acknowledged_at=acknowledged_at_utc,
+        activity_details=details
+    )
+    return {
+        "acknowledgement_id": acknowledgement_id,
+        "created": 1
+    }
 
 
 def _publish_staff_notice_in_transaction(
@@ -7921,6 +8357,179 @@ def staff_notice_draft_deactivate(notice_id):
         "staff_notice_admin_detail",
         notice_id=notice_id
     ))
+
+
+@app.route("/staff-notices")
+def staff_notice_history():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    now_utc = get_application_now_utc()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        recipient = _get_authenticated_staff_notice_recipient(conn)
+        reconcile_staff_notice_non_shift_requirements_in_transaction(
+            conn,
+            now_utc
+        )
+        notices = _get_staff_notice_recipient_collections(
+            conn,
+            recipient["user_id"],
+            now_utc
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "Staff Notices could not be loaded. Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return render_template(
+        "staff_notice_history.html",
+        current_notices=notices["current"],
+        historical_notices=notices["history"],
+        outstanding_count=notices["outstanding_count"]
+    )
+
+
+@app.route("/staff-notices/delivery/<int:delivery_id>")
+def staff_notice_detail(delivery_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    now_utc = get_application_now_utc()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        recipient = _get_authenticated_staff_notice_recipient(conn)
+        reconcile_staff_notice_non_shift_requirements_in_transaction(
+            conn,
+            now_utc
+        )
+        delivery = _load_staff_notice_recipient_delivery(
+            conn,
+            delivery_id,
+            recipient["user_id"],
+            now_utc
+        )
+        if delivery is None:
+            conn.rollback()
+            return "Staff Notice delivery not found", 404
+        if not delivery["readable"]:
+            conn.rollback()
+            return "Staff Notice delivery is not accessible", 403
+
+        _record_staff_notice_first_view(
+            conn,
+            delivery,
+            recipient["user_id"],
+            now_utc
+        )
+        delivery = _load_staff_notice_recipient_delivery(
+            conn,
+            delivery_id,
+            recipient["user_id"],
+            now_utc
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except StaffNoticeRecipientError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return str(error), 409
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "The Staff Notice could not be opened. Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return render_template(
+        "staff_notice_detail.html",
+        delivery=delivery,
+        acknowledged=request.args.get("acknowledged") == "1"
+    )
+
+
+@app.route(
+    "/staff-notices/delivery/<int:delivery_id>/acknowledge",
+    methods=["POST"]
+)
+def acknowledge_staff_notice(delivery_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    if (
+        set(request.form.keys()) != {"acknowledge"}
+        or request.form.get("acknowledge") != "yes"
+    ):
+        return "Explicit acknowledgement confirmation is required.", 400
+
+    conn = get_db()
+    now_utc = get_application_now_utc()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        recipient = _get_authenticated_staff_notice_recipient(conn)
+        reconcile_staff_notice_non_shift_requirements_in_transaction(
+            conn,
+            now_utc
+        )
+        delivery = _load_staff_notice_recipient_delivery(
+            conn,
+            delivery_id,
+            recipient["user_id"],
+            now_utc
+        )
+        if delivery is None:
+            conn.rollback()
+            return "Staff Notice delivery not found", 404
+
+        _acknowledge_staff_notice_delivery(
+            conn,
+            delivery,
+            recipient["user_id"],
+            now_utc
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except StaffNoticeRecipientError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return str(error), 409
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "The Staff Notice acknowledgement could not be recorded. "
+            "Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "staff_notice_detail",
+        delivery_id=delivery_id,
+        acknowledged=1
+    ))
+
 
 def get_current_shift_type(current_datetime=None):
     if current_datetime is None:
@@ -8940,6 +9549,36 @@ def shift_dashboard(shift_id):
       conn.close()
       return "Shift not found", 404
 
+    now_utc = get_application_now_utc()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        recipient = _get_authenticated_staff_notice_recipient(conn)
+        reconcile_staff_notice_non_shift_requirements_in_transaction(
+            conn,
+            now_utc
+        )
+        staff_notice_collection = (
+            _get_staff_notice_recipient_collections(
+                conn,
+                recipient["user_id"],
+                now_utc
+            )
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+        return (
+            "Staff Notices could not be loaded. Please retry.",
+            503
+        )
+
     food_fluid_authorized = False
     recent_food_fluid_entries = []
     try:
@@ -9054,6 +9693,10 @@ def shift_dashboard(shift_id):
         notes=notes,
         food_fluid_authorized=food_fluid_authorized,
         recent_food_fluid_entries=recent_food_fluid_entries,
+        staff_notices=staff_notice_collection["dashboard"],
+        staff_notice_outstanding_count=(
+            staff_notice_collection["outstanding_count"]
+        ),
 
         care_tasks=care_tasks,
         care_task_entries=care_task_entries,
@@ -13029,7 +13672,9 @@ def create_acknowledgement(
     acknowledgement_type="Read",
     comment=None,
     client_id=None,
-    shift_id=None
+    shift_id=None,
+    acknowledged_at=None,
+    activity_details=None
 ):
     existing = conn.execute("""
         SELECT acknowledgement_id
@@ -13047,7 +13692,12 @@ def create_acknowledgement(
     if existing:
         return existing["acknowledgement_id"]
 
-    acknowledged_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if acknowledged_at is None:
+        acknowledged_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        acknowledged_at = format_staff_notice_utc_datetime(
+            acknowledged_at
+        )
 
     cur = conn.execute("""
         INSERT INTO acknowledgements
@@ -13082,7 +13732,11 @@ def create_acknowledgement(
         shift_id=shift_id,
         related_table="acknowledgements",
         related_id=acknowledgement_id,
-        details=f"{source_table} #{source_id}",
+        details=(
+            activity_details
+            if activity_details is not None
+            else f"{source_table} #{source_id}"
+        ),
         success=1
     )
 

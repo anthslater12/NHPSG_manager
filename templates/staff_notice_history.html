@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Staff Notices</h2>
+
+    <p>
+        <strong>Outstanding:</strong> {{ outstanding_count }}
+    </p>
+
+    <h3>Current and Outstanding</h3>
+
+    {% if current_notices %}
+        <table>
+            <tr>
+                <th>Priority</th>
+                <th>Notice</th>
+                <th>Context</th>
+                <th>Status</th>
+                <th>Deadline</th>
+            </tr>
+            {% for notice in current_notices %}
+                <tr>
+                    <td>{{ notice.priority }}</td>
+                    <td>
+                        {% if notice.readable %}
+                            <a href="{{ url_for(
+                                'staff_notice_detail',
+                                delivery_id=notice.delivery_id
+                            ) }}">
+                                {{ notice.title }}
+                            </a>
+                        {% else %}
+                            {{ notice.title }}
+                        {% endif %}
+                    </td>
+                    <td>{{ notice.context or "General" }}</td>
+                    <td>{{ notice.derived_status }}</td>
+                    <td>
+                        {% if notice.overdue %}
+                            Overdue — acknowledgement still required
+                        {% elif notice.due_at_display %}
+                            {{ notice.due_at_display }}
+                        {% else %}
+                            No fixed deadline
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No outstanding Staff Notices.</p>
+    {% endif %}
+
+    <h3>History</h3>
+
+    {% if historical_notices %}
+        <table>
+            <tr>
+                <th>Priority</th>
+                <th>Notice</th>
+                <th>Context</th>
+                <th>Status</th>
+                <th>Acknowledged</th>
+            </tr>
+            {% for notice in historical_notices %}
+                <tr>
+                    <td>{{ notice.priority }}</td>
+                    <td>
+                        {% if notice.readable %}
+                            <a href="{{ url_for(
+                                'staff_notice_detail',
+                                delivery_id=notice.delivery_id
+                            ) }}">
+                                {{ notice.title }}
+                            </a>
+                        {% else %}
+                            {{ notice.title }}
+                        {% endif %}
+                    </td>
+                    <td>{{ notice.context or "General" }}</td>
+                    <td>{{ notice.derived_status }}</td>
+                    <td>{{ notice.acknowledged_at_display or "—" }}</td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No historical Staff Notices.</p>
+    {% endif %}
+</div>
+
+{% endblock %}

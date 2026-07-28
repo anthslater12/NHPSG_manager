@@ -88,6 +88,7 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     shift_staff_id INTEGER PRIMARY KEY,
                     shift_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
+                    sign_on_at TEXT,
                     actual_start_time TEXT,
                     actual_end_time TEXT,
                     actual_end_at_utc TEXT,
@@ -117,6 +118,53 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     input_value TEXT
                 );
 
+                CREATE TABLE shift_notes (
+                    note_id INTEGER PRIMARY KEY,
+                    shift_date TEXT,
+                    shift_type TEXT,
+                    client_id INTEGER,
+                    user_id INTEGER,
+                    note_text TEXT,
+                    follow_up_required INTEGER,
+                    created_at TEXT
+                );
+
+                CREATE TABLE care_tasks (
+                    care_task_id INTEGER PRIMARY KEY,
+                    task_name TEXT,
+                    instructions TEXT,
+                    occurs TEXT,
+                    active INTEGER
+                );
+
+                CREATE TABLE shift_care_task_entries (
+                    entry_id INTEGER PRIMARY KEY,
+                    shift_id INTEGER,
+                    care_task_id INTEGER,
+                    completed_by_user_id INTEGER,
+                    outcome TEXT,
+                    completed_at TEXT,
+                    comment TEXT
+                );
+
+                CREATE TABLE housekeeping_tasks (
+                    housekeeping_task_id INTEGER PRIMARY KEY,
+                    task_name TEXT,
+                    instructions TEXT,
+                    occurs TEXT,
+                    active INTEGER
+                );
+
+                CREATE TABLE shift_housekeeping_task_entries (
+                    entry_id INTEGER PRIMARY KEY,
+                    shift_id INTEGER,
+                    housekeeping_task_id INTEGER,
+                    completed_by_user_id INTEGER,
+                    outcome TEXT,
+                    completed_at TEXT,
+                    comment TEXT
+                );
+
                 CREATE TABLE activity_log (
                     activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     activity_datetime TEXT,
@@ -139,7 +187,7 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     user_id INTEGER NOT NULL,
                     acknowledgement_type TEXT NOT NULL,
                     acknowledged_at TEXT NOT NULL,
-                    comments TEXT,
+                    comment TEXT,
                     active INTEGER NOT NULL DEFAULT 1
                 );
             """)
@@ -2355,6 +2403,685 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             ["Assigned"]
         )
         self.assertNotEqual(shift_staff_id, second_assignment)
+
+    def recipient_request(
+        self,
+        path,
+        *,
+        method="GET",
+        data=None,
+        user_id=2,
+        role="Support Worker",
+        now_utc=None,
+        patch_food_fluid=False
+    ):
+        if now_utc is None:
+            now_utc = datetime(
+                2026,
+                8,
+                3,
+                16,
+                0,
+                tzinfo=timezone.utc
+            )
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = user_id
+            session_data["role"] = role
+            session_data["full_name"] = f"User {user_id}"
+
+        patches = [
+            mock.patch.object(
+                app,
+                "get_application_now_utc",
+                return_value=now_utc
+            )
+        ]
+        if patch_food_fluid:
+            patches.append(mock.patch.object(
+                app,
+                "get_active_food_fluid_shift_context",
+                side_effect=PermissionError
+            ))
+
+        with patches[0]:
+            if len(patches) == 2:
+                with patches[1]:
+                    response = client.open(
+                        path,
+                        method=method,
+                        data=data or {}
+                    )
+            else:
+                response = client.open(
+                    path,
+                    method=method,
+                    data=data or {}
+                )
+        return client, response
+
+    def create_recipient_notice(self, *, title=None, priority=None):
+        fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(("All Support Workers", None, None),)
+        )
+        self.seed_one_time_occurrence(fixture)
+        if title is not None or priority is not None:
+            conn = self.open_database()
+            try:
+                updates = []
+                parameters = []
+                if title is not None:
+                    updates.append("title = ?")
+                    parameters.append(title)
+                if priority is not None:
+                    updates.append("priority = ?")
+                    parameters.append(priority)
+                conn.execute(
+                    "UPDATE staff_notices SET "
+                    + ", ".join(updates)
+                    + " WHERE notice_id = ?",
+                    (*parameters, fixture["notice_id"])
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return fixture
+
+    def test_recipient_reconciliation_precedes_list_and_is_idempotent(self):
+        fixture = self.create_recipient_notice(title="Worker Notice")
+
+        _, first = self.recipient_request("/staff-notices")
+        first_delivery = self.delivery_rows(fixture)
+        first_history = self.delivery_history_rows(fixture)
+        first_activity = self.activity_rows()
+        _, repeated = self.recipient_request("/staff-notices")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(len(first_delivery), 1)
+        self.assertEqual(
+            self.delivery_rows(fixture),
+            first_delivery
+        )
+        self.assertEqual(
+            self.delivery_history_rows(fixture),
+            first_history
+        )
+        self.assertEqual(self.activity_rows(), first_activity)
+        self.assertIn(b"Worker Notice", first.data)
+        self.assertIsNone(first_delivery[0]["first_viewed_at_utc"])
+
+        inactive_fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(
+                ("Selected Individual", None, 4),
+            )
+        )
+        _, response = self.recipient_request("/staff-notices")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.delivery_rows(inactive_fixture), [])
+
+    def test_recipient_routes_require_login_active_identity_and_ownership(self):
+        fixture = self.create_recipient_notice()
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        path = f"/staff-notices/delivery/{delivery['delivery_id']}"
+
+        anonymous = app.app.test_client().get("/staff-notices")
+        _, inactive = self.recipient_request(
+            "/staff-notices",
+            user_id=4
+        )
+        _, manager = self.recipient_request(
+            path,
+            user_id=5,
+            role="Program Manager"
+        )
+
+        self.assertEqual(anonymous.status_code, 302)
+        self.assertIn("/login", anonymous.headers["Location"])
+        self.assertEqual(inactive.status_code, 403)
+        self.assertEqual(manager.status_code, 404)
+        self.assertEqual(
+            self.delivery_rows(fixture)[0]["first_viewed_at_utc"],
+            None
+        )
+
+    def test_recipient_reconciliation_failure_rolls_back_dashboard(self):
+        self.create_recipient_notice(title="Rollback Notice")
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_recipient_reconciliation_failure
+                BEFORE INSERT ON staff_notice_audience_eligibility_periods
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'controlled recipient reconciliation failure'
+                    );
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        _, response = self.recipient_request(
+            f"/shift/{shift_id}",
+            patch_food_fluid=True
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"Please retry", response.data)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_recipient_dashboard_limits_orders_and_does_not_view(self):
+        fixtures = []
+        for index in range(6):
+            fixtures.append(self.create_recipient_notice(
+                title=f"Notice {index}",
+                priority="Urgent" if index == 5 else "Normal"
+            ))
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+
+        _, response = self.recipient_request(
+            f"/shift/{shift_id}",
+            patch_food_fluid=True
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data.count(b"/staff-notices/delivery/"),
+            5
+        )
+        self.assertIn(b"View All Staff Notices", response.data)
+        self.assertLess(
+            response.data.index(b"Notice 5"),
+            response.data.index(b"Notice 0")
+        )
+        for fixture in fixtures:
+            for delivery in self.delivery_rows(fixture):
+                self.assertIsNone(delivery["first_viewed_at_utc"])
+
+    def test_recipient_dashboard_empty_state(self):
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+
+        _, response = self.recipient_request(
+            f"/shift/{shift_id}",
+            patch_food_fluid=True
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            b"No Staff Notices are currently available",
+            response.data
+        )
+
+    def test_recipient_list_groups_statuses_without_recording_view(self):
+        fixtures = [
+            self.create_recipient_notice(title="Not Viewed Notice"),
+            self.create_recipient_notice(title="Viewed Notice"),
+            self.create_recipient_notice(title="Acknowledged Notice"),
+            self.create_recipient_notice(title="NLR Notice"),
+            self.create_recipient_notice(title="Cancelled Notice")
+        ]
+        self.recipient_request("/staff-notices")
+        deliveries = [
+            self.delivery_rows(fixture)[0]
+            for fixture in fixtures
+        ]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T15:00:00Z',
+                    viewed_by_user_id = 2
+                WHERE delivery_id = ?
+            """, (deliveries[1]["delivery_id"],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T15:00:00Z',
+                    viewed_by_user_id = 2
+                WHERE delivery_id = ?
+            """, (deliveries[2]["delivery_id"],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET requirement_status = 'No Longer Required',
+                    recipient_access = 0
+                WHERE delivery_id = ?
+            """, (deliveries[3]["delivery_id"],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET requirement_status = 'Cancelled',
+                    recipient_access = 0
+                WHERE delivery_id = ?
+            """, (deliveries[4]["delivery_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        self.seed_staff_notice_acknowledgement(
+            deliveries[2]["delivery_id"],
+            2,
+            "2026-08-03T15:30:00Z"
+        )
+        before = self.database_snapshot()
+
+        _, response = self.recipient_request("/staff-notices")
+
+        self.assertEqual(response.status_code, 200)
+        for status in (
+            b"Not Viewed",
+            "Viewed – Awaiting Acknowledgement".encode(),
+            b"Acknowledged",
+            b"No Longer Required",
+            b"Cancelled"
+        ):
+            self.assertIn(status, response.data)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_recipient_detail_records_first_view_once_with_exact_audit(self):
+        fixture = self.create_recipient_notice(title="View Me")
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        baseline_activity_count = len(self.activity_rows())
+        baseline_history = self.delivery_history_rows(fixture)
+        first_view = datetime(
+            2026,
+            8,
+            3,
+            16,
+            30,
+            tzinfo=timezone.utc
+        )
+
+        _, response = self.recipient_request(
+            f"/staff-notices/delivery/{delivery['delivery_id']}",
+            now_utc=first_view
+        )
+
+        self.assertEqual(response.status_code, 200)
+        viewed_delivery = self.delivery_rows(fixture)[0]
+        self.assertEqual(
+            viewed_delivery["first_viewed_at_utc"],
+            "2026-08-03T16:30:00Z"
+        )
+        self.assertEqual(viewed_delivery["viewed_by_user_id"], 2)
+        activities = self.activity_rows()[baseline_activity_count:]
+        self.assertEqual(
+            [row["activity_type"] for row in activities],
+            ["staff_notice_viewed"]
+        )
+        self.assertEqual(activities[0]["activity_class"], "STAFF_NOTICE")
+        self.assertEqual(activities[0]["user_id"], 2)
+        self.assertEqual(activities[0]["client_id"], 1)
+        self.assertIsNone(activities[0]["shift_id"])
+        self.assertEqual(
+            activities[0]["related_table"],
+            "staff_notice_deliveries"
+        )
+        self.assertEqual(
+            activities[0]["related_id"],
+            delivery["delivery_id"]
+        )
+        self.assertEqual(activities[0]["success"], 1)
+        self.assertEqual(
+            activities[0]["details"],
+            f"Notice ID: {fixture['notice_id']}; "
+            f"Occurrence ID: {delivery['occurrence_id']}; "
+            f"Delivery ID: {delivery['delivery_id']}; "
+            "Recipient User ID: 2; Viewer User ID: 2; "
+            "Viewed at UTC: 2026-08-03T16:30:00Z"
+        )
+        self.assertEqual(
+            self.delivery_history_rows(fixture),
+            baseline_history
+        )
+        snapshot = self.database_snapshot()
+        _, repeated = self.recipient_request(
+            f"/staff-notices/delivery/{delivery['delivery_id']}",
+            now_utc=datetime(
+                2026,
+                8,
+                3,
+                17,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(self.database_snapshot(), snapshot)
+
+    def test_recipient_detail_enforces_ownership_and_escapes_content(self):
+        fixture = self.create_recipient_notice(
+            title="<script>title()</script>"
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notices
+                SET notice_text = '<script>alert(1)</script>'
+                WHERE notice_id = ?
+            """, (fixture["notice_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        before = self.database_snapshot()
+
+        _, denied = self.recipient_request(
+            f"/staff-notices/delivery/{delivery['delivery_id']}",
+            user_id=3,
+            role="Behaviour Consultant"
+        )
+        self.assertEqual(denied.status_code, 404)
+        self.assertEqual(self.database_snapshot(), before)
+
+        _, allowed = self.recipient_request(
+            f"/staff-notices/delivery/{delivery['delivery_id']}"
+        )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertIn(b"&lt;script&gt;alert(1)&lt;/script&gt;", allowed.data)
+        self.assertNotIn(b"<script>alert(1)</script>", allowed.data)
+
+    def test_recipient_view_audit_failure_rolls_back_view(self):
+        fixture = self.create_recipient_notice()
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_recipient_view_audit_failure
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type = 'staff_notice_viewed'
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled view audit failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        _, response = self.recipient_request(
+            f"/staff-notices/delivery/{delivery['delivery_id']}"
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_recipient_does_not_repair_inconsistent_acknowledgement_history(self):
+        fixture = self.create_recipient_notice()
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        self.seed_staff_notice_acknowledgement(
+            delivery["delivery_id"],
+            2,
+            "2026-08-03T15:00:00Z"
+        )
+        before = self.database_snapshot()
+
+        _, response = self.recipient_request(
+            f"/staff-notices/delivery/{delivery['delivery_id']}"
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn(b"inconsistent acknowledgement history", response.data)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_recipient_acknowledgement_is_explicit_atomic_and_idempotent(self):
+        fixture = self.create_recipient_notice(title="Acknowledge Me")
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        detail_path = (
+            f"/staff-notices/delivery/{delivery['delivery_id']}"
+        )
+        self.recipient_request(detail_path)
+        viewed_delivery = self.delivery_rows(fixture)[0]
+        baseline_activity_count = len(self.activity_rows())
+        baseline_history = self.delivery_history_rows(fixture)
+        acknowledged_at = datetime(
+            2026,
+            8,
+            3,
+            17,
+            0,
+            tzinfo=timezone.utc
+        )
+
+        _, missing_confirmation = self.recipient_request(
+            detail_path + "/acknowledge",
+            method="POST",
+            now_utc=acknowledged_at
+        )
+        self.assertEqual(missing_confirmation.status_code, 400)
+        _, response = self.recipient_request(
+            detail_path + "/acknowledge",
+            method="POST",
+            data={"acknowledge": "yes"},
+            now_utc=acknowledged_at
+        )
+
+        self.assertEqual(response.status_code, 302)
+        conn = self.open_database()
+        try:
+            acknowledgements = conn.execute("""
+                SELECT *
+                FROM acknowledgements
+                WHERE source_table = 'staff_notice_deliveries'
+                  AND source_id = ?
+                  AND user_id = 2
+                  AND active = 1
+            """, (delivery["delivery_id"],)).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(acknowledgements), 1)
+        self.assertEqual(
+            acknowledgements[0]["acknowledged_at"],
+            "2026-08-03T17:00:00Z"
+        )
+        self.assertEqual(
+            self.delivery_rows(fixture)[0]["first_viewed_at_utc"],
+            viewed_delivery["first_viewed_at_utc"]
+        )
+        activities = self.activity_rows()[baseline_activity_count:]
+        self.assertEqual(
+            [row["activity_type"] for row in activities],
+            ["record_acknowledged"]
+        )
+        self.assertEqual(
+            activities[0]["activity_class"],
+            "ACKNOWLEDGEMENT"
+        )
+        self.assertEqual(activities[0]["user_id"], 2)
+        self.assertEqual(activities[0]["client_id"], 1)
+        self.assertIsNone(activities[0]["shift_id"])
+        self.assertEqual(
+            activities[0]["related_table"],
+            "acknowledgements"
+        )
+        self.assertEqual(
+            activities[0]["related_id"],
+            acknowledgements[0]["acknowledgement_id"]
+        )
+        self.assertEqual(activities[0]["success"], 1)
+        self.assertEqual(
+            activities[0]["details"],
+            f"Notice ID: {fixture['notice_id']}; "
+            f"Occurrence ID: {delivery['occurrence_id']}; "
+            f"Delivery ID: {delivery['delivery_id']}; "
+            "Recipient User ID: 2; Actor User ID: 2; "
+            "Acknowledged at UTC: 2026-08-03T17:00:00Z"
+        )
+        self.assertEqual(
+            self.delivery_history_rows(fixture),
+            baseline_history
+        )
+        snapshot = self.database_snapshot()
+        _, repeated = self.recipient_request(
+            detail_path + "/acknowledge",
+            method="POST",
+            data={"acknowledge": "yes"},
+            now_utc=datetime(
+                2026,
+                8,
+                3,
+                18,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+        self.assertEqual(repeated.status_code, 302)
+        self.assertEqual(self.database_snapshot(), snapshot)
+
+    def test_recipient_acknowledgement_requires_view_and_ownership(self):
+        fixture = self.create_recipient_notice()
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        path = (
+            f"/staff-notices/delivery/{delivery['delivery_id']}"
+            "/acknowledge"
+        )
+        before = self.database_snapshot()
+
+        _, unviewed = self.recipient_request(
+            path,
+            method="POST",
+            data={"acknowledge": "yes"}
+        )
+        self.assertEqual(unviewed.status_code, 409)
+        self.assertEqual(self.database_snapshot(), before)
+        _, other_worker = self.recipient_request(
+            path,
+            method="POST",
+            data={"acknowledge": "yes"},
+            user_id=3,
+            role="Behaviour Consultant"
+        )
+        self.assertEqual(other_worker.status_code, 404)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_recipient_overdue_acknowledgement_remains_accessible_and_late(self):
+        fixture = self.create_recipient_notice(title="Overdue Notice")
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = '2026-08-03T15:00:00Z'
+                WHERE occurrence_id = ?
+            """, (delivery["occurrence_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        path = f"/staff-notices/delivery/{delivery['delivery_id']}"
+
+        _, detail = self.recipient_request(path)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"still required", detail.data)
+        _, acknowledged = self.recipient_request(
+            path + "/acknowledge",
+            method="POST",
+            data={"acknowledge": "yes"},
+            now_utc=datetime(
+                2026,
+                8,
+                3,
+                17,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+        self.assertEqual(acknowledged.status_code, 302)
+        _, reopened = self.recipient_request(path)
+        self.assertEqual(reopened.status_code, 200)
+        self.assertIn(b"Acknowledged Late", reopened.data)
+
+    def test_recipient_rejects_unavailable_and_preserves_history(self):
+        fixtures = [
+            self.create_recipient_notice(title="NLR Recipient"),
+            self.create_recipient_notice(title="Cancelled Recipient")
+        ]
+        self.recipient_request("/staff-notices")
+        deliveries = [
+            self.delivery_rows(fixture)[0]
+            for fixture in fixtures
+        ]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET requirement_status = 'No Longer Required',
+                    recipient_access = 0
+                WHERE delivery_id = ?
+            """, (deliveries[0]["delivery_id"],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET requirement_status = 'Cancelled',
+                    recipient_access = 0
+                WHERE delivery_id = ?
+            """, (deliveries[1]["delivery_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        _, history = self.recipient_request("/staff-notices")
+        self.assertIn(b"No Longer Required", history.data)
+        self.assertIn(b"Cancelled", history.data)
+        for delivery in deliveries:
+            _, detail = self.recipient_request(
+                f"/staff-notices/delivery/{delivery['delivery_id']}"
+            )
+            self.assertEqual(detail.status_code, 403)
+            _, acknowledge = self.recipient_request(
+                f"/staff-notices/delivery/{delivery['delivery_id']}"
+                "/acknowledge",
+                method="POST",
+                data={"acknowledge": "yes"}
+            )
+            self.assertEqual(acknowledge.status_code, 409)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_recipient_acknowledgement_audit_failure_rolls_back(self):
+        fixture = self.create_recipient_notice()
+        self.recipient_request("/staff-notices")
+        delivery = self.delivery_rows(fixture)[0]
+        path = f"/staff-notices/delivery/{delivery['delivery_id']}"
+        self.recipient_request(path)
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_recipient_ack_audit_failure
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type = 'record_acknowledged'
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled ack audit failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        _, response = self.recipient_request(
+            path + "/acknowledge",
+            method="POST",
+            data={"acknowledge": "yes"}
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.database_snapshot(), before)
 
     def post_worker_end(self, shift_id, completed_at, data=None):
         client = app.app.test_client()
