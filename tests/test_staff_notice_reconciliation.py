@@ -97,6 +97,26 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     active INTEGER NOT NULL
                 );
 
+                CREATE TABLE shift_tasks (
+                    shift_task_id INTEGER PRIMARY KEY,
+                    task_name TEXT NOT NULL,
+                    instructions TEXT,
+                    task_stage TEXT NOT NULL,
+                    requires_input INTEGER NOT NULL DEFAULT 0,
+                    input_label TEXT,
+                    input_type TEXT,
+                    active INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE TABLE shift_task_entries (
+                    shift_task_entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shift_id INTEGER NOT NULL,
+                    shift_task_id INTEGER NOT NULL,
+                    task_stage TEXT NOT NULL,
+                    completed_by_user_id INTEGER NOT NULL,
+                    input_value TEXT
+                );
+
                 CREATE TABLE activity_log (
                     activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     activity_datetime TEXT,
@@ -439,15 +459,20 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def seed_shift_staff(self, shift_id, user_id):
+    def seed_shift_staff(
+        self,
+        shift_id,
+        user_id,
+        actual_start_time="08:00"
+    ):
         conn = self.open_database()
 
         try:
             cursor = conn.execute("""
                 INSERT INTO shift_staff
                 (shift_id, user_id, actual_start_time, active)
-                VALUES (?, ?, '08:00', 1)
-            """, (shift_id, user_id))
+                VALUES (?, ?, ?, 1)
+            """, (shift_id, user_id, actual_start_time))
             conn.commit()
             return cursor.lastrowid
         finally:
@@ -496,7 +521,9 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         shift_type="Day",
         user_id=2,
         effective_start="2026-08-01T07:00:00Z",
-        expires_at="2026-08-10T06:59:59Z"
+        expires_at="2026-08-10T06:59:59Z",
+        scheduled_end_time=None,
+        actual_start_time="08:00"
     ):
         notice_arguments = {
             "occurrence_basis": occurrence_basis,
@@ -513,8 +540,16 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 "specific_shift_type": shift_type
             })
         fixture = self.create_published_notice(**notice_arguments)
-        shift_id = self.seed_shift(date=shift_date, shift_type=shift_type)
-        shift_staff_id = self.seed_shift_staff(shift_id, user_id)
+        shift_id = self.seed_shift(
+            date=shift_date,
+            shift_type=shift_type,
+            scheduled_end_time=scheduled_end_time
+        )
+        shift_staff_id = self.seed_shift_staff(
+            shift_id,
+            user_id,
+            actual_start_time
+        )
         conn = self.open_database()
 
         try:
@@ -2288,10 +2323,26 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         with client.session_transaction() as session_data:
             session_data["user_id"] = 1
             session_data["role"] = "Admin"
-        response = client.post(
-            f"/shift-staff/{second_assignment}/manager-sign-off",
-            data={"reason": "Forgotten sign-off correction."}
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(
+                2026,
+                8,
+                5,
+                0,
+                0,
+                tzinfo=timezone.utc
+            )
+        ):
+            response = client.post(
+                f"/shift-staff/{second_assignment}/manager-sign-off",
+                data={
+                    "actual_end_date": "2026-08-04",
+                    "actual_end_time": "14:00",
+                    "reason": "Forgotten sign-off correction."
+                }
+            )
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
             self.delivery_rows(second_fixture)[0],
@@ -2304,6 +2355,888 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             ["Assigned"]
         )
         self.assertNotEqual(shift_staff_id, second_assignment)
+
+    def post_worker_end(self, shift_id, completed_at, data=None):
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=completed_at
+        ):
+            response = client.post(
+                f"/shift/{shift_id}/end-shift",
+                data=data or {}
+            )
+        return client, response
+
+    def post_manager_end(
+        self,
+        shift_staff_id,
+        correction_entry,
+        *,
+        date,
+        time,
+        reason="Forgotten sign-off correction.",
+        ambiguous_occurrence=""
+    ):
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+            session_data["role"] = "Admin"
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=correction_entry
+        ):
+            response = client.post(
+                f"/shift-staff/{shift_staff_id}/manager-sign-off",
+                data={
+                    "actual_end_date": date,
+                    "actual_end_time": time,
+                    "ambiguous_occurrence": ambiguous_occurrence,
+                    "reason": reason
+                }
+            )
+        return response
+
+    def shift_staff_row(self, shift_staff_id):
+        conn = self.open_database()
+        try:
+            return dict(conn.execute("""
+                SELECT *
+                FROM shift_staff
+                WHERE shift_staff_id = ?
+            """, (shift_staff_id,)).fetchone())
+        finally:
+            conn.close()
+
+    def shift_row(self, shift_id):
+        conn = self.open_database()
+        try:
+            return dict(conn.execute("""
+                SELECT *
+                FROM shifts
+                WHERE shift_id = ?
+            """, (shift_id,)).fetchone())
+        finally:
+            conn.close()
+
+    def test_worker_completion_is_atomic_and_finalizes_notice_deadline(self):
+        fixture, shift_id, shift_staff_id = (
+            self.create_shift_notice_delivery(
+                scheduled_end_time="18:00"
+            )
+        )
+        delivery_before = self.delivery_rows(fixture)[0]
+        history_before = self.delivery_history_rows(fixture)
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                INSERT INTO shift_tasks
+                (
+                    shift_task_id,
+                    task_name,
+                    task_stage,
+                    requires_input,
+                    input_label,
+                    input_type,
+                    active
+                )
+                VALUES (
+                    1,
+                    'Record handover',
+                    'END_SHIFT',
+                    1,
+                    'Handover',
+                    'text',
+                    1
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        baseline_activity_count = len(self.activity_rows())
+        completed_at = datetime(
+            2026,
+            8,
+            3,
+            20,
+            0,
+            tzinfo=timezone.utc
+        )
+
+        client, response = self.post_worker_end(
+            shift_id,
+            completed_at,
+            {"shift_task_input_1": "Handover complete."}
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.location.endswith("/login"))
+        with client.session_transaction() as session_data:
+            self.assertNotIn("user_id", session_data)
+        assignment = self.shift_staff_row(shift_staff_id)
+        self.assertEqual(
+            assignment["actual_end_at_utc"],
+            "2026-08-03T20:00:00Z"
+        )
+        self.assertEqual(
+            assignment["sign_off_at"],
+            "2026-08-03T20:00:00Z"
+        )
+        self.assertEqual(assignment["end_checklist_completed"], 1)
+        self.assertEqual(assignment["active"], 0)
+        shift = self.shift_row(shift_id)
+        self.assertEqual(
+            shift["actual_end_at_utc"],
+            "2026-08-03T20:00:00Z"
+        )
+        self.assertEqual(shift["status"], "Open")
+        self.assertIsNone(shift["closed_at"])
+        occurrence = self.occurrence_rows(fixture)[0]
+        self.assertEqual(
+            occurrence["due_at_utc"],
+            "2026-08-03T20:00:00Z"
+        )
+        self.assertEqual(occurrence["due_at_is_provisional"], 0)
+        self.assertEqual(
+            occurrence["due_at_updated_at_utc"],
+            "2026-08-03T20:00:00Z"
+        )
+        conn = self.open_database()
+        try:
+            task_entries = conn.execute("""
+                SELECT input_value
+                FROM shift_task_entries
+                ORDER BY shift_task_entry_id
+            """).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(
+            [row["input_value"] for row in task_entries],
+            ["Handover complete."]
+        )
+        self.assertEqual(
+            [
+                row["activity_type"]
+                for row in self.activity_rows()[baseline_activity_count:]
+            ],
+            [
+                "shift_task_completed",
+                "staff_notice_occurrence_due_at_adjusted",
+                "end_shift_completed"
+            ]
+        )
+        self.assertEqual(self.delivery_rows(fixture)[0], delivery_before)
+        self.assertEqual(self.delivery_history_rows(fixture), history_before)
+
+    def test_worker_completion_waits_for_last_active_assignment(self):
+        fixture, shift_id, first_assignment = (
+            self.create_shift_notice_delivery(
+                scheduled_end_time="18:00"
+            )
+        )
+        second_assignment = self.seed_shift_staff(shift_id, 3)
+        first_end = datetime(
+            2026,
+            8,
+            3,
+            20,
+            0,
+            tzinfo=timezone.utc
+        )
+
+        _, response = self.post_worker_end(shift_id, first_end)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.shift_staff_row(first_assignment)["active"],
+            0
+        )
+        self.assertEqual(
+            self.shift_staff_row(second_assignment)["active"],
+            1
+        )
+        self.assertIsNone(self.shift_row(shift_id)["actual_end_at_utc"])
+        self.assertEqual(
+            self.occurrence_rows(fixture)[0]["due_at_is_provisional"],
+            1
+        )
+
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 3
+            session_data["role"] = "Behaviour Consultant"
+        second_end = datetime(
+            2026,
+            8,
+            3,
+            21,
+            0,
+            tzinfo=timezone.utc
+        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=second_end
+        ):
+            response = client.post(f"/shift/{shift_id}/end-shift", data={})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.shift_row(shift_id)["actual_end_at_utc"],
+            "2026-08-03T21:00:00Z"
+        )
+        self.assertEqual(
+            self.occurrence_rows(fixture)[0]["due_at_utc"],
+            "2026-08-03T21:00:00Z"
+        )
+
+    def test_shift_end_uses_completed_workers_and_excludes_removals(self):
+        fixture, shift_id, completing_assignment = (
+            self.create_shift_notice_delivery()
+        )
+        removed_assignment = self.seed_shift_staff(shift_id, 3)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.remove_shift_staff_assignment(
+                conn,
+                removed_assignment,
+                1,
+                "Worker reassigned.",
+                "2026-08-03T17:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _, response = self.post_worker_end(
+            shift_id,
+            datetime(
+                2026,
+                8,
+                3,
+                22,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.shift_staff_row(removed_assignment)["actual_end_at_utc"],
+            None
+        )
+        self.assertEqual(
+            self.shift_staff_row(completing_assignment)[
+                "actual_end_at_utc"
+            ],
+            "2026-08-03T22:00:00Z"
+        )
+        self.assertEqual(
+            self.shift_row(shift_id)["actual_end_at_utc"],
+            "2026-08-03T22:00:00Z"
+        )
+        self.assertEqual(
+            self.occurrence_rows(fixture)[0]["due_at_utc"],
+            "2026-08-03T22:00:00Z"
+        )
+
+    def test_no_genuine_assignment_end_never_finalizes_shift(self):
+        shift_id = self.seed_shift()
+        removed_assignment = self.seed_shift_staff(shift_id, 2)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.remove_shift_staff_assignment(
+                conn,
+                removed_assignment,
+                1,
+                "Shift assignment removed.",
+                "2026-08-03T17:00:00Z"
+            )
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("""
+                SELECT MAX(actual_end_at_utc) AS actual_end_at_utc
+                FROM shift_staff
+                WHERE shift_id = ?
+                  AND active = 0
+                  AND actual_end_at_utc IS NOT NULL
+            """, (shift_id,)).fetchone()
+            self.assertIsNone(row["actual_end_at_utc"])
+            conn.rollback()
+        finally:
+            conn.close()
+        self.assertIsNone(self.shift_row(shift_id)["actual_end_at_utc"])
+
+        empty_shift_id = self.seed_shift(date="2026-08-04")
+        self.assertIsNone(
+            self.shift_row(empty_shift_id)["actual_end_at_utc"]
+        )
+
+    def test_manager_completion_records_historical_and_entry_times(self):
+        fixture, shift_id, shift_staff_id = (
+            self.create_shift_notice_delivery(
+                scheduled_end_time="13:00"
+            )
+        )
+        baseline_activity_count = len(self.activity_rows())
+        correction_entry = datetime(
+            2026,
+            8,
+            4,
+            1,
+            0,
+            tzinfo=timezone.utc
+        )
+
+        response = self.post_manager_end(
+            shift_staff_id,
+            correction_entry,
+            date="2026-08-03",
+            time="14:00",
+            reason="Worker confirmed a forgotten sign-off."
+        )
+
+        self.assertEqual(response.status_code, 302)
+        assignment = self.shift_staff_row(shift_staff_id)
+        self.assertEqual(
+            assignment["actual_end_at_utc"],
+            "2026-08-03T21:00:00Z"
+        )
+        self.assertEqual(
+            assignment["sign_off_at"],
+            "2026-08-04T01:00:00Z"
+        )
+        self.assertEqual(assignment["end_checklist_completed"], 0)
+        self.assertEqual(assignment["active"], 0)
+        self.assertEqual(
+            self.shift_row(shift_id)["actual_end_at_utc"],
+            "2026-08-03T21:00:00Z"
+        )
+        activities = self.activity_rows()[baseline_activity_count:]
+        self.assertEqual(
+            [row["activity_type"] for row in activities],
+            [
+                "staff_notice_occurrence_due_at_adjusted",
+                "manager_signed_staff_off"
+            ]
+        )
+        manager_activity = activities[-1]
+        self.assertEqual(manager_activity["user_id"], 1)
+        self.assertEqual(manager_activity["shift_id"], shift_id)
+        self.assertEqual(manager_activity["related_id"], shift_staff_id)
+        self.assertEqual(
+            manager_activity["details"],
+            f"Shift Staff ID: {shift_staff_id}; "
+            f"Shift ID: {shift_id}; Actor User ID: 1; "
+            "Genuine actual end UTC: 2026-08-03T21:00:00Z; "
+            "Correction entry UTC: 2026-08-04T01:00:00Z; "
+            "Reason: Worker confirmed a forgotten sign-off."
+        )
+        self.assertEqual(
+            self.occurrence_rows(fixture)[0]["due_at_utc"],
+            "2026-08-03T21:00:00Z"
+        )
+
+    def test_manager_completion_preserves_permissions_and_form_fields(self):
+        shift_id = self.seed_shift()
+        shift_staff_id = self.seed_shift_staff(shift_id, 2)
+        client = app.app.test_client()
+
+        response = client.get(
+            f"/shift-staff/{shift_staff_id}/manager-sign-off"
+        )
+        self.assertEqual(response.status_code, 302)
+
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+        response = client.get(
+            f"/shift-staff/{shift_staff_id}/manager-sign-off"
+        )
+        self.assertEqual(response.status_code, 403)
+
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+            session_data["role"] = "Admin"
+        response = client.get(
+            f"/shift-staff/{shift_staff_id}/manager-sign-off"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'name="actual_end_date"', response.data)
+        self.assertIn(b'name="actual_end_time"', response.data)
+        self.assertIn(b'name="ambiguous_occurrence"', response.data)
+        self.assertIn(b'name="reason"', response.data)
+
+    def test_manager_completion_waits_for_other_active_worker(self):
+        fixture, shift_id, shift_staff_id = (
+            self.create_shift_notice_delivery()
+        )
+        self.seed_shift_staff(shift_id, 3)
+
+        response = self.post_manager_end(
+            shift_staff_id,
+            datetime(
+                2026,
+                8,
+                4,
+                1,
+                0,
+                tzinfo=timezone.utc
+            ),
+            date="2026-08-03",
+            time="14:00"
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIsNone(self.shift_row(shift_id)["actual_end_at_utc"])
+        self.assertEqual(
+            self.occurrence_rows(fixture)[0]["due_at_is_provisional"],
+            0
+        )
+
+    def test_manager_historical_time_validation_and_preserved_values(self):
+        shift_id = self.seed_shift(date="2024-03-10", shift_type="Day")
+        shift_staff_id = self.seed_shift_staff(shift_id, 2, "08:00")
+        response = self.post_manager_end(
+            shift_staff_id,
+            datetime(
+                2024,
+                3,
+                11,
+                0,
+                0,
+                tzinfo=timezone.utc
+            ),
+            date="2024-03-10",
+            time="02:30",
+            reason="Preserved reason."
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"does not exist", response.data)
+        self.assertIn(b"2024-03-10", response.data)
+        self.assertIn(b"02:30", response.data)
+        self.assertIn(b"Preserved reason.", response.data)
+        self.assertEqual(self.shift_staff_row(shift_staff_id)["active"], 1)
+
+        shift_id = self.seed_shift(
+            date="2024-11-02",
+            shift_type="Overnight"
+        )
+        shift_staff_id = self.seed_shift_staff(shift_id, 2, "23:00")
+        response = self.post_manager_end(
+            shift_staff_id,
+            datetime(
+                2024,
+                11,
+                4,
+                0,
+                0,
+                tzinfo=timezone.utc
+            ),
+            date="2024-11-03",
+            time="01:30"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"occurs twice", response.data)
+        self.assertIn(b"First occurrence", response.data)
+        self.assertIn(b"Second occurrence", response.data)
+
+    def test_manager_ambiguous_time_choices_convert_to_distinct_utc(self):
+        first = app.staff_notice_manager_local_datetime_to_utc(
+            "2024-11-03T01:30",
+            "first"
+        )
+        second = app.staff_notice_manager_local_datetime_to_utc(
+            "2024-11-03T01:30",
+            "second"
+        )
+        winter = app.staff_notice_manager_local_datetime_to_utc(
+            "2026-01-15T12:00"
+        )
+        summer = app.staff_notice_manager_local_datetime_to_utc(
+            "2026-07-15T12:00"
+        )
+
+        self.assertEqual(
+            first,
+            datetime(2024, 11, 3, 8, 30, tzinfo=timezone.utc)
+        )
+        self.assertEqual(
+            second,
+            datetime(2024, 11, 3, 9, 30, tzinfo=timezone.utc)
+        )
+        self.assertEqual(
+            winter,
+            datetime(2026, 1, 15, 20, 0, tzinfo=timezone.utc)
+        )
+        self.assertEqual(
+            summer,
+            datetime(2026, 7, 15, 19, 0, tzinfo=timezone.utc)
+        )
+
+    def test_manager_rejects_reason_future_start_and_invalid_start(self):
+        cases = (
+            (
+                "2026-08-03",
+                "14:00",
+                "",
+                "08:00",
+                b"correction reason"
+            ),
+            (
+                "2026-08-05",
+                "14:00",
+                "Reason.",
+                "08:00",
+                b"future-dated"
+            ),
+            (
+                "2026-08-03",
+                "07:00",
+                "Reason.",
+                "08:00",
+                b"cannot precede"
+            ),
+            (
+                "2026-08-03",
+                "14:00",
+                "Reason.",
+                None,
+                b"requires repair"
+            ),
+            (
+                "2026-08-03",
+                "14:00",
+                "Reason.",
+                "16:00",
+                b"inconsistent"
+            )
+        )
+        for index, (
+            end_date,
+            end_time,
+            reason,
+            start_time,
+            expected
+        ) in enumerate(cases):
+            with self.subTest(index=index):
+                shift_id = self.seed_shift(date="2026-08-03")
+                shift_staff_id = self.seed_shift_staff(
+                    shift_id,
+                    2,
+                    start_time
+                )
+                response = self.post_manager_end(
+                    shift_staff_id,
+                    datetime(
+                        2026,
+                        8,
+                        4,
+                        1,
+                        0,
+                        tzinfo=timezone.utc
+                    ),
+                    date=end_date,
+                    time=end_time,
+                    reason=reason
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected, response.data)
+                self.assertEqual(
+                    self.shift_staff_row(shift_staff_id)["active"],
+                    1
+                )
+
+    def test_completion_repeat_and_inconsistent_states_are_guarded(self):
+        _, shift_id, shift_staff_id = self.create_shift_notice_delivery()
+        completed_at = datetime(
+            2026,
+            8,
+            3,
+            20,
+            0,
+            tzinfo=timezone.utc
+        )
+        _, first_response = self.post_worker_end(shift_id, completed_at)
+        snapshot = self.database_snapshot()
+        _, repeated_response = self.post_worker_end(
+            shift_id,
+            datetime(
+                2026,
+                8,
+                3,
+                21,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+        self.assertEqual(first_response.status_code, 302)
+        self.assertEqual(repeated_response.status_code, 302)
+        self.assertEqual(self.database_snapshot(), snapshot)
+
+        response = self.post_manager_end(
+            shift_staff_id,
+            datetime(
+                2026,
+                8,
+                4,
+                1,
+                0,
+                tzinfo=timezone.utc
+            ),
+            date="2026-08-03",
+            time="13:00"
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.database_snapshot(), snapshot)
+        response = self.post_manager_end(
+            shift_staff_id,
+            datetime(
+                2026,
+                8,
+                4,
+                1,
+                0,
+                tzinfo=timezone.utc
+            ),
+            date="2026-08-03",
+            time="14:00"
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.database_snapshot(), snapshot)
+
+    def test_removed_and_inconsistent_active_assignments_are_rejected(self):
+        shift_id = self.seed_shift()
+        removed_assignment = self.seed_shift_staff(shift_id, 2)
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE shift_staff
+                SET active = 0
+                WHERE shift_staff_id = ?
+            """, (removed_assignment,))
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        response = self.post_manager_end(
+            removed_assignment,
+            datetime(
+                2026,
+                8,
+                4,
+                1,
+                0,
+                tzinfo=timezone.utc
+            ),
+            date="2026-08-03",
+            time="14:00"
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.database_snapshot(), before)
+
+        inconsistent_shift = self.seed_shift(date="2026-08-04")
+        inconsistent_assignment = self.seed_shift_staff(
+            inconsistent_shift,
+            2
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE shift_staff
+                SET actual_end_at_utc = '2026-08-04T20:00:00Z'
+                WHERE shift_staff_id = ?
+            """, (inconsistent_assignment,))
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        _, response = self.post_worker_end(
+            inconsistent_shift,
+            datetime(
+                2026,
+                8,
+                4,
+                21,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_worker_completion_rolls_back_each_route_integration_stage(self):
+        trigger_cases = (
+            (
+                "shift_staff",
+                "BEFORE UPDATE",
+                "",
+                "controlled assignment failure"
+            ),
+            (
+                "shift_task_entries",
+                "BEFORE INSERT",
+                "",
+                "controlled checklist failure"
+            ),
+            (
+                "activity_log",
+                "BEFORE INSERT",
+                "WHEN NEW.activity_type = 'shift_task_completed'",
+                "controlled checklist activity failure"
+            ),
+            (
+                "staff_notice_occurrences",
+                "BEFORE UPDATE",
+                "",
+                "controlled occurrence failure"
+            ),
+            (
+                "activity_log",
+                "BEFORE INSERT",
+                "WHEN NEW.activity_type = "
+                "'staff_notice_occurrence_due_at_adjusted'",
+                "controlled due activity failure"
+            ),
+            (
+                "activity_log",
+                "BEFORE INSERT",
+                "WHEN NEW.activity_type = 'end_shift_completed'",
+                "controlled final activity failure"
+            )
+        )
+        for index, (
+            table_name,
+            timing,
+            condition,
+            message
+        ) in enumerate(trigger_cases):
+            with self.subTest(message=message):
+                fixture, shift_id, _ = self.create_shift_notice_delivery(
+                    shift_date=f"2026-08-0{index + 3}"
+                )
+                if table_name == "shift_task_entries" or (
+                    table_name == "activity_log"
+                    and "checklist activity" in message
+                ):
+                    conn = self.open_database()
+                    try:
+                        conn.execute("""
+                            INSERT INTO shift_tasks
+                            (
+                                shift_task_id,
+                                task_name,
+                                task_stage,
+                                requires_input,
+                                active
+                            )
+                            VALUES (?, 'Check', 'END_SHIFT', 0, 1)
+                        """, (index + 1,))
+                        conn.commit()
+                    finally:
+                        conn.close()
+                conn = self.open_database()
+                try:
+                    conn.execute(f"""
+                        CREATE TRIGGER control_completion_failure_{index}
+                        {timing} ON {table_name}
+                        {condition}
+                        BEGIN
+                            SELECT RAISE(ABORT, '{message}');
+                        END
+                    """)
+                    conn.commit()
+                finally:
+                    conn.close()
+                before = self.database_snapshot()
+
+                _, response = self.post_worker_end(
+                    shift_id,
+                    datetime(
+                        2026,
+                        8,
+                        index + 3,
+                        22,
+                        0,
+                        tzinfo=timezone.utc
+                    )
+                )
+
+                self.assertEqual(response.status_code, 500)
+                self.assertEqual(self.database_snapshot(), before)
+                self.assertEqual(
+                    [
+                        row["event_type"]
+                        for row in self.delivery_history_rows(fixture)
+                    ],
+                    ["Assigned"]
+                )
+
+    def test_classification_activity_failure_rolls_back_completion_route(self):
+        fixture, shift_id, _ = self.create_shift_notice_delivery()
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = '2026-08-03T19:00:00Z',
+                    due_at_is_provisional = 1
+                WHERE occurrence_id = ?
+            """, (delivery["occurrence_id"],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T15:00:00Z',
+                    viewed_by_user_id = 2
+                WHERE delivery_id = ?
+            """, (delivery["delivery_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        self.seed_staff_notice_acknowledgement(
+            delivery["delivery_id"],
+            2,
+            "2026-08-03T17:00:00Z"
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_completion_classification_failure
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type =
+                    'staff_notice_acknowledgement_classification_changed'
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'controlled classification activity failure'
+                    );
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        _, response = self.post_worker_end(
+            shift_id,
+            datetime(
+                2026,
+                8,
+                3,
+                16,
+                0,
+                tzinfo=timezone.utc
+            )
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(self.database_snapshot(), before)
 
     def test_shift_deadline_finalizes_provisional_and_preserves_delivery(self):
         fixture, shift_id, _ = self.create_shift_notice_delivery()

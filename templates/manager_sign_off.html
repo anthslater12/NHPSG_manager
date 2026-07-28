@@ -6,8 +6,13 @@
     <h2>Manager Sign Off</h2>
     
     <p>
-        You are about to manually sign this staff member off.
+        Enter when the worker genuinely finished the shift. This is the
+        historical end time, not the time you are recording the correction.
     </p>
+
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
 
     <table>
         <tr>
@@ -30,12 +35,59 @@
     <hr>
 
     <form method="post">
+        <label for="actual_end_date">Genuine historical end date</label>
+        <input
+            id="actual_end_date"
+            name="actual_end_date"
+            type="date"
+            value="{{ values.actual_end_date if values else '' }}"
+            required>
+
+        <br><br>
+
+        <label for="actual_end_time">Genuine historical end time</label>
+        <input
+            id="actual_end_time"
+            name="actual_end_time"
+            type="time"
+            value="{{ values.actual_end_time if values else '' }}"
+            required>
+
+        <br><br>
+
+        <label for="ambiguous_occurrence">
+            Fall daylight-saving occurrence
+        </label>
+        <select id="ambiguous_occurrence" name="ambiguous_occurrence">
+            <option value="">Not applicable / choose if requested</option>
+            <option
+                value="first"
+                {% if values and values.ambiguous_occurrence == 'first' %}
+                    selected
+                {% endif %}>
+                First occurrence — PDT (UTC−07:00)
+            </option>
+            <option
+                value="second"
+                {% if values and values.ambiguous_occurrence == 'second' %}
+                    selected
+                {% endif %}>
+                Second occurrence — PST (UTC−08:00)
+            </option>
+        </select>
+        <small>
+            A choice is required only when Vancouver repeats an hour during
+            the fall daylight-saving transition.
+        </small>
+
+        <br><br>
+
         <label>Reason for manual sign off</label>
         <textarea 
             name="reason" 
             rows="5" 
             required 
-            placeholder="Example: Staff forgot to sign off at the end of shift."></textarea>
+            placeholder="Example: Staff forgot to sign off at the end of shift.">{{ values.reason if values else '' }}</textarea>
 
         <br><br>
 

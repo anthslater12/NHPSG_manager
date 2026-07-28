@@ -1552,6 +1552,82 @@ def staff_notice_local_datetime_to_utc(value):
     )
 
 
+def staff_notice_manager_local_datetime_to_utc(
+    value,
+    ambiguous_occurrence=None
+):
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            "The genuine historical end date and time are required."
+        )
+
+    try:
+        local_naive_value = datetime.strptime(
+            value,
+            STAFF_NOTICE_LOCAL_DATETIME_FORMAT
+        )
+    except ValueError as error:
+        raise ValueError(
+            "The genuine historical end must use YYYY-MM-DDTHH:MM."
+        ) from error
+
+    if (
+        local_naive_value.strftime(
+            STAFF_NOTICE_LOCAL_DATETIME_FORMAT
+        ) != value
+    ):
+        raise ValueError(
+            "The genuine historical end must use YYYY-MM-DDTHH:MM."
+        )
+
+    valid_candidates = []
+    for fold in (0, 1):
+        candidate = local_naive_value.replace(
+            tzinfo=STAFF_NOTICE_TIMEZONE,
+            fold=fold
+        )
+        round_trip = (
+            candidate.astimezone(timezone.utc)
+            .astimezone(STAFF_NOTICE_TIMEZONE)
+        )
+        if (
+            round_trip.replace(tzinfo=None) == local_naive_value
+            and round_trip.fold == fold
+        ):
+            valid_candidates.append(candidate)
+
+    if not valid_candidates:
+        raise ValueError(
+            "The genuine historical end does not exist in "
+            f"{STAFF_NOTICE_TIMEZONE_NAME} because of the spring "
+            "daylight-saving transition."
+        )
+
+    candidate_offsets = {
+        candidate.utcoffset()
+        for candidate in valid_candidates
+    }
+    if len(candidate_offsets) > 1:
+        choices = {
+            "first": 0,
+            "second": 1
+        }
+        if ambiguous_occurrence not in choices:
+            raise ValueError(
+                "This Vancouver time occurs twice. Choose the first "
+                "PDT occurrence or the second PST occurrence."
+            )
+        selected_fold = choices[ambiguous_occurrence]
+        selected = next(
+            candidate
+            for candidate in valid_candidates
+            if candidate.fold == selected_fold
+        )
+        return selected.astimezone(timezone.utc)
+
+    return valid_candidates[0].astimezone(timezone.utc)
+
+
 def staff_notice_utc_datetime_to_local(value):
     return parse_staff_notice_utc_datetime(value).astimezone(
         STAFF_NOTICE_TIMEZONE
@@ -6582,6 +6658,212 @@ def remove_shift_staff_assignment(
     return result
 
 
+class ShiftStaffCompletionError(ValueError):
+    pass
+
+
+def _shift_staff_recorded_start_at_utc(assignment):
+    try:
+        shift_date = datetime.strptime(
+            assignment["shift_date"],
+            "%Y-%m-%d"
+        ).date()
+    except (TypeError, ValueError) as error:
+        raise ShiftStaffCompletionError(
+            "The recorded shift date is invalid and requires repair."
+        ) from error
+
+    try:
+        start_clock = _parse_staff_notice_shift_clock(
+            assignment["actual_start_time"],
+            "Recorded genuine shift start"
+        )
+    except ValueError as error:
+        raise ShiftStaffCompletionError(
+            "The recorded genuine start is missing or invalid and "
+            "requires repair."
+        ) from error
+    if start_clock is None:
+        raise ShiftStaffCompletionError(
+            "The recorded genuine start is missing or invalid and "
+            "requires repair."
+        )
+
+    shift_type = assignment["shift_type"]
+    start_hour = start_clock.hour
+    if shift_type == "Day":
+        valid_clock = 7 <= start_hour < 15
+    elif shift_type == "Afternoon":
+        valid_clock = 15 <= start_hour < 23
+    elif shift_type == "Overnight":
+        valid_clock = start_hour >= 23 or start_hour < 7
+        if start_hour < 7:
+            shift_date += timedelta(days=1)
+    else:
+        valid_clock = False
+
+    if not valid_clock:
+        raise ShiftStaffCompletionError(
+            "The recorded genuine start is inconsistent with the "
+            "shift type and requires repair."
+        )
+
+    try:
+        start_local = _staff_notice_resolve_local_shift_datetime(
+            shift_date,
+            start_clock,
+            "Recorded genuine shift start"
+        )
+    except ValueError as error:
+        raise ShiftStaffCompletionError(
+            f"{error} The assignment requires separate repair."
+        ) from error
+
+    return start_local.astimezone(timezone.utc)
+
+
+def complete_shift_staff_assignment(
+    conn,
+    shift_staff_id,
+    actual_end_at_utc,
+    sign_off_at_utc,
+    actor_user_id,
+    end_checklist_completed,
+    finalization_reason=None,
+    after_transition=None
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Shift staff completion requires an active transaction."
+        )
+    if not _is_valid_staff_notice_identifier(shift_staff_id):
+        raise ShiftStaffCompletionError(
+            "A valid shift staff assignment is required."
+        )
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise ShiftStaffCompletionError("A valid completing user is required.")
+    if end_checklist_completed not in (0, 1):
+        raise ShiftStaffCompletionError(
+            "Invalid end-checklist completion state."
+        )
+
+    actual_end_at_utc = format_staff_notice_utc_datetime(
+        actual_end_at_utc
+    )
+    sign_off_at_utc = format_staff_notice_utc_datetime(
+        sign_off_at_utc
+    )
+    assignment_row = conn.execute("""
+        SELECT
+            ss.*,
+            s.client_id,
+            s.shift_date,
+            s.shift_type,
+            s.status AS shift_status,
+            s.closed_at,
+            u.full_name
+        FROM shift_staff ss
+        JOIN shifts s
+            ON ss.shift_id = s.shift_id
+        JOIN users u
+            ON ss.user_id = u.user_id
+        WHERE ss.shift_staff_id = ?
+    """, (shift_staff_id,)).fetchone()
+    if assignment_row is None:
+        raise LookupError("Shift staff assignment not found.")
+    assignment = dict(assignment_row)
+    stored_actual_end = assignment["actual_end_at_utc"]
+
+    if assignment["active"] != 1:
+        if stored_actual_end is None:
+            raise ShiftStaffCompletionError(
+                "This assignment was deactivated without a genuine "
+                "actual end and requires separate repair."
+            )
+        if format_staff_notice_utc_datetime(
+            stored_actual_end
+        ) != actual_end_at_utc:
+            raise ShiftStaffCompletionError(
+                "This assignment is already completed with a different "
+                "actual end. Use a future authorized correction workflow."
+            )
+        return {
+            "assignment_completed": 0,
+            "assignment": assignment,
+            "whole_shift_end_at_utc": None,
+            "staff_notice_finalization": None
+        }
+
+    if stored_actual_end is not None:
+        raise ShiftStaffCompletionError(
+            "This active assignment already has an actual end and "
+            "requires separate repair."
+        )
+
+    cursor = conn.execute("""
+        UPDATE shift_staff
+        SET actual_end_at_utc = ?,
+            sign_off_at = ?,
+            end_checklist_completed = ?,
+            active = 0
+        WHERE shift_staff_id = ?
+          AND active = 1
+          AND actual_end_at_utc IS NULL
+    """, (
+        actual_end_at_utc,
+        sign_off_at_utc,
+        end_checklist_completed,
+        shift_staff_id
+    ))
+    if cursor.rowcount != 1:
+        raise ShiftStaffCompletionError(
+            "The assignment changed while it was being completed. "
+            "Please retry."
+        )
+
+    if after_transition is not None:
+        after_transition()
+
+    active_assignment = conn.execute("""
+        SELECT 1
+        FROM shift_staff
+        WHERE shift_id = ?
+          AND active = 1
+        LIMIT 1
+    """, (assignment["shift_id"],)).fetchone()
+    whole_shift_end_at_utc = None
+    finalization = None
+    if active_assignment is None:
+        row = conn.execute("""
+            SELECT MAX(actual_end_at_utc) AS actual_end_at_utc
+            FROM shift_staff
+            WHERE shift_id = ?
+              AND active = 0
+              AND actual_end_at_utc IS NOT NULL
+        """, (assignment["shift_id"],)).fetchone()
+        whole_shift_end_at_utc = row["actual_end_at_utc"]
+        if whole_shift_end_at_utc is not None:
+            finalization = finalize_shift_notice_due_at(
+                conn,
+                assignment["shift_id"],
+                whole_shift_end_at_utc,
+                actor_user_id,
+                sign_off_at_utc,
+                finalization_reason
+            )
+
+    assignment["actual_end_at_utc"] = actual_end_at_utc
+    assignment["sign_off_at"] = sign_off_at_utc
+    assignment["end_checklist_completed"] = end_checklist_completed
+    assignment["active"] = 0
+    return {
+        "assignment_completed": 1,
+        "assignment": assignment,
+        "whole_shift_end_at_utc": whole_shift_end_at_utc,
+        "staff_notice_finalization": finalization
+    }
+
+
 def _staff_notice_deadline_adjustment_details(
     occurrence,
     old_due_at_utc,
@@ -9358,7 +9640,6 @@ def food_fluid_entry_new(shift_id):
 
 @app.route("/shift-staff/<int:shift_staff_id>/manager-sign-off", methods=["GET", "POST"])
 def manager_sign_off(shift_staff_id):
-
     if "user_id" not in session:
         return redirect(url_for("login"))
 
@@ -9366,68 +9647,134 @@ def manager_sign_off(shift_staff_id):
         return "Access denied", 403
 
     conn = get_db()
+    values = {
+        "actual_end_date": request.form.get("actual_end_date", "").strip(),
+        "actual_end_time": request.form.get("actual_end_time", "").strip(),
+        "ambiguous_occurrence": request.form.get(
+            "ambiguous_occurrence",
+            ""
+        ).strip(),
+        "reason": request.form.get("reason", "").strip()
+    }
+    error = None
+    error_status = 400
+    staff_shift = None
 
-    staff_shift = conn.execute("""
-        SELECT
-            ss.*,
-            u.full_name,
-            s.shift_date,
-            s.shift_type,
-            s.client_id
-        FROM shift_staff ss
+    try:
+        staff_shift = conn.execute("""
+            SELECT
+                ss.*,
+                u.full_name,
+                s.shift_date,
+                s.shift_type,
+                s.client_id
+            FROM shift_staff ss
+            JOIN users u
+                ON ss.user_id = u.user_id
+            JOIN shifts s
+                ON ss.shift_id = s.shift_id
+            WHERE ss.shift_staff_id = ?
+        """, (shift_staff_id,)).fetchone()
+        if staff_shift is None:
+            return "Shift staff record not found", 404
 
-        JOIN users u
-            ON ss.user_id = u.user_id
+        if request.method == "POST":
+            if not values["reason"]:
+                raise ShiftStaffCompletionError(
+                    "A correction reason is required."
+                )
+            local_end_value = (
+                f"{values['actual_end_date']}T"
+                f"{values['actual_end_time']}"
+            )
+            actual_end = staff_notice_manager_local_datetime_to_utc(
+                local_end_value,
+                values["ambiguous_occurrence"] or None
+            )
+            correction_entry = get_application_now_utc()
+            if actual_end > correction_entry:
+                raise ShiftStaffCompletionError(
+                    "The genuine historical end cannot be future-dated."
+                )
+            recorded_start = _shift_staff_recorded_start_at_utc(
+                staff_shift
+            )
+            if actual_end < recorded_start:
+                raise ShiftStaffCompletionError(
+                    "The genuine historical end cannot precede the "
+                    "recorded genuine start."
+                )
 
-        JOIN shifts s
-            ON ss.shift_id = s.shift_id
-
-        WHERE ss.shift_staff_id = ?
-    """, (shift_staff_id,)).fetchone()
-
-    if staff_shift is None:
-        conn.close()
-        return "Shift staff record not found", 404
-
-    if request.method == "POST":
-        reason = request.form["reason"].strip()
-
-        if not reason:
-            conn.close()
-            return "Reason is required", 400
-
-        conn.execute("""
-            UPDATE shift_staff
-            SET active = 0,
-                end_checklist_completed = 0
-            WHERE shift_staff_id = ?
-        """, (shift_staff_id,))
-
-        log_activity(
-            conn,
-            activity_class="SHIFT",
-            activity_type="manager_signed_staff_off",
-            summary=f"Manager manually signed off {staff_shift['full_name']}",
-            user_id=session["user_id"],
-            client_id=staff_shift["client_id"],
-            shift_id=staff_shift["shift_id"],
-            related_table="shift_staff",
-            related_id=shift_staff_id,
-            details=reason,
-            success=1
+            conn.execute("BEGIN IMMEDIATE")
+            result = complete_shift_staff_assignment(
+                conn,
+                shift_staff_id,
+                actual_end,
+                correction_entry,
+                session["user_id"],
+                0,
+                values["reason"]
+            )
+            if result["assignment_completed"] == 1:
+                actual_end_at_utc = format_staff_notice_utc_datetime(
+                    actual_end
+                )
+                correction_entry_at_utc = (
+                    format_staff_notice_utc_datetime(correction_entry)
+                )
+                log_activity(
+                    conn,
+                    activity_class="SHIFT",
+                    activity_type="manager_signed_staff_off",
+                    summary=(
+                        "Manager manually signed off "
+                        f"{staff_shift['full_name']}"
+                    ),
+                    user_id=session["user_id"],
+                    client_id=staff_shift["client_id"],
+                    shift_id=staff_shift["shift_id"],
+                    related_table="shift_staff",
+                    related_id=shift_staff_id,
+                    details=(
+                        f"Shift Staff ID: {shift_staff_id}; "
+                        f"Shift ID: {staff_shift['shift_id']}; "
+                        f"Actor User ID: {session['user_id']}; "
+                        f"Genuine actual end UTC: {actual_end_at_utc}; "
+                        "Correction entry UTC: "
+                        f"{correction_entry_at_utc}; "
+                        f"Reason: {values['reason']}"
+                    ),
+                    success=1
+                )
+            conn.commit()
+            return redirect(url_for("dashboard"))
+    except (ShiftStaffCompletionError, ValueError) as caught_error:
+        if conn.in_transaction:
+            conn.rollback()
+        error = str(caught_error)
+        if "already completed with a different" in error:
+            error_status = 409
+        elif "deactivated without a genuine" in error:
+            error_status = 409
+        elif "active assignment already" in error:
+            error_status = 409
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        error = (
+            "The manager sign-off could not be completed. "
+            "Please retry."
         )
-
-        conn.commit()
+        error_status = 500
+    finally:
         conn.close()
-
-        return redirect(url_for("dashboard"))
-
-    conn.close()
 
     return render_template(
         "manager_sign_off.html",
-        staff_shift=staff_shift
-    )
+        staff_shift=staff_shift,
+        values=values,
+        error=error
+    ), error_status if error else 200
 
 #####################################################################
 # SHIFT CHECKLISTS
@@ -9520,81 +9867,125 @@ def end_shift(shift_id):
         return redirect(url_for("login"))
 
     conn = get_db()
+    error = None
+    error_status = 400
+    shift = None
 
-    shift = conn.execute("""
-        SELECT *
-        FROM shifts
-        WHERE shift_id = ?
-    """, (shift_id,)).fetchone()
-
-    if shift is None:
-        conn.close()
-        return "Shift not found", 404
-
-    if request.method == "POST":
-
-        save_shift_task_entries(
-            conn,
-            shift_id,
-            "END_SHIFT",
-            session["user_id"],
-            request.form
-        )
-        
-        conn.execute("""
-            UPDATE shift_staff
-            SET end_checklist_completed = 1,
-                active = 0
+    try:
+        shift = conn.execute("""
+            SELECT *
+            FROM shifts
             WHERE shift_id = ?
-              AND user_id = ?
-              AND active = 1
-        """, (shift_id, session["user_id"]))
+        """, (shift_id,)).fetchone()
+        if shift is None:
+            conn.close()
+            return "Shift not found", 404
 
-        shift_staff = conn.execute("""
-                SELECT shift_staff_id
+        if request.method == "POST":
+            completed_at = get_application_now_utc()
+            conn.execute("BEGIN IMMEDIATE")
+            assignments = conn.execute("""
+                SELECT *
                 FROM shift_staff
                 WHERE shift_id = ?
-                AND user_id = ?
-            """, (
-                shift_id,
-                session["user_id"]
-            )).fetchone()
+                  AND user_id = ?
+                ORDER BY shift_staff_id DESC
+            """, (shift_id, session["user_id"])).fetchall()
+            active_assignments = [
+                assignment
+                for assignment in assignments
+                if assignment["active"] == 1
+            ]
+            if len(active_assignments) > 1:
+                raise ShiftStaffCompletionError(
+                    "Multiple active assignments require repair before "
+                    "this shift can be completed."
+                )
 
+            if not active_assignments:
+                completed_assignment = next(
+                    (
+                        assignment
+                        for assignment in assignments
+                        if assignment["actual_end_at_utc"] is not None
+                    ),
+                    None
+                )
+                if completed_assignment is None:
+                    raise ShiftStaffCompletionError(
+                        "No active assignment is available to complete."
+                    )
+                conn.commit()
+                conn.close()
+                session.clear()
+                return redirect(url_for("login"))
 
-        log_activity(
-            conn,
-            activity_class="SHIFT",
-            activity_type="end_shift_completed",
-            summary="End of Shift completed",
-            user_id=session["user_id"],
-            client_id=shift["client_id"],
-            shift_id=shift_id,
-            related_table="shift_staff",
-            related_id=shift_staff["shift_staff_id"],
-            success=1
-        )
+            assignment = active_assignments[0]
+            if assignment["actual_end_at_utc"] is not None:
+                raise ShiftStaffCompletionError(
+                    "This active assignment already has an actual end "
+                    "and requires separate repair."
+                )
 
-        conn.commit()
+            result = complete_shift_staff_assignment(
+                conn,
+                assignment["shift_staff_id"],
+                completed_at,
+                completed_at,
+                session["user_id"],
+                1,
+                after_transition=lambda: save_shift_task_entries(
+                    conn,
+                    shift_id,
+                    "END_SHIFT",
+                    session["user_id"],
+                    request.form
+                )
+            )
+            if result["assignment_completed"] == 1:
+                log_activity(
+                    conn,
+                    activity_class="SHIFT",
+                    activity_type="end_shift_completed",
+                    summary="End of Shift completed",
+                    user_id=session["user_id"],
+                    client_id=shift["client_id"],
+                    shift_id=shift_id,
+                    related_table="shift_staff",
+                    related_id=assignment["shift_staff_id"],
+                    success=1
+                )
+            conn.commit()
+            conn.close()
+            session.clear()
+            return redirect(url_for("login"))
+    except ShiftStaffCompletionError as caught_error:
+        if conn.in_transaction:
+            conn.rollback()
+        error = str(caught_error)
+        error_status = 409
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        error = "The shift could not be completed. Please retry."
+        error_status = 500
+
+    try:
+        shift_tasks = conn.execute("""
+            SELECT *
+            FROM shift_tasks
+            WHERE task_stage = 'END_SHIFT'
+              AND active = 1
+            ORDER BY task_name
+        """).fetchall()
+        return render_template(
+            "end_shift.html",
+            shift=shift,
+            shift_tasks=shift_tasks,
+            error=error
+        ), error_status if error else 200
+    finally:
         conn.close()
-
-        session.clear()
-        return redirect(url_for("login"))
-
-    shift_tasks = conn.execute("""
-        SELECT *
-     FROM shift_tasks
-      WHERE task_stage = 'END_SHIFT'
-         AND active = 1
-     ORDER BY task_name
-    """).fetchall()
-
-    conn.close()
-
-    return render_template(
-        "end_shift.html",
-        shift=shift,
-        shift_tasks=shift_tasks
-    )
 
 def save_shift_task_entries(conn, shift_id, task_stage, user_id, form):
     shift_tasks = conn.execute("""
