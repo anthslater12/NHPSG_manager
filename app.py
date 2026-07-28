@@ -5476,31 +5476,19 @@ def _create_initial_staff_notice_deliveries(
         )
 
         for user_id in user_ids:
-            conn.execute("""
-                INSERT INTO staff_notice_deliveries
-                (
-                    occurrence_id,
-                    user_id,
-                    requirement_status,
-                    assigned_at_utc,
-                    eligibility_cutoff_at_utc,
-                    first_viewed_at_utc,
-                    viewed_by_user_id,
-                    recipient_access,
-                    status_changed_at_utc,
-                    status_changed_by_user_id,
-                    current_reason_code,
-                    current_reason_text,
-                    access_revoked_at_utc
-                )
-                VALUES (?, ?, 'Required', ?, ?, NULL, NULL, 1,
-                        NULL, NULL, NULL, NULL, NULL)
-            """, (
-                occurrence["occurrence_id"],
+            delivery_created = _assign_staff_notice_delivery(
+                conn,
+                notice,
+                occurrence,
                 user_id,
                 assigned_at_utc,
                 eligibility_cutoff_at_utc
-            ))
+            )
+            if delivery_created != 1:
+                raise RuntimeError(
+                    "Initial Staff Notice delivery assignment did not "
+                    "create exactly one delivery."
+                )
 
 
 def _staff_notice_reconciliation_result():
@@ -5798,7 +5786,7 @@ def generate_due_staff_notice_occurrences(
     return result
 
 
-def _assign_reconciled_staff_notice_delivery(
+def _assign_staff_notice_delivery(
     conn,
     notice,
     occurrence,
@@ -5962,7 +5950,7 @@ def reconcile_staff_notice_deliveries(
             )
         for user_id in user_ids:
             result["deliveries_assigned"] += (
-                _assign_reconciled_staff_notice_delivery(
+                _assign_staff_notice_delivery(
                     conn,
                     notice,
                     occurrence,

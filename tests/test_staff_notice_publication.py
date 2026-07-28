@@ -11,8 +11,7 @@ import add_staff_notices_tables as staff_notice_schema
 
 
 LATER_PUBLICATION_TABLES = (
-    "staff_notice_delivery_history",
-    "acknowledgements"
+    "acknowledgements",
 )
 
 
@@ -34,6 +33,7 @@ class PublicationTrackingConnection:
         self.eligibility_insert_calls = 0
         self.occurrence_insert_calls = 0
         self.delivery_insert_calls = 0
+        self.delivery_history_insert_calls = 0
         self.activity_insert_calls = 0
         self.update_calls = 0
         self.commit_calls = 0
@@ -61,6 +61,10 @@ class PublicationTrackingConnection:
             "INSERT INTO staff_notice_deliveries"
         ):
             self.delivery_insert_calls += 1
+        if normalized_sql.startswith(
+            "INSERT INTO staff_notice_delivery_history"
+        ):
+            self.delivery_history_insert_calls += 1
         if normalized_sql.startswith("INSERT INTO activity_log"):
             self.activity_insert_calls += 1
         if normalized_sql.startswith(
@@ -420,6 +424,31 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def delivery_assignment_activity_rows(self, notice_id):
+        conn = self.open_database()
+
+        try:
+            return [
+                dict(row)
+                for row in conn.execute("""
+                    SELECT al.*
+                    FROM activity_log al
+                    JOIN staff_notice_deliveries d
+                        ON al.related_table = 'staff_notice_deliveries'
+                       AND al.related_id = d.delivery_id
+                    JOIN staff_notice_occurrences o
+                        ON d.occurrence_id = o.occurrence_id
+                    JOIN staff_notice_schedules s
+                        ON o.schedule_id = s.schedule_id
+                    WHERE al.activity_type =
+                        'staff_notice_delivery_assigned'
+                      AND s.notice_id = ?
+                    ORDER BY al.activity_id
+                """, (notice_id,)).fetchall()
+            ]
+        finally:
+            conn.close()
+
     def update_notice_period(
         self,
         notice_id,
@@ -677,8 +706,44 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(notice["published_by_user_id"], 2)
         self.assertEqual(len(self.eligibility_rows(notice_id)), 1)
         self.assertEqual(len(self.occurrence_rows(notice_id)), 1)
-        self.assertEqual(len(self.delivery_rows(notice_id)), 1)
-        self.assertEqual(self.delivery_history_rows(notice_id), [])
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual(len(deliveries), 1)
+        history_rows = self.delivery_history_rows(notice_id)
+        self.assertEqual(len(history_rows), 1)
+        self.assertEqual(
+            history_rows[0]["delivery_id"],
+            deliveries[0]["delivery_id"]
+        )
+        self.assertEqual(history_rows[0]["event_type"], "Assigned")
+        self.assertIsNone(
+            history_rows[0]["previous_requirement_status"]
+        )
+        self.assertEqual(
+            history_rows[0]["new_requirement_status"],
+            "Required"
+        )
+        self.assertIsNone(
+            history_rows[0]["previous_recipient_access"]
+        )
+        self.assertEqual(
+            history_rows[0]["new_recipient_access"],
+            1
+        )
+        self.assertIsNone(history_rows[0]["reason_code"])
+        self.assertIsNone(history_rows[0]["reason_text"])
+        self.assertIsNone(history_rows[0]["changed_by_user_id"])
+        self.assertEqual(
+            history_rows[0]["changed_at_utc"],
+            self.FIXED_TIMESTAMP
+        )
+        assignment_activities = self.delivery_assignment_activity_rows(
+            notice_id
+        )
+        self.assertEqual(len(assignment_activities), 1)
+        self.assertEqual(
+            assignment_activities[0]["related_id"],
+            deliveries[0]["delivery_id"]
+        )
         self.assert_no_later_publication_rows()
 
     def test_publication_writes_one_authoritative_activity_event(self):
@@ -726,8 +791,45 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(activity["success"], 1)
         self.assertEqual(len(self.eligibility_rows(notice_id)), 3)
         self.assertEqual(len(self.occurrence_rows(notice_id)), 1)
-        self.assertEqual(len(self.delivery_rows(notice_id)), 3)
-        self.assertEqual(self.delivery_history_rows(notice_id), [])
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual(len(deliveries), 3)
+        history_rows = self.delivery_history_rows(notice_id)
+        self.assertEqual(len(history_rows), 3)
+        self.assertEqual(
+            [row["delivery_id"] for row in history_rows],
+            [row["delivery_id"] for row in deliveries]
+        )
+        for history_row in history_rows:
+            self.assertEqual(history_row["event_type"], "Assigned")
+            self.assertIsNone(
+                history_row["previous_requirement_status"]
+            )
+            self.assertEqual(
+                history_row["new_requirement_status"],
+                "Required"
+            )
+            self.assertIsNone(
+                history_row["previous_recipient_access"]
+            )
+            self.assertEqual(
+                history_row["new_recipient_access"],
+                1
+            )
+            self.assertIsNone(history_row["reason_code"])
+            self.assertIsNone(history_row["reason_text"])
+            self.assertIsNone(history_row["changed_by_user_id"])
+            self.assertEqual(
+                history_row["changed_at_utc"],
+                self.FIXED_TIMESTAMP
+            )
+        assignment_activities = self.delivery_assignment_activity_rows(
+            notice_id
+        )
+        self.assertEqual(len(assignment_activities), 3)
+        self.assertEqual(
+            [row["related_id"] for row in assignment_activities],
+            [row["delivery_id"] for row in deliveries]
+        )
 
     def test_all_active_management_roles_can_publish_through_route(self):
         conn = self.open_database()
@@ -1015,7 +1117,34 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertIsNone(deliveries[0]["current_reason_code"])
         self.assertIsNone(deliveries[0]["current_reason_text"])
         self.assertIsNone(deliveries[0]["access_revoked_at_utc"])
-        self.assertEqual(self.delivery_history_rows(notice_id), [])
+        history_rows = self.delivery_history_rows(notice_id)
+        self.assertEqual(len(history_rows), 1)
+        self.assertEqual(
+            history_rows[0]["delivery_id"],
+            deliveries[0]["delivery_id"]
+        )
+        self.assertEqual(history_rows[0]["event_type"], "Assigned")
+        self.assertIsNone(
+            history_rows[0]["previous_requirement_status"]
+        )
+        self.assertEqual(
+            history_rows[0]["new_requirement_status"],
+            "Required"
+        )
+        self.assertIsNone(
+            history_rows[0]["previous_recipient_access"]
+        )
+        self.assertEqual(
+            history_rows[0]["new_recipient_access"],
+            1
+        )
+        self.assertIsNone(history_rows[0]["reason_code"])
+        self.assertIsNone(history_rows[0]["reason_text"])
+        self.assertIsNone(history_rows[0]["changed_by_user_id"])
+        self.assertEqual(
+            history_rows[0]["changed_at_utc"],
+            self.FIXED_TIMESTAMP
+        )
         self.assert_no_later_publication_rows()
 
     def test_public_service_owns_one_connection_and_transaction(self):
@@ -1034,7 +1163,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.delivery_insert_calls, 1)
-        self.assertEqual(connection.activity_insert_calls, 1)
+        self.assertEqual(connection.delivery_history_insert_calls, 1)
+        self.assertEqual(connection.activity_insert_calls, 2)
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.commit_calls, 1)
         self.assertEqual(connection.rollback_calls, 0)
@@ -1348,6 +1478,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.delivery_insert_calls, 1)
+        self.assertEqual(connection.delivery_history_insert_calls, 1)
+        self.assertEqual(connection.activity_insert_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(connection.close_calls, 1)
@@ -1391,7 +1523,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.delivery_insert_calls, 1)
-        self.assertEqual(connection.activity_insert_calls, 1)
+        self.assertEqual(connection.delivery_history_insert_calls, 1)
+        self.assertEqual(connection.activity_insert_calls, 2)
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
@@ -2070,13 +2203,30 @@ class StaffNoticePublicationTests(unittest.TestCase):
 
         self.assertEqual(self.database_snapshot(), before)
 
-    def test_initial_delivery_creation_has_no_history_or_later_state(self):
+    def test_initial_delivery_creation_has_assigned_history_and_no_later_state(
+        self
+    ):
         notice_id = self.create_notice()
 
         app.publish_staff_notice(notice_id, 1)
 
-        self.assertEqual(len(self.delivery_rows(notice_id)), 1)
-        self.assertEqual(self.delivery_history_rows(notice_id), [])
+        deliveries = self.delivery_rows(notice_id)
+        self.assertEqual(len(deliveries), 1)
+        history_rows = self.delivery_history_rows(notice_id)
+        self.assertEqual(len(history_rows), 1)
+        self.assertEqual(
+            history_rows[0]["delivery_id"],
+            deliveries[0]["delivery_id"]
+        )
+        self.assertEqual(history_rows[0]["event_type"], "Assigned")
+        assignment_activities = self.delivery_assignment_activity_rows(
+            notice_id
+        )
+        self.assertEqual(len(assignment_activities), 1)
+        self.assertEqual(
+            assignment_activities[0]["related_id"],
+            deliveries[0]["delivery_id"]
+        )
         self.assert_no_later_publication_rows()
 
 
