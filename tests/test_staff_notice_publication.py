@@ -449,6 +449,83 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def staff_notice_activity_rows(self, notice_id):
+        conn = self.open_database()
+
+        try:
+            return [
+                dict(row)
+                for row in conn.execute("""
+                    SELECT al.*
+                    FROM activity_log al
+                    WHERE al.activity_class = 'STAFF_NOTICE'
+                      AND (
+                          (
+                              al.related_table = 'staff_notices'
+                              AND al.related_id = ?
+                          )
+                          OR (
+                              al.related_table =
+                                  'staff_notice_audience_eligibility_periods'
+                              AND al.related_id IN (
+                                  SELECT ep.eligibility_period_id
+                                  FROM
+                                      staff_notice_audience_eligibility_periods
+                                      ep
+                                  JOIN staff_notice_audiences a
+                                      ON ep.audience_id = a.audience_id
+                                  WHERE a.notice_id = ?
+                              )
+                          )
+                          OR (
+                              al.related_table = 'staff_notice_occurrences'
+                              AND al.related_id IN (
+                                  SELECT o.occurrence_id
+                                  FROM staff_notice_occurrences o
+                                  JOIN staff_notice_schedules s
+                                      ON o.schedule_id = s.schedule_id
+                                  WHERE s.notice_id = ?
+                              )
+                          )
+                          OR (
+                              al.related_table = 'staff_notice_deliveries'
+                              AND al.related_id IN (
+                                  SELECT d.delivery_id
+                                  FROM staff_notice_deliveries d
+                                  JOIN staff_notice_occurrences o
+                                      ON d.occurrence_id = o.occurrence_id
+                                  JOIN staff_notice_schedules s
+                                      ON o.schedule_id = s.schedule_id
+                                  WHERE s.notice_id = ?
+                              )
+                          )
+                      )
+                    ORDER BY al.activity_id
+                """, (
+                    notice_id,
+                    notice_id,
+                    notice_id,
+                    notice_id
+                )).fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def eligibility_started_activity_rows(self, notice_id):
+        return [
+            row
+            for row in self.staff_notice_activity_rows(notice_id)
+            if row["activity_type"]
+            == "staff_notice_audience_eligibility_started"
+        ]
+
+    def occurrence_created_activity_rows(self, notice_id):
+        return [
+            row
+            for row in self.staff_notice_activity_rows(notice_id)
+            if row["activity_type"] == "staff_notice_occurrence_created"
+        ]
+
     def update_notice_period(
         self,
         notice_id,
@@ -744,6 +821,17 @@ class StaffNoticePublicationTests(unittest.TestCase):
             assignment_activities[0]["related_id"],
             deliveries[0]["delivery_id"]
         )
+        self.assertEqual(
+            [row["activity_type"] for row in self.staff_notice_activity_rows(
+                notice_id
+            )],
+            [
+                "staff_notice_audience_eligibility_started",
+                "staff_notice_occurrence_created",
+                "staff_notice_delivery_assigned",
+                "staff_notice_published"
+            ]
+        )
         self.assert_no_later_publication_rows()
 
     def test_publication_writes_one_authoritative_activity_event(self):
@@ -789,8 +877,10 @@ class StaffNoticePublicationTests(unittest.TestCase):
             "Occurrences: 1; Deliveries: 3"
         )
         self.assertEqual(activity["success"], 1)
-        self.assertEqual(len(self.eligibility_rows(notice_id)), 3)
-        self.assertEqual(len(self.occurrence_rows(notice_id)), 1)
+        eligibility_rows = self.eligibility_rows(notice_id)
+        self.assertEqual(len(eligibility_rows), 3)
+        occurrences = self.occurrence_rows(notice_id)
+        self.assertEqual(len(occurrences), 1)
         deliveries = self.delivery_rows(notice_id)
         self.assertEqual(len(deliveries), 3)
         history_rows = self.delivery_history_rows(notice_id)
@@ -830,6 +920,115 @@ class StaffNoticePublicationTests(unittest.TestCase):
             [row["related_id"] for row in assignment_activities],
             [row["delivery_id"] for row in deliveries]
         )
+        all_activities = self.staff_notice_activity_rows(notice_id)
+        self.assertEqual(len(all_activities), 8)
+        self.assertEqual(
+            [row["activity_type"] for row in all_activities],
+            [
+                "staff_notice_audience_eligibility_started",
+                "staff_notice_audience_eligibility_started",
+                "staff_notice_audience_eligibility_started",
+                "staff_notice_occurrence_created",
+                "staff_notice_delivery_assigned",
+                "staff_notice_delivery_assigned",
+                "staff_notice_delivery_assigned",
+                "staff_notice_published"
+            ]
+        )
+        eligibility_activities = self.eligibility_started_activity_rows(
+            notice_id
+        )
+        for eligibility_activity, eligibility_row in zip(
+            eligibility_activities,
+            eligibility_rows
+        ):
+            self.assertIsNotNone(
+                eligibility_activity["activity_datetime"]
+            )
+            self.assertEqual(
+                eligibility_activity["activity_class"],
+                "STAFF_NOTICE"
+            )
+            self.assertIsNone(eligibility_activity["user_id"])
+            self.assertEqual(eligibility_activity["client_id"], 1)
+            self.assertIsNone(eligibility_activity["shift_id"])
+            self.assertEqual(
+                eligibility_activity["related_table"],
+                "staff_notice_audience_eligibility_periods"
+            )
+            self.assertEqual(
+                eligibility_activity["related_id"],
+                eligibility_row["eligibility_period_id"]
+            )
+            self.assertEqual(
+                eligibility_activity["summary"],
+                "Staff Notice audience eligibility started: "
+                "Authoritative Audit Title"
+            )
+            self.assertEqual(
+                eligibility_activity["details"],
+                f"Notice ID: {notice_id}; Recipient user ID: "
+                f"{eligibility_row['user_id']}; Sources: "
+                "Core Organization"
+            )
+            self.assertEqual(eligibility_activity["success"], 1)
+        occurrence_activity = self.occurrence_created_activity_rows(
+            notice_id
+        )[0]
+        self.assertIsNotNone(occurrence_activity["activity_datetime"])
+        self.assertEqual(occurrence_activity["activity_class"], "STAFF_NOTICE")
+        self.assertIsNone(occurrence_activity["user_id"])
+        self.assertEqual(occurrence_activity["client_id"], 1)
+        self.assertIsNone(occurrence_activity["shift_id"])
+        self.assertEqual(
+            occurrence_activity["related_table"],
+            "staff_notice_occurrences"
+        )
+        self.assertEqual(
+            occurrence_activity["related_id"],
+            occurrences[0]["occurrence_id"]
+        )
+        self.assertEqual(
+            occurrence_activity["summary"],
+            "Staff Notice occurrence created: Authoritative Audit Title"
+        )
+        self.assertEqual(
+            occurrence_activity["details"],
+            f"Notice ID: {notice_id}; Kind: One Time; Date: None; "
+            "Visible from: 2026-08-01T08:00:00Z; Due at: None"
+        )
+        self.assertEqual(occurrence_activity["success"], 1)
+        for assignment_activity, delivery in zip(
+            assignment_activities,
+            deliveries
+        ):
+            self.assertIsNotNone(
+                assignment_activity["activity_datetime"]
+            )
+            self.assertEqual(
+                assignment_activity["activity_class"],
+                "STAFF_NOTICE"
+            )
+            self.assertIsNone(assignment_activity["user_id"])
+            self.assertEqual(assignment_activity["client_id"], 1)
+            self.assertIsNone(assignment_activity["shift_id"])
+            self.assertEqual(
+                assignment_activity["related_table"],
+                "staff_notice_deliveries"
+            )
+            self.assertEqual(
+                assignment_activity["summary"],
+                "Staff Notice delivery assigned: "
+                "Authoritative Audit Title"
+            )
+            self.assertEqual(
+                assignment_activity["details"],
+                f"Notice ID: {notice_id}; Occurrence ID: "
+                f"{delivery['occurrence_id']}; Recipient user ID: "
+                f"{delivery['user_id']}; Eligibility cutoff: "
+                "2026-08-01T08:00:00Z"
+            )
+            self.assertEqual(assignment_activity["success"], 1)
 
     def test_all_active_management_roles_can_publish_through_route(self):
         conn = self.open_database()
@@ -1164,7 +1363,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.delivery_insert_calls, 1)
         self.assertEqual(connection.delivery_history_insert_calls, 1)
-        self.assertEqual(connection.activity_insert_calls, 2)
+        self.assertEqual(connection.activity_insert_calls, 4)
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.commit_calls, 1)
         self.assertEqual(connection.rollback_calls, 0)
@@ -1479,12 +1678,101 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.delivery_insert_calls, 1)
         self.assertEqual(connection.delivery_history_insert_calls, 1)
-        self.assertEqual(connection.activity_insert_calls, 1)
+        self.assertEqual(connection.activity_insert_calls, 3)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(connection.close_calls, 1)
         self.assertEqual(self.database_snapshot(), before)
         self.assert_no_later_publication_rows()
+
+    def test_initial_eligibility_activity_failure_rolls_back_publication(self):
+        notice_id = self.create_notice()
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_initial_eligibility_activity
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type =
+                    'staff_notice_audience_eligibility_started'
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'controlled initial eligibility activity failure'
+                    );
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        before = self.database_snapshot()
+        connection = self.tracking_connection()
+
+        with mock.patch.object(app, "get_db", return_value=connection):
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled initial eligibility activity failure"
+            ):
+                app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(connection.eligibility_insert_calls, 1)
+        self.assertEqual(connection.occurrence_insert_calls, 0)
+        self.assertEqual(connection.delivery_insert_calls, 0)
+        self.assertEqual(connection.activity_insert_calls, 1)
+        self.assertEqual(connection.update_calls, 0)
+        self.assertEqual(connection.commit_calls, 0)
+        self.assertEqual(connection.rollback_calls, 1)
+        self.assertEqual(connection.close_calls, 1)
+        self.assertEqual(self.database_snapshot(), before)
+        self.assertEqual(self.eligibility_rows(notice_id), [])
+        self.assertEqual(self.occurrence_rows(notice_id), [])
+        self.assertEqual(self.delivery_rows(notice_id), [])
+        self.assertEqual(self.staff_notice_activity_rows(notice_id), [])
+
+    def test_initial_occurrence_activity_failure_rolls_back_publication(self):
+        notice_id = self.create_notice()
+        conn = self.open_database()
+
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_initial_occurrence_activity
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type = 'staff_notice_occurrence_created'
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'controlled initial occurrence activity failure'
+                    );
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        before = self.database_snapshot()
+        connection = self.tracking_connection()
+
+        with mock.patch.object(app, "get_db", return_value=connection):
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled initial occurrence activity failure"
+            ):
+                app.publish_staff_notice(notice_id, 1)
+
+        self.assertEqual(connection.eligibility_insert_calls, 1)
+        self.assertEqual(connection.occurrence_insert_calls, 1)
+        self.assertEqual(connection.delivery_insert_calls, 0)
+        self.assertEqual(connection.activity_insert_calls, 2)
+        self.assertEqual(connection.update_calls, 0)
+        self.assertEqual(connection.commit_calls, 0)
+        self.assertEqual(connection.rollback_calls, 1)
+        self.assertEqual(connection.close_calls, 1)
+        self.assertEqual(self.database_snapshot(), before)
+        self.assertEqual(self.eligibility_rows(notice_id), [])
+        self.assertEqual(self.occurrence_rows(notice_id), [])
+        self.assertEqual(self.delivery_rows(notice_id), [])
+        self.assertEqual(self.staff_notice_activity_rows(notice_id), [])
 
     def test_activity_log_failure_rolls_back_complete_publication(self):
         notice_id = self.create_notice()
@@ -1524,7 +1812,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.delivery_insert_calls, 1)
         self.assertEqual(connection.delivery_history_insert_calls, 1)
-        self.assertEqual(connection.activity_insert_calls, 2)
+        self.assertEqual(connection.activity_insert_calls, 4)
         self.assertEqual(connection.update_calls, 1)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
@@ -1569,6 +1857,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.eligibility_insert_calls, 2)
         self.assertEqual(connection.occurrence_insert_calls, 0)
         self.assertEqual(connection.delivery_insert_calls, 0)
+        self.assertEqual(connection.activity_insert_calls, 1)
         self.assertEqual(connection.update_calls, 0)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
@@ -1593,6 +1882,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertEqual(connection.eligibility_insert_calls, 1)
         self.assertEqual(connection.occurrence_insert_calls, 1)
         self.assertEqual(connection.delivery_insert_calls, 1)
+        self.assertEqual(connection.activity_insert_calls, 3)
         self.assertEqual(connection.commit_calls, 0)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(self.database_snapshot(), before)
@@ -1613,6 +1903,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
                 app.publish_staff_notice(notice_id, 1)
 
         self.assertIs(raised.exception, commit_error)
+        self.assertEqual(connection.activity_insert_calls, 4)
         self.assertEqual(connection.commit_calls, 1)
         self.assertEqual(connection.rollback_calls, 1)
         self.assertEqual(connection.close_calls, 1)
@@ -1970,6 +2261,20 @@ class StaffNoticePublicationTests(unittest.TestCase):
             "2026-08-02T06:00:00Z"
         )
         self.assertEqual(delivery["due_at_utc"], "2026-08-02T14:00:00Z")
+        occurrence_activity = self.occurrence_created_activity_rows(
+            notice_id
+        )[0]
+        self.assertEqual(occurrence_activity["shift_id"], 30)
+        self.assertEqual(
+            occurrence_activity["related_id"],
+            occurrence["occurrence_id"]
+        )
+        self.assertEqual(
+            occurrence_activity["details"],
+            f"Notice ID: {notice_id}; Kind: Shift; Date: 2026-08-01; "
+            "Visible from: 2026-08-02T06:00:00Z; "
+            "Due at: 2026-08-02T14:00:00Z"
+        )
 
     def test_future_specific_shift_without_record_creates_pending_shift(self):
         notice_id = self.create_notice()
@@ -1997,6 +2302,33 @@ class StaffNoticePublicationTests(unittest.TestCase):
         self.assertIsNone(occurrence["shift_bound_at_utc"])
         self.assertEqual(self.delivery_rows(notice_id), [])
         self.assertEqual(self.delivery_history_rows(notice_id), [])
+        activities = self.staff_notice_activity_rows(notice_id)
+        self.assertEqual(len(activities), 3)
+        self.assertEqual(
+            [row["activity_type"] for row in activities],
+            [
+                "staff_notice_audience_eligibility_started",
+                "staff_notice_occurrence_created",
+                "staff_notice_published"
+            ]
+        )
+        occurrence_activity = self.occurrence_created_activity_rows(
+            notice_id
+        )[0]
+        self.assertIsNone(occurrence_activity["shift_id"])
+        self.assertEqual(
+            occurrence_activity["related_id"],
+            occurrence["occurrence_id"]
+        )
+        self.assertEqual(
+            occurrence_activity["details"],
+            f"Notice ID: {notice_id}; Kind: Shift; Date: 2026-08-02; "
+            "Visible from: None; Due at: None"
+        )
+        self.assertEqual(
+            self.delivery_assignment_activity_rows(notice_id),
+            []
+        )
         self.assert_no_later_publication_rows()
 
     def test_occurrence_calculation_failure_rolls_back_publication(self):
@@ -2009,10 +2341,13 @@ class StaffNoticePublicationTests(unittest.TestCase):
             scheduled_start_time="invalid"
         )
         before = self.database_snapshot()
+        connection = self.tracking_connection()
 
-        with self.assertRaisesRegex(ValueError, "scheduled shift start"):
-            app.publish_staff_notice(notice_id, 1)
+        with mock.patch.object(app, "get_db", return_value=connection):
+            with self.assertRaisesRegex(ValueError, "scheduled shift start"):
+                app.publish_staff_notice(notice_id, 1)
 
+        self.assertEqual(connection.activity_insert_calls, 1)
         self.assertEqual(self.database_snapshot(), before)
 
     def test_occurrence_insert_failure_rolls_back_all_publication_rows(self):
@@ -2026,7 +2361,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
             conn.execute("""
                 CREATE TRIGGER control_occurrence_insert
                 BEFORE INSERT ON staff_notice_occurrences
-                WHEN NEW.shift_id = 51
+                WHEN NEW.shift_id = 50
                 BEGIN
                     SELECT RAISE(ABORT, 'controlled occurrence failure');
                 END
@@ -2035,13 +2370,16 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
         before = self.database_snapshot()
+        connection = self.tracking_connection()
 
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError,
-            "controlled occurrence failure"
-        ):
-            app.publish_staff_notice(notice_id, 1)
+        with mock.patch.object(app, "get_db", return_value=connection):
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled occurrence failure"
+            ):
+                app.publish_staff_notice(notice_id, 1)
 
+        self.assertEqual(connection.activity_insert_calls, 2)
         self.assertEqual(self.database_snapshot(), before)
 
     def test_occurrence_uniqueness_rejects_duplicate_schedule_identity(self):
@@ -2161,11 +2499,16 @@ class StaffNoticePublicationTests(unittest.TestCase):
     def test_delivery_calculation_failure_rolls_back_entire_publication(self):
         notice_id = self.create_notice()
         before = self.database_snapshot()
+        connection = self.tracking_connection()
 
         with mock.patch.object(
             app,
             "_load_initial_staff_notice_delivery_user_ids",
             side_effect=ValueError("controlled delivery calculation failure")
+        ), mock.patch.object(
+            app,
+            "get_db",
+            return_value=connection
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -2173,6 +2516,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
             ):
                 app.publish_staff_notice(notice_id, 1)
 
+        self.assertEqual(connection.activity_insert_calls, 2)
         self.assertEqual(self.database_snapshot(), before)
 
     def test_delivery_insert_failure_rolls_back_entire_publication(self):
@@ -2194,13 +2538,16 @@ class StaffNoticePublicationTests(unittest.TestCase):
         finally:
             conn.close()
         before = self.database_snapshot()
+        connection = self.tracking_connection()
 
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError,
-            "controlled delivery failure"
-        ):
-            app.publish_staff_notice(notice_id, 1)
+        with mock.patch.object(app, "get_db", return_value=connection):
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled delivery failure"
+            ):
+                app.publish_staff_notice(notice_id, 1)
 
+        self.assertEqual(connection.activity_insert_calls, 5)
         self.assertEqual(self.database_snapshot(), before)
 
     def test_initial_delivery_creation_has_assigned_history_and_no_later_state(

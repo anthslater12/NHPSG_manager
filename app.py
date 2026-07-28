@@ -4958,6 +4958,34 @@ def get_staff_notice_publish_preview(
     return preview
 
 
+def _log_staff_notice_audience_eligibility_started(
+    conn,
+    notice,
+    eligibility_period_id,
+    user_id,
+    sources
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_audience_eligibility_started",
+        summary=(
+            "Staff Notice audience eligibility started: "
+            f"{notice['title']}"
+        ),
+        user_id=None,
+        client_id=notice["client_id"],
+        shift_id=None,
+        related_table="staff_notice_audience_eligibility_periods",
+        related_id=eligibility_period_id,
+        details=(
+            f"Notice ID: {notice['notice_id']}; "
+            f"Recipient user ID: {user_id}; Sources: {sources}"
+        ),
+        success=1
+    )
+
+
 def _create_initial_staff_notice_eligibility_periods(
     conn,
     preview,
@@ -4971,13 +4999,14 @@ def _create_initial_staff_notice_eligibility_periods(
         )
 
     audience_id = preview["notice"]["audience"]["audience_id"]
+    notice = preview["notice"]
     candidates = preview["_publication_audience_candidates"]
 
     for user_id in sorted(candidates):
-        sources = list(dict.fromkeys(
+        sources = ", ".join(dict.fromkeys(
             candidates[user_id]["qualification_sources"]
         ))
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO staff_notice_audience_eligibility_periods
             (
                 audience_id,
@@ -4996,10 +5025,17 @@ def _create_initial_staff_notice_eligibility_periods(
             audience_id,
             user_id,
             opened_at_utc,
-            ", ".join(sources),
+            sources,
             actor_user_id,
             opened_at_utc
         ))
+        _log_staff_notice_audience_eligibility_started(
+            conn,
+            notice,
+            cursor.lastrowid,
+            user_id,
+            sources
+        )
 
 
 def _staff_notice_occurrence_status(visible_from_utc, now_utc):
@@ -5129,9 +5165,40 @@ def _staff_notice_shift_occurrence_times(shift, notice, now_utc):
     return visible_from, due_at
 
 
+def _log_staff_notice_occurrence_created(
+    conn,
+    notice,
+    occurrence_id,
+    occurrence_kind,
+    occurrence_date,
+    visible_from_at_utc,
+    due_at_utc,
+    shift_id
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_occurrence_created",
+        summary=f"Staff Notice occurrence created: {notice['title']}",
+        user_id=None,
+        client_id=notice["client_id"],
+        shift_id=shift_id,
+        related_table="staff_notice_occurrences",
+        related_id=occurrence_id,
+        details=(
+            f"Notice ID: {notice['notice_id']}; "
+            f"Kind: {occurrence_kind}; Date: {occurrence_date}; "
+            f"Visible from: {visible_from_at_utc}; "
+            f"Due at: {due_at_utc}"
+        ),
+        success=1
+    )
+
+
 def _insert_initial_staff_notice_occurrence(
     conn,
     *,
+    notice,
     schedule_id,
     occurrence_kind,
     occurrence_date,
@@ -5146,7 +5213,7 @@ def _insert_initial_staff_notice_occurrence(
     created_at_utc,
     shift_bound_at_utc
 ):
-    conn.execute("""
+    cursor = conn.execute("""
         INSERT INTO staff_notice_occurrences
         (
             schedule_id,
@@ -5183,6 +5250,16 @@ def _insert_initial_staff_notice_occurrence(
         created_at_utc,
         shift_bound_at_utc
     ))
+    _log_staff_notice_occurrence_created(
+        conn,
+        notice,
+        cursor.lastrowid,
+        occurrence_kind,
+        occurrence_date,
+        visible_from_at_utc,
+        due_at_utc,
+        shift_id
+    )
 
 
 def _create_initial_staff_notice_occurrences(
@@ -5212,6 +5289,7 @@ def _create_initial_staff_notice_occurrences(
             due_at = notice["expires_at_utc"]
         _insert_initial_staff_notice_occurrence(
             conn,
+            notice=notice,
             schedule_id=schedule_id,
             occurrence_kind="One Time",
             occurrence_date=None,
@@ -5270,6 +5348,7 @@ def _create_initial_staff_notice_occurrences(
             due_at = _staff_notice_calendar_day_end_utc(local_date)
             _insert_initial_staff_notice_occurrence(
                 conn,
+                notice=notice,
                 schedule_id=schedule_id,
                 occurrence_kind="Calendar",
                 occurrence_date=local_date.isoformat(),
@@ -5299,6 +5378,7 @@ def _create_initial_staff_notice_occurrences(
     if is_specific_shift and not matching_shifts:
         _insert_initial_staff_notice_occurrence(
             conn,
+            notice=notice,
             schedule_id=schedule_id,
             occurrence_kind="Shift",
             occurrence_date=schedule["specific_shift_date"],
@@ -5328,6 +5408,7 @@ def _create_initial_staff_notice_occurrences(
         )
         _insert_initial_staff_notice_occurrence(
             conn,
+            notice=notice,
             schedule_id=schedule_id,
             occurrence_kind="Shift",
             occurrence_date=shift["shift_date"],
@@ -5633,24 +5714,12 @@ def reconcile_staff_notice_audience_eligibility(
 
         eligibility_period_id = cursor.lastrowid
         result["eligibility_started"] += 1
-        log_activity(
+        _log_staff_notice_audience_eligibility_started(
             conn,
-            activity_class="STAFF_NOTICE",
-            activity_type="staff_notice_audience_eligibility_started",
-            summary=(
-                "Staff Notice audience eligibility started: "
-                f"{notice['title']}"
-            ),
-            user_id=None,
-            client_id=notice["client_id"],
-            shift_id=None,
-            related_table="staff_notice_audience_eligibility_periods",
-            related_id=eligibility_period_id,
-            details=(
-                f"Notice ID: {notice['notice_id']}; "
-                f"Recipient user ID: {user_id}; Sources: {sources}"
-            ),
-            success=1
+            notice,
+            eligibility_period_id,
+            user_id,
+            sources
         )
 
     return result
@@ -5757,28 +5826,15 @@ def generate_due_staff_notice_occurrences(
                 if cursor.rowcount == 1:
                     occurrence_id = cursor.lastrowid
                     result["occurrences_created"] += 1
-                    log_activity(
+                    _log_staff_notice_occurrence_created(
                         conn,
-                        activity_class="STAFF_NOTICE",
-                        activity_type="staff_notice_occurrence_created",
-                        summary=(
-                            "Staff Notice occurrence created: "
-                            f"{notice['title']}"
-                        ),
-                        user_id=None,
-                        client_id=notice["client_id"],
-                        shift_id=None,
-                        related_table="staff_notice_occurrences",
-                        related_id=occurrence_id,
-                        details=(
-                            f"Notice ID: {notice['notice_id']}; "
-                            f"Kind: Calendar; Date: "
-                            f"{occurrence_date.isoformat()}; Visible from: "
-                            f"{format_staff_notice_utc_datetime(visible_from)}; "
-                            "Due at: "
-                            f"{format_staff_notice_utc_datetime(due_at)}"
-                        ),
-                        success=1
+                        notice,
+                        occurrence_id,
+                        "Calendar",
+                        occurrence_date.isoformat(),
+                        format_staff_notice_utc_datetime(visible_from),
+                        format_staff_notice_utc_datetime(due_at),
+                        None
                     )
 
         occurrence_date += timedelta(days=1)
