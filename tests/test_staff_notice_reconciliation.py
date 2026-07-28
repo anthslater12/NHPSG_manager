@@ -89,6 +89,7 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     actual_start_time TEXT,
                     actual_end_time TEXT,
                     start_checklist_completed INTEGER NOT NULL DEFAULT 0,
+                    end_checklist_completed INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL
                 );
 
@@ -435,6 +436,80 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             return cursor.lastrowid
         finally:
             conn.close()
+
+    def seed_staff_notice_acknowledgement(
+        self,
+        delivery_id,
+        user_id,
+        acknowledged_at
+    ):
+        conn = self.open_database()
+
+        try:
+            cursor = conn.execute("""
+                INSERT INTO acknowledgements
+                (
+                    source_table,
+                    source_id,
+                    user_id,
+                    acknowledgement_type,
+                    acknowledged_at,
+                    active
+                )
+                VALUES (
+                    'staff_notice_deliveries',
+                    ?,
+                    ?,
+                    'Acknowledgement',
+                    ?,
+                    1
+                )
+            """, (delivery_id, user_id, acknowledged_at))
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def create_shift_notice_delivery(
+        self,
+        *,
+        occurrence_basis="Shift",
+        shift_applicability="Every Shift",
+        recurrence_pattern="Daily",
+        shift_date="2026-08-03",
+        shift_type="Day",
+        user_id=2
+    ):
+        notice_arguments = {
+            "occurrence_basis": occurrence_basis,
+            "recurrence_pattern": recurrence_pattern,
+            "shift_applicability": shift_applicability,
+            "audience_rules": (("Applicable Shift Staff", None, None),)
+        }
+        if shift_applicability == "Specific Shift":
+            notice_arguments.update({
+                "specific_shift_client_id": 1,
+                "specific_shift_date": shift_date,
+                "specific_shift_type": shift_type
+            })
+        fixture = self.create_published_notice(**notice_arguments)
+        shift_id = self.seed_shift(date=shift_date, shift_type=shift_type)
+        shift_staff_id = self.seed_shift_staff(shift_id, user_id)
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn,
+                shift_id,
+                user_id,
+                "2026-08-03T15:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return fixture, shift_id, shift_staff_id
 
     def set_user(self, user_id, *, role=None, active=None):
         values = {}
@@ -1649,6 +1724,566 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"are required", response.data)
         self.assertEqual(self.database_snapshot(), before)
+
+    def test_worker_removal_before_view_transitions_and_audits_in_order(self):
+        fixture, shift_id, shift_staff_id = (
+            self.create_shift_notice_delivery()
+        )
+        delivery = self.delivery_rows(fixture)[0]
+        baseline_activity_count = len(self.activity_rows())
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = app.remove_shift_staff_assignment(
+                conn,
+                shift_staff_id,
+                1,
+                "Worker removed from coverage.",
+                "2026-08-03T17:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        updated = self.delivery_rows(fixture)[0]
+        history = self.delivery_history_rows(fixture)
+        activities = self.activity_rows()[baseline_activity_count:]
+        self.assertEqual(result, {
+            "assignments_removed": 1,
+            "deliveries_no_longer_required": 1,
+            "delivery_access_revoked": 1
+        })
+        self.assertEqual(updated["delivery_id"], delivery["delivery_id"])
+        self.assertEqual(updated["requirement_status"], "No Longer Required")
+        self.assertEqual(updated["recipient_access"], 0)
+        self.assertIsNone(updated["first_viewed_at_utc"])
+        self.assertEqual(
+            [row["event_type"] for row in history],
+            ["Assigned", "No Longer Required", "Access Revoked"]
+        )
+        self.assertEqual(
+            [row["activity_type"] for row in activities],
+            [
+                "staff_notice_delivery_no_longer_required",
+                "staff_notice_delivery_access_revoked",
+                "shift_staff_removed"
+            ]
+        )
+        for row in history[1:]:
+            self.assertEqual(row["reason_code"], "Shift Assignment Removed")
+            self.assertEqual(
+                row["reason_text"],
+                "Worker removed from coverage."
+            )
+            self.assertEqual(row["changed_by_user_id"], 1)
+            self.assertEqual(
+                row["changed_at_utc"],
+                "2026-08-03T17:00:00Z"
+            )
+        self.assertEqual(
+            history[1]["previous_requirement_status"],
+            "Required"
+        )
+        self.assertEqual(
+            history[1]["new_requirement_status"],
+            "No Longer Required"
+        )
+        self.assertIsNone(history[1]["previous_recipient_access"])
+        self.assertIsNone(history[1]["new_recipient_access"])
+        self.assertIsNone(history[2]["previous_requirement_status"])
+        self.assertIsNone(history[2]["new_requirement_status"])
+        self.assertEqual(history[2]["previous_recipient_access"], 1)
+        self.assertEqual(history[2]["new_recipient_access"], 0)
+        for activity in activities:
+            self.assertEqual(activity["shift_id"], shift_id)
+            self.assertIn("Worker removed from coverage.", activity["details"])
+            self.assertEqual(activity["user_id"], 1)
+
+    def test_worker_removal_after_view_preserves_view_history(self):
+        fixture, _, shift_staff_id = self.create_shift_notice_delivery()
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T15:30:00Z',
+                    viewed_by_user_id = 2
+                WHERE delivery_id = ?
+            """, (delivery["delivery_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.remove_shift_staff_assignment(
+                conn,
+                shift_staff_id,
+                1,
+                "Coverage changed.",
+                "2026-08-03T17:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        updated = self.delivery_rows(fixture)[0]
+        self.assertEqual(updated["requirement_status"], "No Longer Required")
+        self.assertEqual(updated["recipient_access"], 0)
+        self.assertEqual(
+            updated["first_viewed_at_utc"],
+            "2026-08-03T15:30:00Z"
+        )
+        self.assertEqual(updated["viewed_by_user_id"], 2)
+
+    def assert_worker_removal_preserves_acknowledgement(
+        self,
+        acknowledged_at,
+        expected_status
+    ):
+        fixture, _, shift_staff_id = self.create_shift_notice_delivery()
+        delivery = self.delivery_rows(fixture)[0]
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = '2026-08-03T17:00:00Z'
+                WHERE occurrence_id = ?
+            """, (delivery["occurrence_id"],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T15:30:00Z',
+                    viewed_by_user_id = 2
+                WHERE delivery_id = ?
+            """, (delivery["delivery_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        acknowledgement_id = self.seed_staff_notice_acknowledgement(
+            delivery["delivery_id"],
+            2,
+            acknowledged_at
+        )
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = app.remove_shift_staff_assignment(
+                conn,
+                shift_staff_id,
+                1,
+                "Assignment ended early.",
+                "2026-08-03T19:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        updated = self.delivery_rows(fixture)[0]
+        histories = self.delivery_history_rows(fixture)
+        conn = self.open_database()
+        try:
+            acknowledgement = conn.execute("""
+                SELECT *
+                FROM acknowledgements
+                WHERE acknowledgement_id = ?
+            """, (acknowledgement_id,)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(result["deliveries_no_longer_required"], 0)
+        self.assertEqual(result["delivery_access_revoked"], 1)
+        self.assertEqual(updated["requirement_status"], "Required")
+        self.assertEqual(updated["recipient_access"], 0)
+        self.assertEqual(
+            updated["first_viewed_at_utc"],
+            "2026-08-03T15:30:00Z"
+        )
+        self.assertEqual(acknowledgement["acknowledged_at"], acknowledged_at)
+        self.assertEqual(acknowledgement["active"], 1)
+        self.assertEqual(
+            [row["event_type"] for row in histories],
+            ["Assigned", "Access Revoked"]
+        )
+        self.assertEqual(
+            app.get_recipient_staff_notice_status(
+                active_acknowledgement_at_utc=acknowledged_at,
+                due_at_utc="2026-08-03T17:00:00Z",
+                requirement_status=updated["requirement_status"],
+                first_viewed_at_utc=updated["first_viewed_at_utc"]
+            ),
+            expected_status
+        )
+
+    def test_worker_removal_preserves_on_time_acknowledgement(self):
+        self.assert_worker_removal_preserves_acknowledgement(
+            "2026-08-03T16:00:00Z",
+            "Acknowledged"
+        )
+
+    def test_worker_removal_preserves_late_acknowledgement(self):
+        self.assert_worker_removal_preserves_acknowledgement(
+            "2026-08-03T18:00:00Z",
+            "Acknowledged Late"
+        )
+
+    def test_future_worker_removal_handles_existing_or_missing_delivery(self):
+        existing, _, existing_assignment = (
+            self.create_shift_notice_delivery(shift_date="2026-08-06")
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_result = app.remove_shift_staff_assignment(
+                conn,
+                existing_assignment,
+                1,
+                "Future coverage changed.",
+                "2026-08-03T17:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(existing_result["deliveries_no_longer_required"], 1)
+        self.assertEqual(
+            self.delivery_rows(existing)[0]["requirement_status"],
+            "No Longer Required"
+        )
+
+        pending = self.create_published_notice(
+            occurrence_basis="Shift",
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),),
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-07",
+            specific_shift_type="Day"
+        )
+        pending_id = self.seed_pending_shift_occurrence(
+            pending,
+            date="2026-08-07",
+            shift_type="Day"
+        )
+        shift_id = self.seed_shift(date="2026-08-07")
+        assignment_id = self.seed_shift_staff(shift_id, 3)
+        baseline_activity_count = len(self.activity_rows())
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            missing_result = app.remove_shift_staff_assignment(
+                conn,
+                assignment_id,
+                1,
+                "Future worker removed.",
+                "2026-08-03T18:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(missing_result, {
+            "assignments_removed": 1,
+            "deliveries_no_longer_required": 0,
+            "delivery_access_revoked": 0
+        })
+        occurrence = self.occurrence_rows(pending)[0]
+        self.assertEqual(occurrence["occurrence_id"], pending_id)
+        self.assertEqual(occurrence["occurrence_status"], "Pending Shift")
+        self.assertIsNone(occurrence["shift_id"])
+        self.assertEqual(self.delivery_rows(pending), [])
+        self.assertEqual(
+            [row["activity_type"] for row in self.activity_rows()[
+                baseline_activity_count:
+            ]],
+            ["shift_staff_removed"]
+        )
+
+    def test_worker_removal_supports_specific_and_every_shift_deliveries(self):
+        every, shift_id, shift_staff_id = self.create_shift_notice_delivery()
+        specific = self.create_published_notice(
+            occurrence_basis="Shift",
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),),
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-03",
+            specific_shift_type="Day"
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn,
+                shift_id,
+                2,
+                "2026-08-03T15:30:00Z"
+            )
+            result = app.remove_shift_staff_assignment(
+                conn,
+                shift_staff_id,
+                1,
+                "Removed from both requirements.",
+                "2026-08-03T17:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(result["deliveries_no_longer_required"], 2)
+        self.assertEqual(result["delivery_access_revoked"], 2)
+        for fixture in (every, specific):
+            delivery = self.delivery_rows(fixture)[0]
+            self.assertEqual(
+                delivery["requirement_status"],
+                "No Longer Required"
+            )
+            self.assertEqual(delivery["recipient_access"], 0)
+
+    def test_worker_removal_is_idempotent(self):
+        fixture, _, shift_staff_id = self.create_shift_notice_delivery()
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            first = app.remove_shift_staff_assignment(
+                conn,
+                shift_staff_id,
+                1,
+                "Assignment removed.",
+                "2026-08-03T17:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        snapshot = self.database_snapshot()
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            repeated = app.remove_shift_staff_assignment(
+                conn,
+                shift_staff_id,
+                1,
+                "Assignment removed.",
+                "2026-08-03T18:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(first["assignments_removed"], 1)
+        self.assertEqual(repeated, {
+            "assignments_removed": 0,
+            "deliveries_no_longer_required": 0,
+            "delivery_access_revoked": 0
+        })
+        self.assertEqual(self.database_snapshot(), snapshot)
+        self.assertEqual(len(self.delivery_history_rows(fixture)), 3)
+
+    def test_worker_removal_rejects_empty_reason_without_changes(self):
+        _, _, shift_staff_id = self.create_shift_notice_delivery()
+        before = self.database_snapshot()
+
+        for reason in ("", " \t\r\n"):
+            with self.subTest(reason=repr(reason)):
+                conn = self.open_database()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "reason is required"
+                    ):
+                        app.remove_shift_staff_assignment(
+                            conn,
+                            shift_staff_id,
+                            1,
+                            reason,
+                            "2026-08-03T17:00:00Z"
+                        )
+                    conn.rollback()
+                finally:
+                    conn.close()
+                self.assertEqual(self.database_snapshot(), before)
+
+    def test_worker_removal_failure_during_nlr_rolls_back_everything(self):
+        _, _, shift_staff_id = self.create_shift_notice_delivery()
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with mock.patch.object(
+                app,
+                "_mark_staff_notice_delivery_no_longer_required",
+                side_effect=RuntimeError("controlled NLR failure")
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "controlled NLR failure"
+                ):
+                    app.remove_shift_staff_assignment(
+                        conn,
+                        shift_staff_id,
+                        1,
+                        "Removal failed.",
+                        "2026-08-03T17:00:00Z"
+                    )
+            conn.rollback()
+        finally:
+            conn.close()
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_worker_removal_failure_during_access_rolls_back_everything(self):
+        _, _, shift_staff_id = self.create_shift_notice_delivery()
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with mock.patch.object(
+                app,
+                "_revoke_staff_notice_delivery_access",
+                side_effect=RuntimeError("controlled access failure")
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "controlled access failure"
+                ):
+                    app.remove_shift_staff_assignment(
+                        conn,
+                        shift_staff_id,
+                        1,
+                        "Removal failed.",
+                        "2026-08-03T17:00:00Z"
+                    )
+            conn.rollback()
+        finally:
+            conn.close()
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_worker_removal_audit_failure_rolls_back_everything(self):
+        _, _, shift_staff_id = self.create_shift_notice_delivery()
+        before = self.database_snapshot()
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_removal_activity_failure
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type =
+                    'staff_notice_delivery_no_longer_required'
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled removal audit failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled removal audit failure"
+            ):
+                app.remove_shift_staff_assignment(
+                    conn,
+                    shift_staff_id,
+                    1,
+                    "Removal failed.",
+                    "2026-08-03T17:00:00Z"
+                )
+            conn.rollback()
+        finally:
+            conn.close()
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_worker_removal_history_failure_rolls_back_everything(self):
+        _, _, shift_staff_id = self.create_shift_notice_delivery()
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_removal_history_failure
+                BEFORE INSERT ON staff_notice_delivery_history
+                WHEN NEW.event_type = 'No Longer Required'
+                BEGIN
+                    SELECT RAISE(ABORT, 'controlled removal history failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "controlled removal history failure"
+            ):
+                app.remove_shift_staff_assignment(
+                    conn,
+                    shift_staff_id,
+                    1,
+                    "Removal failed.",
+                    "2026-08-03T17:00:00Z"
+                )
+            conn.rollback()
+        finally:
+            conn.close()
+
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_completion_and_manager_sign_off_do_not_transition_delivery(self):
+        fixture, shift_id, shift_staff_id = (
+            self.create_shift_notice_delivery()
+        )
+        original_delivery = self.delivery_rows(fixture)[0]
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+        with mock.patch.object(app, "save_shift_task_entries"):
+            response = client.post(f"/shift/{shift_id}/end-shift", data={})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.delivery_rows(fixture)[0], original_delivery)
+        self.assertEqual(
+            [row["event_type"] for row in self.delivery_history_rows(fixture)],
+            ["Assigned"]
+        )
+
+        second_fixture, _, second_assignment = (
+            self.create_shift_notice_delivery(
+                shift_date="2026-08-04",
+                user_id=3
+            )
+        )
+        second_original = self.delivery_rows(second_fixture)[0]
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+            session_data["role"] = "Admin"
+        response = client.post(
+            f"/shift-staff/{second_assignment}/manager-sign-off",
+            data={"reason": "Forgotten sign-off correction."}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.delivery_rows(second_fixture)[0],
+            second_original
+        )
+        self.assertEqual(
+            [row["event_type"] for row in self.delivery_history_rows(
+                second_fixture
+            )],
+            ["Assigned"]
+        )
+        self.assertNotEqual(shift_staff_id, second_assignment)
 
 
 if __name__ == "__main__":

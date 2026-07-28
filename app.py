@@ -6303,6 +6303,285 @@ def reconcile_staff_notice_shift_sign_on(
     return result
 
 
+def _log_staff_notice_delivery_transition(
+    conn,
+    *,
+    activity_type,
+    summary,
+    delivery,
+    actor_user_id,
+    reason,
+    effective_at_utc
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type=activity_type,
+        summary=f"{summary}: {delivery['title']}",
+        user_id=actor_user_id,
+        client_id=delivery["client_id"],
+        shift_id=delivery["shift_id"],
+        related_table="staff_notice_deliveries",
+        related_id=delivery["delivery_id"],
+        details=(
+            f"Notice ID: {delivery['notice_id']}; "
+            f"Occurrence ID: {delivery['occurrence_id']}; "
+            f"Recipient user ID: {delivery['user_id']}; "
+            f"Reason: {reason}; Effective at UTC: {effective_at_utc}"
+        ),
+        success=1
+    )
+
+
+def _mark_staff_notice_delivery_no_longer_required(
+    conn,
+    delivery,
+    actor_user_id,
+    reason,
+    effective_at_utc
+):
+    cursor = conn.execute("""
+        UPDATE staff_notice_deliveries
+        SET requirement_status = 'No Longer Required',
+            status_changed_at_utc = ?,
+            status_changed_by_user_id = ?,
+            current_reason_code = 'Shift Assignment Removed',
+            current_reason_text = ?
+        WHERE delivery_id = ?
+          AND requirement_status = 'Required'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM acknowledgements ack
+              WHERE ack.source_table = 'staff_notice_deliveries'
+                AND ack.source_id = staff_notice_deliveries.delivery_id
+                AND ack.user_id = staff_notice_deliveries.user_id
+                AND ack.active = 1
+          )
+    """, (
+        effective_at_utc,
+        actor_user_id,
+        reason,
+        delivery["delivery_id"]
+    ))
+    if cursor.rowcount != 1:
+        return 0
+
+    conn.execute("""
+        INSERT INTO staff_notice_delivery_history
+        (
+            delivery_id,
+            event_type,
+            previous_requirement_status,
+            new_requirement_status,
+            previous_recipient_access,
+            new_recipient_access,
+            reason_code,
+            reason_text,
+            changed_by_user_id,
+            changed_at_utc
+        )
+        VALUES (?, 'No Longer Required', 'Required',
+                'No Longer Required', NULL, NULL, ?, ?, ?, ?)
+    """, (
+        delivery["delivery_id"],
+        "Shift Assignment Removed",
+        reason,
+        actor_user_id,
+        effective_at_utc
+    ))
+    _log_staff_notice_delivery_transition(
+        conn,
+        activity_type="staff_notice_delivery_no_longer_required",
+        summary="Staff Notice delivery no longer required",
+        delivery=delivery,
+        actor_user_id=actor_user_id,
+        reason=reason,
+        effective_at_utc=effective_at_utc
+    )
+    return 1
+
+
+def _revoke_staff_notice_delivery_access(
+    conn,
+    delivery,
+    actor_user_id,
+    reason,
+    effective_at_utc
+):
+    cursor = conn.execute("""
+        UPDATE staff_notice_deliveries
+        SET recipient_access = 0,
+            access_revoked_at_utc = ?
+        WHERE delivery_id = ?
+          AND recipient_access = 1
+    """, (
+        effective_at_utc,
+        delivery["delivery_id"]
+    ))
+    if cursor.rowcount != 1:
+        return 0
+
+    conn.execute("""
+        INSERT INTO staff_notice_delivery_history
+        (
+            delivery_id,
+            event_type,
+            previous_requirement_status,
+            new_requirement_status,
+            previous_recipient_access,
+            new_recipient_access,
+            reason_code,
+            reason_text,
+            changed_by_user_id,
+            changed_at_utc
+        )
+        VALUES (?, 'Access Revoked', NULL, NULL, 1, 0, ?, ?, ?, ?)
+    """, (
+        delivery["delivery_id"],
+        "Shift Assignment Removed",
+        reason,
+        actor_user_id,
+        effective_at_utc
+    ))
+    _log_staff_notice_delivery_transition(
+        conn,
+        activity_type="staff_notice_delivery_access_revoked",
+        summary="Staff Notice delivery access revoked",
+        delivery=delivery,
+        actor_user_id=actor_user_id,
+        reason=reason,
+        effective_at_utc=effective_at_utc
+    )
+    return 1
+
+
+def remove_shift_staff_assignment(
+    conn,
+    shift_staff_id,
+    removed_by_user_id,
+    reason,
+    effective_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Shift staff removal requires an active transaction."
+        )
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("A worker-removal reason is required.")
+    if not _is_valid_staff_notice_identifier(shift_staff_id):
+        raise ValueError("A valid shift staff assignment is required.")
+    if not _is_valid_staff_notice_identifier(removed_by_user_id):
+        raise ValueError("A valid removing user is required.")
+
+    reason = reason.strip()
+    effective_at_utc = format_staff_notice_utc_datetime(effective_at_utc)
+    assignment = conn.execute("""
+        SELECT
+            ss.shift_staff_id,
+            ss.shift_id,
+            ss.user_id,
+            ss.active,
+            s.client_id,
+            s.shift_date,
+            s.shift_type,
+            u.full_name
+        FROM shift_staff ss
+        JOIN shifts s
+            ON ss.shift_id = s.shift_id
+        JOIN users u
+            ON ss.user_id = u.user_id
+        WHERE ss.shift_staff_id = ?
+    """, (shift_staff_id,)).fetchone()
+    if assignment is None:
+        raise LookupError("Shift staff assignment not found.")
+    if assignment["active"] != 1:
+        return {
+            "assignments_removed": 0,
+            "deliveries_no_longer_required": 0,
+            "delivery_access_revoked": 0
+        }
+
+    cursor = conn.execute("""
+        UPDATE shift_staff
+        SET active = 0
+        WHERE shift_staff_id = ?
+          AND active = 1
+    """, (shift_staff_id,))
+    if cursor.rowcount != 1:
+        return {
+            "assignments_removed": 0,
+            "deliveries_no_longer_required": 0,
+            "delivery_access_revoked": 0
+        }
+
+    deliveries = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT
+                d.*,
+                o.shift_id,
+                sn.notice_id,
+                sn.title,
+                sn.client_id
+            FROM staff_notice_deliveries d
+            JOIN staff_notice_occurrences o
+                ON d.occurrence_id = o.occurrence_id
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            JOIN staff_notices sn
+                ON sns.notice_id = sn.notice_id
+            WHERE o.shift_id = ?
+              AND d.user_id = ?
+            ORDER BY d.delivery_id
+        """, (
+            assignment["shift_id"],
+            assignment["user_id"]
+        )).fetchall()
+    ]
+    result = {
+        "assignments_removed": 1,
+        "deliveries_no_longer_required": 0,
+        "delivery_access_revoked": 0
+    }
+
+    for delivery in deliveries:
+        result["deliveries_no_longer_required"] += (
+            _mark_staff_notice_delivery_no_longer_required(
+                conn,
+                delivery,
+                removed_by_user_id,
+                reason,
+                effective_at_utc
+            )
+        )
+        result["delivery_access_revoked"] += (
+            _revoke_staff_notice_delivery_access(
+                conn,
+                delivery,
+                removed_by_user_id,
+                reason,
+                effective_at_utc
+            )
+        )
+
+    log_activity(
+        conn,
+        activity_class="SHIFT",
+        activity_type="shift_staff_removed",
+        summary=f"Worker removed from shift: {assignment['full_name']}",
+        user_id=removed_by_user_id,
+        client_id=assignment["client_id"],
+        shift_id=assignment["shift_id"],
+        related_table="shift_staff",
+        related_id=shift_staff_id,
+        details=(
+            f"Reason: {reason}; Effective at UTC: {effective_at_utc}"
+        ),
+        success=1
+    )
+    return result
+
+
 def _load_published_staff_notices_for_reconciliation(conn):
     notice_ids = [
         row["notice_id"]
