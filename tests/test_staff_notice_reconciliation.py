@@ -88,6 +88,7 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     user_id INTEGER NOT NULL,
                     actual_start_time TEXT,
                     actual_end_time TEXT,
+                    start_checklist_completed INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL
                 );
 
@@ -160,7 +161,11 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         audience_rules=(("All Support Workers", None, None),),
         recurrence_anchor_date=None,
         specific_calendar_date=None,
-        weekdays=()
+        weekdays=(),
+        specific_shift_client_id=None,
+        specific_shift_date=None,
+        specific_shift_type=None,
+        shift_types=()
     ):
         conn = self.open_database()
 
@@ -241,9 +246,12 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     shift_applicability,
                     recurrence_anchor_date,
                     specific_calendar_date,
+                    specific_shift_client_id,
+                    specific_shift_date,
+                    specific_shift_type,
                     created_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 notice_id,
                 occurrence_basis,
@@ -251,6 +259,9 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 shift_applicability,
                 recurrence_anchor_date,
                 specific_calendar_date,
+                specific_shift_client_id,
+                specific_shift_date,
+                specific_shift_type,
                 published_at
             ))
             schedule_id = cursor.lastrowid
@@ -259,6 +270,11 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 (schedule_id, weekday_number)
                 VALUES (?, ?)
             """, ((schedule_id, weekday) for weekday in weekdays))
+            conn.executemany("""
+                INSERT INTO staff_notice_schedule_shift_types
+                (schedule_id, shift_type)
+                VALUES (?, ?)
+            """, ((schedule_id, shift_type) for shift_type in shift_types))
             conn.commit()
             return {
                 "notice_id": notice_id,
@@ -359,6 +375,62 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 )
                 VALUES (?, ?, ?, ?)
             """, (occurrence_id, user_id, assigned_at, cutoff))
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def seed_pending_shift_occurrence(self, fixture, *, date, shift_type):
+        conn = self.open_database()
+
+        try:
+            cursor = conn.execute("""
+                INSERT INTO staff_notice_occurrences
+                (
+                    schedule_id,
+                    occurrence_kind,
+                    occurrence_date,
+                    planned_client_id,
+                    planned_shift_type,
+                    is_specific_shift_occurrence,
+                    occurrence_status,
+                    created_at_utc
+                )
+                VALUES (?, 'Shift', ?, 1, ?, 1, 'Pending Shift', ?)
+            """, (
+                fixture["schedule_id"],
+                date,
+                shift_type,
+                "2026-08-01T16:00:00Z"
+            ))
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def seed_shift(self, *, date="2026-08-03", shift_type="Day"):
+        conn = self.open_database()
+
+        try:
+            cursor = conn.execute("""
+                INSERT INTO shifts
+                (client_id, shift_date, shift_type, status)
+                VALUES (1, ?, ?, 'Open')
+            """, (date, shift_type))
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def seed_shift_staff(self, shift_id, user_id):
+        conn = self.open_database()
+
+        try:
+            cursor = conn.execute("""
+                INSERT INTO shift_staff
+                (shift_id, user_id, actual_start_time, active)
+                VALUES (?, ?, '08:00', 1)
+            """, (shift_id, user_id))
             conn.commit()
             return cursor.lastrowid
         finally:
@@ -1094,23 +1166,489 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             "2024-11-04T07:59:59Z"
         )
 
-    def test_shift_lifecycle_is_not_reconciled_in_checkpoint_7a(self):
+    def test_shift_sign_on_binds_pending_occurrence_and_assigns_delivery(self):
         fixture = self.create_published_notice(
             occurrence_basis="Shift",
-            recurrence_pattern="Daily",
-            shift_applicability="Every Shift",
-            audience_rules=(("Selected Role", "Behaviour Consultant", None),)
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),),
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-03",
+            specific_shift_type="Day"
         )
-
-        result = app.reconcile_staff_notice_non_shift_requirements(
-            "2026-08-03T19:00:00Z"
+        pending_id = self.seed_pending_shift_occurrence(
+            fixture,
+            date="2026-08-03",
+            shift_type="Day"
         )
+        before = self.database_snapshot()
+        conn = self.open_database()
 
-        self.assertEqual(result["eligibility_started"], 1)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            shift_cursor = conn.execute("""
+                INSERT INTO shifts
+                (client_id, shift_date, shift_type, status)
+                VALUES (1, '2026-08-03', 'Day', 'Open')
+            """)
+            shift_id = shift_cursor.lastrowid
+            conn.execute("""
+                INSERT INTO shift_staff
+                (shift_id, user_id, actual_start_time, active)
+                VALUES (?, 2, '08:00', 1)
+            """, (shift_id,))
+            result = app.reconcile_staff_notice_shift_sign_on(
+                conn,
+                shift_id,
+                2,
+                "2026-08-03T15:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        occurrence = self.occurrence_rows(fixture)[0]
+        deliveries = self.delivery_rows(fixture)
+        histories = self.delivery_history_rows(fixture)
+        self.assertEqual(occurrence["occurrence_id"], pending_id)
+        self.assertEqual(occurrence["shift_id"], shift_id)
+        self.assertEqual(occurrence["occurrence_status"], "Active")
+        self.assertEqual(
+            occurrence["visible_from_at_utc"],
+            "2026-08-03T15:00:00Z"
+        )
+        self.assertNotEqual(self.database_snapshot(), before)
         self.assertEqual(result["occurrences_created"], 0)
-        self.assertEqual(result["deliveries_assigned"], 0)
+        self.assertEqual(result["deliveries_assigned"], 1)
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(deliveries[0]["user_id"], 2)
+        self.assertEqual(deliveries[0]["requirement_status"], "Required")
+        self.assertEqual(len(histories), 1)
+        self.assertEqual(histories[0]["event_type"], "Assigned")
+        self.assertEqual(
+            [row["activity_type"] for row in self.activity_rows()],
+            [
+                "staff_notice_occurrence_bound_to_shift",
+                "staff_notice_delivery_assigned"
+            ]
+        )
+
+    def test_shift_reconciliation_is_idempotent(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="Shift",
+            shift_applicability="Every Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),)
+        )
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            first = app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 2, "2026-08-03T15:00:00Z"
+            )
+            repeated = app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 2, "2026-08-03T15:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(first["occurrences_created"], 1)
+        self.assertEqual(first["deliveries_assigned"], 1)
+        self.assertEqual(repeated, app._staff_notice_reconciliation_result())
+        self.assertEqual(len(self.occurrence_rows(fixture)), 1)
+        self.assertEqual(len(self.delivery_rows(fixture)), 1)
+        self.assertEqual(len(self.delivery_history_rows(fixture)), 1)
+        self.assertEqual(len(self.activity_rows()), 2)
+
+    def test_second_shift_worker_gets_only_their_missing_delivery(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="Shift",
+            shift_applicability="Every Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),)
+        )
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 2, "2026-08-03T15:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        original_delivery = self.delivery_rows(fixture)[0]
+
+        self.seed_shift_staff(shift_id, 3)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 3, "2026-08-03T16:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        deliveries = self.delivery_rows(fixture)
+        self.assertEqual(result["occurrences_created"], 0)
+        self.assertEqual(result["deliveries_assigned"], 1)
+        self.assertEqual(len(deliveries), 2)
+        self.assertEqual(deliveries[0], original_delivery)
+        self.assertEqual([row["user_id"] for row in deliveries], [2, 3])
+        self.assertEqual(len(self.delivery_history_rows(fixture)), 2)
+        self.assertEqual(
+            [row["activity_type"] for row in self.activity_rows()],
+            [
+                "staff_notice_occurrence_created",
+                "staff_notice_delivery_assigned",
+                "staff_notice_delivery_assigned"
+            ]
+        )
+
+    def test_pending_shift_binding_leaves_unrelated_pending_unchanged(self):
+        applicable = self.create_published_notice(
+            occurrence_basis="Shift",
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),),
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-03",
+            specific_shift_type="Day"
+        )
+        unrelated = self.create_published_notice(
+            occurrence_basis="Shift",
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),),
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-04",
+            specific_shift_type="Overnight"
+        )
+        self.seed_pending_shift_occurrence(
+            applicable, date="2026-08-03", shift_type="Day"
+        )
+        unrelated_id = self.seed_pending_shift_occurrence(
+            unrelated, date="2026-08-04", shift_type="Overnight"
+        )
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 2, "2026-08-03T15:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        unrelated_occurrence = self.occurrence_rows(unrelated)[0]
+        self.assertEqual(unrelated_occurrence["occurrence_id"], unrelated_id)
+        self.assertEqual(
+            unrelated_occurrence["occurrence_status"],
+            "Pending Shift"
+        )
+        self.assertIsNone(unrelated_occurrence["shift_id"])
+        self.assertEqual(self.delivery_rows(unrelated), [])
+
+    def test_applicable_shift_staff_requires_explicit_manager_assignment(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="Shift",
+            shift_applicability="Every Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),)
+        )
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 2, "2026-08-03T15:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual([row["user_id"] for row in self.delivery_rows(fixture)], [2])
+
+        self.seed_shift_staff(shift_id, 5)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 5, "2026-08-03T16:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(
+            [row["user_id"] for row in self.delivery_rows(fixture)],
+            [2, 5]
+        )
+
+    def test_shift_reconciliation_failure_rolls_back_caller_transaction(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="Shift",
+            shift_applicability="Every Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),)
+        )
+        before = self.database_snapshot()
+        conn = self.open_database()
+
+        with self.assertRaisesRegex(RuntimeError, "controlled failure"):
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                shift_id = conn.execute("""
+                    INSERT INTO shifts
+                    (client_id, shift_date, shift_type, status)
+                    VALUES (1, '2026-08-03', 'Day', 'Open')
+                """).lastrowid
+                conn.execute("""
+                    INSERT INTO shift_staff
+                    (shift_id, user_id, actual_start_time, active)
+                    VALUES (?, 2, '08:00', 1)
+                """, (shift_id,))
+                with mock.patch.object(
+                    app,
+                    "_assign_staff_notice_delivery",
+                    side_effect=RuntimeError("controlled failure")
+                ):
+                    app.reconcile_staff_notice_shift_sign_on(
+                        conn, shift_id, 2, "2026-08-03T15:00:00Z"
+                    )
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        self.assertEqual(self.database_snapshot(), before)
         self.assertEqual(self.occurrence_rows(fixture), [])
-        self.assertEqual(self.delivery_rows(fixture), [])
+
+    def test_manual_sign_on_failure_rolls_back_new_worker_only(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="Shift",
+            shift_applicability="Every Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),)
+        )
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+        conn = self.open_database()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            app.reconcile_staff_notice_shift_sign_on(
+                conn, shift_id, 2, "2026-08-03T15:00:00Z"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+        client = app.app.test_client()
+
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 3
+            session_data["role"] = "Behaviour Consultant"
+        with mock.patch.object(
+            app,
+            "_assign_staff_notice_delivery",
+            side_effect=RuntimeError("controlled failure")
+        ):
+            with mock.patch.object(
+                app,
+                "get_application_now_utc",
+                return_value=datetime(
+                    2026, 8, 3, 16, 0, tzinfo=timezone.utc
+                )
+            ):
+                response = client.post("/shift/sign-on", data={
+                    "shift_date": "2026-08-03",
+                    "shift_type": "Day",
+                    "actual_start_time": "09:00"
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Please try again", response.data)
+        self.assertEqual(self.database_snapshot(), before)
+        self.assertEqual(len(self.occurrence_rows(fixture)), 1)
+        self.assertEqual(
+            [row["user_id"] for row in self.delivery_rows(fixture)],
+            [2]
+        )
+
+    def test_manual_sign_on_creates_shift_and_binds_pending_atomically(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="Shift",
+            recurrence_pattern="Once",
+            shift_applicability="Specific Shift",
+            audience_rules=(("Applicable Shift Staff", None, None),),
+            specific_shift_client_id=1,
+            specific_shift_date="2026-08-03",
+            specific_shift_type="Day"
+        )
+        pending_id = self.seed_pending_shift_occurrence(
+            fixture,
+            date="2026-08-03",
+            shift_type="Day"
+        )
+        tracking = ReconciliationTrackingConnection(self.open_database())
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+
+        with mock.patch.object(app, "get_db", return_value=tracking):
+            with mock.patch.object(
+                app,
+                "get_application_now_utc",
+                return_value=datetime(
+                    2026, 8, 3, 15, 0, tzinfo=timezone.utc
+                )
+            ):
+                response = client.post("/shift/sign-on", data={
+                    "shift_date": "2026-08-03",
+                    "shift_type": "Day",
+                    "actual_start_time": "08:00"
+                })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(tracking.commit_calls, 1)
+        self.assertEqual(tracking.rollback_calls, 0)
+        self.assertEqual(tracking.close_calls, 1)
+        occurrence = self.occurrence_rows(fixture)[0]
+        deliveries = self.delivery_rows(fixture)
+        self.assertEqual(occurrence["occurrence_id"], pending_id)
+        self.assertIsNotNone(occurrence["shift_id"])
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(deliveries[0]["user_id"], 2)
+        self.assertEqual(len(self.delivery_history_rows(fixture)), 1)
+
+    def test_manual_sign_on_failure_rolls_back_new_shift_and_returns_error(self):
+        before = self.database_snapshot()
+        tracking = ReconciliationTrackingConnection(self.open_database())
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+
+        with mock.patch.object(app, "get_db", return_value=tracking):
+            with mock.patch.object(
+                app,
+                "reconcile_staff_notice_shift_sign_on",
+                side_effect=RuntimeError("controlled failure")
+            ):
+                response = client.post("/shift/sign-on", data={
+                    "shift_date": "2026-08-03",
+                    "shift_type": "Day",
+                    "actual_start_time": "08:00"
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Please try again", response.data)
+        self.assertEqual(tracking.commit_calls, 0)
+        self.assertEqual(tracking.rollback_calls, 1)
+        self.assertEqual(tracking.close_calls, 1)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_manual_sign_on_without_notice_commits_one_owned_connection(self):
+        tracking = ReconciliationTrackingConnection(self.open_database())
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+
+        with mock.patch.object(app, "get_db", return_value=tracking):
+            response = client.post("/shift/sign-on", data={
+                "shift_date": "2026-08-03",
+                "shift_type": "Day",
+                "actual_start_time": "08:00"
+            })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(tracking.commit_calls, 1)
+        self.assertEqual(tracking.rollback_calls, 0)
+        self.assertEqual(tracking.close_calls, 1)
+        conn = self.open_database()
+        try:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM shifts").fetchone()[0],
+                1
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM shift_staff").fetchone()[0],
+                1
+            )
+        finally:
+            conn.close()
+
+    def test_auto_sign_on_without_notice_commits_one_owned_connection(self):
+        tracking = ReconciliationTrackingConnection(self.open_database())
+
+        with mock.patch.object(app, "get_db", return_value=tracking):
+            shift_id, checklist_completed = app.auto_sign_on_user(2)
+
+        self.assertIsInstance(shift_id, int)
+        self.assertEqual(checklist_completed, 0)
+        self.assertEqual(tracking.commit_calls, 1)
+        self.assertEqual(tracking.rollback_calls, 0)
+        self.assertEqual(tracking.close_calls, 1)
+        conn = self.open_database()
+        try:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM shifts").fetchone()[0],
+                1
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM shift_staff").fetchone()[0],
+                1
+            )
+        finally:
+            conn.close()
+
+    def test_auto_sign_on_failure_rolls_back_and_dashboard_is_retryable(self):
+        before = self.database_snapshot()
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+
+        with mock.patch.object(
+            app,
+            "reconcile_staff_notice_shift_sign_on",
+            side_effect=RuntimeError("controlled failure")
+        ):
+            response = client.get("/dashboard")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"Please try again", response.data)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_manual_sign_on_login_and_validation_failures_are_unchanged(self):
+        before = self.database_snapshot()
+        client = app.app.test_client()
+
+        response = client.post("/shift/sign-on", data={
+            "shift_date": "2026-08-03",
+            "shift_type": "Day",
+            "actual_start_time": "08:00"
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login", response.headers["Location"])
+
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+        response = client.post("/shift/sign-on", data={
+            "shift_date": "",
+            "shift_type": "Day",
+            "actual_start_time": "08:00"
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"are required", response.data)
+        self.assertEqual(self.database_snapshot(), before)
 
 
 if __name__ == "__main__":

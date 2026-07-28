@@ -1411,6 +1411,10 @@ class StaffNoticeStalePublicationError(ValueError):
     pass
 
 
+class StaffNoticeShiftSignOnError(RuntimeError):
+    pass
+
+
 def _is_valid_staff_notice_identifier(value):
     return type(value) is int and value > 0
 
@@ -6019,6 +6023,286 @@ def reconcile_staff_notice_deliveries(
     return result
 
 
+def _staff_notice_applies_to_shift(notice, shift, now_utc):
+    schedule = notice["schedule"]
+    if schedule is None or schedule["occurrence_basis"] != "Shift":
+        return False
+    if parse_staff_notice_utc_datetime(notice["published_at_utc"]) > now_utc:
+        return False
+    if notice["expires_at_utc"] is not None and (
+        parse_staff_notice_utc_datetime(notice["expires_at_utc"]) < now_utc
+    ):
+        return False
+    if notice["client_id"] is not None and (
+        notice["client_id"] != shift["client_id"]
+    ):
+        return False
+
+    shift_date = datetime.strptime(shift["shift_date"], "%Y-%m-%d").date()
+    effective_date = parse_staff_notice_utc_datetime(
+        notice["effective_start_at_utc"]
+    ).astimezone(STAFF_NOTICE_TIMEZONE).date()
+    published_date = parse_staff_notice_utc_datetime(
+        notice["published_at_utc"]
+    ).astimezone(STAFF_NOTICE_TIMEZONE).date()
+    if shift_date < max(effective_date, published_date):
+        return False
+    if notice["expires_at_utc"] is not None and shift_date > (
+        parse_staff_notice_utc_datetime(notice["expires_at_utc"])
+        .astimezone(STAFF_NOTICE_TIMEZONE)
+        .date()
+    ):
+        return False
+
+    applicability = schedule["shift_applicability"]
+    if applicability == "Specific Shift":
+        if (
+            shift["client_id"] != schedule["specific_shift_client_id"]
+            or shift["shift_date"] != schedule["specific_shift_date"]
+            or shift["shift_type"] != schedule["specific_shift_type"]
+        ):
+            return False
+    elif applicability == "Selected Shift Types":
+        if shift["shift_type"] not in notice["shift_types"]:
+            return False
+    elif applicability != "Every Shift":
+        return False
+
+    recurrence_anchor = schedule.get("recurrence_anchor_date")
+    recurrence_anchor_date = (
+        datetime.strptime(recurrence_anchor, "%Y-%m-%d").date()
+        if recurrence_anchor is not None else None
+    )
+    return _staff_notice_schedule_applies_on_date(
+        schedule,
+        shift_date,
+        notice["weekdays"],
+        recurrence_anchor_date
+    )
+
+
+def _log_staff_notice_occurrence_bound(
+    conn,
+    notice,
+    occurrence_id,
+    shift_id
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_occurrence_bound_to_shift",
+        summary=f"Staff Notice occurrence bound to shift: {notice['title']}",
+        user_id=None,
+        client_id=notice["client_id"],
+        shift_id=shift_id,
+        related_table="staff_notice_occurrences",
+        related_id=occurrence_id,
+        details=(
+            f"Notice ID: {notice['notice_id']}; "
+            f"Occurrence ID: {occurrence_id}; Shift ID: {shift_id}"
+        ),
+        success=1
+    )
+
+
+def reconcile_staff_notice_shift_sign_on(
+    conn,
+    shift_id,
+    signed_on_user_id,
+    reconciled_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice shift reconciliation requires an active transaction."
+        )
+
+    reconciled_at_utc = format_staff_notice_utc_datetime(reconciled_at_utc)
+    now_utc = parse_staff_notice_utc_datetime(reconciled_at_utc)
+    shift_row = conn.execute("""
+        SELECT
+            shift_id,
+            client_id,
+            shift_date,
+            shift_type,
+            status,
+            scheduled_start_time,
+            scheduled_end_time
+        FROM shifts
+        WHERE shift_id = ?
+    """, (shift_id,)).fetchone()
+    if shift_row is None:
+        raise ValueError("Shift not found for Staff Notice reconciliation.")
+    shift = dict(shift_row)
+
+    assignment = conn.execute("""
+        SELECT shift_staff_id, actual_start_time
+        FROM shift_staff
+        WHERE shift_id = ?
+          AND user_id = ?
+          AND active = 1
+        ORDER BY shift_staff_id
+        LIMIT 1
+    """, (shift_id, signed_on_user_id)).fetchone()
+    if assignment is None:
+        raise ValueError(
+            "Active shift assignment not found for Staff Notice reconciliation."
+        )
+    if shift["scheduled_start_time"] is None:
+        shift["scheduled_start_time"] = assignment["actual_start_time"]
+
+    result = _staff_notice_reconciliation_result()
+    for notice in _load_published_staff_notices_for_reconciliation(conn):
+        if not _staff_notice_applies_to_shift(notice, shift, now_utc):
+            continue
+
+        schedule = notice["schedule"]
+        occurrence_row = conn.execute("""
+            SELECT *
+            FROM staff_notice_occurrences
+            WHERE schedule_id = ?
+              AND occurrence_kind = 'Shift'
+              AND shift_id = ?
+            ORDER BY occurrence_id
+            LIMIT 1
+        """, (schedule["schedule_id"], shift_id)).fetchone()
+
+        if occurrence_row is None and (
+            schedule["shift_applicability"] == "Specific Shift"
+        ):
+            pending_row = conn.execute("""
+                SELECT *
+                FROM staff_notice_occurrences
+                WHERE schedule_id = ?
+                  AND occurrence_kind = 'Shift'
+                  AND shift_id IS NULL
+                  AND planned_client_id = ?
+                  AND occurrence_date = ?
+                  AND planned_shift_type = ?
+                  AND occurrence_status = 'Pending Shift'
+                ORDER BY occurrence_id
+                LIMIT 1
+            """, (
+                schedule["schedule_id"],
+                shift["client_id"],
+                shift["shift_date"],
+                shift["shift_type"]
+            )).fetchone()
+            if pending_row is not None:
+                visible_from, due_at = _staff_notice_shift_occurrence_times(
+                    shift,
+                    notice,
+                    now_utc
+                )
+                visible_from_at_utc = (
+                    format_staff_notice_utc_datetime(visible_from)
+                    if visible_from is not None else None
+                )
+                due_at_utc = (
+                    format_staff_notice_utc_datetime(due_at)
+                    if due_at is not None else None
+                )
+                cursor = conn.execute("""
+                    UPDATE staff_notice_occurrences
+                    SET shift_id = ?,
+                        visible_from_at_utc = ?,
+                        due_at_utc = ?,
+                        due_at_is_provisional = ?,
+                        occurrence_status = ?,
+                        shift_bound_at_utc = ?
+                    WHERE occurrence_id = ?
+                      AND shift_id IS NULL
+                      AND occurrence_status = 'Pending Shift'
+                """, (
+                    shift_id,
+                    visible_from_at_utc,
+                    due_at_utc,
+                    int(due_at is not None),
+                    _staff_notice_occurrence_status(visible_from, now_utc),
+                    reconciled_at_utc,
+                    pending_row["occurrence_id"]
+                ))
+                if cursor.rowcount == 1:
+                    _log_staff_notice_occurrence_bound(
+                        conn,
+                        notice,
+                        pending_row["occurrence_id"],
+                        shift_id
+                    )
+                occurrence_row = conn.execute("""
+                    SELECT *
+                    FROM staff_notice_occurrences
+                    WHERE occurrence_id = ?
+                """, (pending_row["occurrence_id"],)).fetchone()
+
+        if occurrence_row is None:
+            visible_from, due_at = _staff_notice_shift_occurrence_times(
+                shift,
+                notice,
+                now_utc
+            )
+            _insert_initial_staff_notice_occurrence(
+                conn,
+                notice=notice,
+                schedule_id=schedule["schedule_id"],
+                occurrence_kind="Shift",
+                occurrence_date=shift["shift_date"],
+                planned_client_id=shift["client_id"],
+                planned_shift_type=shift["shift_type"],
+                shift_id=shift_id,
+                is_specific_shift_occurrence=int(
+                    schedule["shift_applicability"] == "Specific Shift"
+                ),
+                visible_from_at_utc=(
+                    format_staff_notice_utc_datetime(visible_from)
+                    if visible_from is not None else None
+                ),
+                due_at_utc=(
+                    format_staff_notice_utc_datetime(due_at)
+                    if due_at is not None else None
+                ),
+                due_at_is_provisional=int(due_at is not None),
+                occurrence_status=_staff_notice_occurrence_status(
+                    visible_from,
+                    now_utc
+                ),
+                created_at_utc=reconciled_at_utc,
+                shift_bound_at_utc=reconciled_at_utc
+            )
+            result["occurrences_created"] += 1
+            occurrence_row = conn.execute("""
+                SELECT *
+                FROM staff_notice_occurrences
+                WHERE schedule_id = ?
+                  AND occurrence_kind = 'Shift'
+                  AND shift_id = ?
+            """, (schedule["schedule_id"], shift_id)).fetchone()
+
+        occurrence = dict(occurrence_row)
+        eligibility_cutoff_at_utc = (
+            _staff_notice_delivery_eligibility_cutoff(
+                occurrence,
+                reconciled_at_utc
+            )
+        )
+        eligible_user_ids = _load_initial_staff_notice_delivery_user_ids(
+            conn,
+            notice["notice_id"],
+            occurrence,
+            eligibility_cutoff_at_utc
+        )
+        if signed_on_user_id in eligible_user_ids:
+            result["deliveries_assigned"] += _assign_staff_notice_delivery(
+                conn,
+                notice,
+                occurrence,
+                signed_on_user_id,
+                reconciled_at_utc,
+                eligibility_cutoff_at_utc
+            )
+
+    return result
+
+
 def _load_published_staff_notices_for_reconciliation(conn):
     notice_ids = [
         row["notice_id"]
@@ -7286,7 +7570,12 @@ def dashboard():
             **inbox
         )
 
-    shift_id, start_checklist_completed = auto_sign_on_user(session["user_id"])
+    try:
+        shift_id, start_checklist_completed = auto_sign_on_user(
+            session["user_id"]
+        )
+    except StaffNoticeShiftSignOnError as error:
+        return str(error), 503
 
     if not start_checklist_completed:
         return redirect(url_for("start_checklist", shift_id=shift_id))
@@ -7627,66 +7916,81 @@ def auto_sign_on_user(user_id):
 
     conn = get_db()
 
-    shift = conn.execute("""
-        SELECT shift_id
-        FROM shifts
-        WHERE client_id = 1
-          AND shift_date = ?
-          AND shift_type = ?
-          AND status = 'Open'
-    """, (shift_date, shift_type)).fetchone()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        shift = conn.execute("""
+            SELECT shift_id
+            FROM shifts
+            WHERE client_id = 1
+              AND shift_date = ?
+              AND shift_type = ?
+              AND status = 'Open'
+        """, (shift_date, shift_type)).fetchone()
 
-    if shift is None:
-        cur = conn.execute("""
-            INSERT INTO shifts
-            (client_id, shift_date, shift_type, status)
-            VALUES (1, ?, ?, 'Open')
-        """, (shift_date, shift_type))
+        if shift is None:
+            cur = conn.execute("""
+                INSERT INTO shifts
+                (client_id, shift_date, shift_type, status)
+                VALUES (1, ?, ?, 'Open')
+            """, (shift_date, shift_type))
 
-        shift_id = cur.lastrowid
-    else:
-        shift_id = shift["shift_id"]
+            shift_id = cur.lastrowid
+        else:
+            shift_id = shift["shift_id"]
 
-    existing = conn.execute("""
-        SELECT shift_staff_id, start_checklist_completed
-        FROM shift_staff
-        WHERE shift_id = ?
-          AND user_id = ?
-          AND active = 1
-    """, (shift_id, user_id)).fetchone()
+        existing = conn.execute("""
+            SELECT shift_staff_id, start_checklist_completed
+            FROM shift_staff
+            WHERE shift_id = ?
+              AND user_id = ?
+              AND active = 1
+        """, (shift_id, user_id)).fetchone()
 
-    if existing is None:
-        cur = conn.execute("""
-            INSERT INTO shift_staff
-            (shift_id, user_id, actual_start_time, active)
-            VALUES (?, ?, ?, 1)
-        """, (
-            shift_id,
-            user_id,
-            actual_start_time
-        ))
+        if existing is None:
+            cur = conn.execute("""
+                INSERT INTO shift_staff
+                (shift_id, user_id, actual_start_time, active)
+                VALUES (?, ?, ?, 1)
+            """, (
+                shift_id,
+                user_id,
+                actual_start_time
+            ))
 
-        shift_staff_id = cur.lastrowid
-        start_checklist_completed = 0
+            shift_staff_id = cur.lastrowid
+            start_checklist_completed = 0
 
-        log_activity(
-         conn,
-            activity_class="SHIFT",
-            activity_type="auto_sign_on",
-            summary=f"User automatically signed onto {shift_type} shift",
-            user_id=user_id,
-            client_id=1,
-            shift_id=shift_id,
-            related_table="shift_staff",
-            related_id=shift_staff_id,
-            success=1
-        )
-    else:
-        shift_staff_id = existing["shift_staff_id"]
-        start_checklist_completed = existing["start_checklist_completed"]
+            reconcile_staff_notice_shift_sign_on(
+                conn,
+                shift_id,
+                user_id,
+                current_datetime.astimezone(timezone.utc)
+            )
+            log_activity(
+                conn,
+                activity_class="SHIFT",
+                activity_type="auto_sign_on",
+                summary=f"User automatically signed onto {shift_type} shift",
+                user_id=user_id,
+                client_id=1,
+                shift_id=shift_id,
+                related_table="shift_staff",
+                related_id=shift_staff_id,
+                success=1
+            )
+        else:
+            shift_staff_id = existing["shift_staff_id"]
+            start_checklist_completed = existing["start_checklist_completed"]
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception as error:
+        if conn.in_transaction:
+            conn.rollback()
+        raise StaffNoticeShiftSignOnError(
+            "Shift sign-on could not be completed. Please try again."
+        ) from error
+    finally:
+        conn.close()
 
     return shift_id, start_checklist_completed
 
@@ -7707,56 +8011,75 @@ def shift_sign_on():
         else:
             conn = get_db()
 
-            # Find an open shift for this date/type/client
-            shift = conn.execute("""
-                SELECT shift_id
-                FROM shifts
-                WHERE client_id = 1
-                  AND shift_date = ?
-                  AND shift_type = ?
-                  AND status = 'Open'
-            """, (shift_date, shift_type)).fetchone()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
 
-            # If no open shift exists, create one
-            if shift is None:
-                cur = conn.execute("""
-                    INSERT INTO shifts
-                    (client_id, shift_date, shift_type, status)
-                    VALUES (1, ?, ?, 'Open')
-                """, (shift_date, shift_type))
+                # Find an open shift for this date/type/client
+                shift = conn.execute("""
+                    SELECT shift_id
+                    FROM shifts
+                    WHERE client_id = 1
+                      AND shift_date = ?
+                      AND shift_type = ?
+                      AND status = 'Open'
+                """, (shift_date, shift_type)).fetchone()
 
-                shift_id = cur.lastrowid
-            else:
-                shift_id = shift["shift_id"]
+                # If no open shift exists, create one
+                if shift is None:
+                    cur = conn.execute("""
+                        INSERT INTO shifts
+                        (client_id, shift_date, shift_type, status)
+                        VALUES (1, ?, ?, 'Open')
+                    """, (shift_date, shift_type))
 
-            # Check if this user is already signed on to this shift
-            existing = conn.execute("""
-                SELECT shift_staff_id
-                FROM shift_staff
-                WHERE shift_id = ?
-                  AND user_id = ?
-                  AND active = 1
-            """, (shift_id, session["user_id"])).fetchone()
+                    shift_id = cur.lastrowid
+                else:
+                    shift_id = shift["shift_id"]
 
-            if existing:
+                # Check if this user is already signed on to this shift
+                existing = conn.execute("""
+                    SELECT shift_staff_id
+                    FROM shift_staff
+                    WHERE shift_id = ?
+                      AND user_id = ?
+                      AND active = 1
+                """, (shift_id, session["user_id"])).fetchone()
+
+                if existing:
+                    conn.rollback()
+                    return redirect(
+                        url_for("shift_dashboard", shift_id=shift_id)
+                    )
+
+                # Sign user onto the shift
+                conn.execute("""
+                    INSERT INTO shift_staff
+                    (shift_id, user_id, actual_start_time, active)
+                    VALUES (?, ?, ?, 1)
+                """, (
+                    shift_id,
+                    session["user_id"],
+                    actual_start_time
+                ))
+                reconcile_staff_notice_shift_sign_on(
+                    conn,
+                    shift_id,
+                    session["user_id"],
+                    get_application_now_utc()
+                )
+                conn.commit()
+                return redirect(
+                    url_for("shift_dashboard", shift_id=shift_id)
+                )
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                error = (
+                    "Shift sign-on could not be completed. "
+                    "Please try again."
+                )
+            finally:
                 conn.close()
-                return redirect(url_for("shift_dashboard", shift_id=shift_id))
-
-            # Sign user onto the shift
-            conn.execute("""
-                INSERT INTO shift_staff
-                (shift_id, user_id, actual_start_time, active)
-                VALUES (?, ?, ?, 1)
-            """, (
-                shift_id,
-                session["user_id"],
-                actual_start_time
-            ))
-
-            conn.commit()
-            conn.close()
-
-            return redirect(url_for("shift_dashboard", shift_id=shift_id))
 
     return render_template("shift_sign_on.html", error=error)
 
