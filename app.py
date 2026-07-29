@@ -5931,7 +5931,11 @@ def _assign_staff_notice_delivery(
     occurrence,
     user_id,
     assigned_at_utc,
-    eligibility_cutoff_at_utc
+    eligibility_cutoff_at_utc,
+    *,
+    restore_existing=False,
+    transition_actor_user_id=None,
+    transition_reason=None
 ):
     cursor = conn.execute("""
         INSERT INTO staff_notice_deliveries
@@ -5952,6 +5956,35 @@ def _assign_staff_notice_delivery(
         eligibility_cutoff_at_utc
     ))
     if cursor.rowcount != 1:
+        if restore_existing:
+            existing = conn.execute("""
+                SELECT
+                    d.*,
+                    o.shift_id,
+                    sn.notice_id,
+                    sn.title,
+                    sn.client_id
+                FROM staff_notice_deliveries d
+                JOIN staff_notice_occurrences o
+                    ON d.occurrence_id = o.occurrence_id
+                JOIN staff_notice_schedules sns
+                    ON o.schedule_id = sns.schedule_id
+                JOIN staff_notices sn
+                    ON sns.notice_id = sn.notice_id
+                WHERE d.occurrence_id = ?
+                  AND d.user_id = ?
+            """, (
+                occurrence["occurrence_id"],
+                user_id
+            )).fetchone()
+            if existing is not None:
+                _restore_staff_notice_delivery_for_shift_assignment(
+                    conn,
+                    dict(existing),
+                    transition_actor_user_id,
+                    transition_reason,
+                    assigned_at_utc
+                )
         return 0
 
     delivery_id = cursor.lastrowid
@@ -6357,6 +6390,11 @@ def reconcile_staff_notice_shift_sign_on(
             """, (schedule["schedule_id"], shift_id)).fetchone()
 
         occurrence = dict(occurrence_row)
+        if occurrence["occurrence_status"] in (
+            "No Shift Occurred",
+            "Cancelled"
+        ):
+            continue
         eligibility_cutoff_at_utc = (
             _staff_notice_delivery_eligibility_cutoff(
                 occurrence,
@@ -6376,7 +6414,10 @@ def reconcile_staff_notice_shift_sign_on(
                 occurrence,
                 signed_on_user_id,
                 reconciled_at_utc,
-                eligibility_cutoff_at_utc
+                eligibility_cutoff_at_utc,
+                restore_existing=True,
+                transition_actor_user_id=signed_on_user_id,
+                transition_reason="Worker assigned to shift."
             )
 
     return result
@@ -6532,6 +6573,124 @@ def _revoke_staff_notice_delivery_access(
         effective_at_utc=effective_at_utc
     )
     return 1
+
+
+def _restore_staff_notice_delivery_for_shift_assignment(
+    conn,
+    delivery,
+    actor_user_id,
+    reason,
+    effective_at_utc
+):
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("A Staff Notice reinstatement reason is required.")
+
+    reason = reason.strip()
+    effective_at_utc = format_staff_notice_utc_datetime(effective_at_utc)
+    result = {
+        "deliveries_reinstated": 0,
+        "delivery_access_restored": 0
+    }
+
+    if delivery["requirement_status"] == "No Longer Required":
+        cursor = conn.execute("""
+            UPDATE staff_notice_deliveries
+            SET requirement_status = 'Required',
+                status_changed_at_utc = ?,
+                status_changed_by_user_id = ?,
+                current_reason_code = 'Shift Assignment Restored',
+                current_reason_text = ?
+            WHERE delivery_id = ?
+              AND requirement_status = 'No Longer Required'
+        """, (
+            effective_at_utc,
+            actor_user_id,
+            reason,
+            delivery["delivery_id"]
+        ))
+        if cursor.rowcount == 1:
+            conn.execute("""
+                INSERT INTO staff_notice_delivery_history
+                (
+                    delivery_id,
+                    event_type,
+                    previous_requirement_status,
+                    new_requirement_status,
+                    previous_recipient_access,
+                    new_recipient_access,
+                    reason_code,
+                    reason_text,
+                    changed_by_user_id,
+                    changed_at_utc
+                )
+                VALUES (?, 'Reinstated', 'No Longer Required',
+                        'Required', NULL, NULL, ?, ?, ?, ?)
+            """, (
+                delivery["delivery_id"],
+                "Shift Assignment Restored",
+                reason,
+                actor_user_id,
+                effective_at_utc
+            ))
+            _log_staff_notice_delivery_transition(
+                conn,
+                activity_type="staff_notice_delivery_reinstated",
+                summary="Staff Notice delivery reinstated",
+                delivery=delivery,
+                actor_user_id=actor_user_id,
+                reason=reason,
+                effective_at_utc=effective_at_utc
+            )
+            result["deliveries_reinstated"] = 1
+
+    if (
+        delivery["requirement_status"] != "Cancelled"
+        and delivery["recipient_access"] == 0
+    ):
+        cursor = conn.execute("""
+            UPDATE staff_notice_deliveries
+            SET recipient_access = 1,
+                access_revoked_at_utc = NULL
+            WHERE delivery_id = ?
+              AND recipient_access = 0
+              AND requirement_status <> 'Cancelled'
+        """, (delivery["delivery_id"],))
+        if cursor.rowcount == 1:
+            conn.execute("""
+                INSERT INTO staff_notice_delivery_history
+                (
+                    delivery_id,
+                    event_type,
+                    previous_requirement_status,
+                    new_requirement_status,
+                    previous_recipient_access,
+                    new_recipient_access,
+                    reason_code,
+                    reason_text,
+                    changed_by_user_id,
+                    changed_at_utc
+                )
+                VALUES (?, 'Access Restored', NULL, NULL, 0, 1,
+                        ?, ?, ?, ?)
+            """, (
+                delivery["delivery_id"],
+                "Shift Assignment Restored",
+                reason,
+                actor_user_id,
+                effective_at_utc
+            ))
+            _log_staff_notice_delivery_transition(
+                conn,
+                activity_type="staff_notice_delivery_access_restored",
+                summary="Staff Notice delivery access restored",
+                delivery=delivery,
+                actor_user_id=actor_user_id,
+                reason=reason,
+                effective_at_utc=effective_at_utc
+            )
+            result["delivery_access_restored"] = 1
+
+    return result
 
 
 def remove_shift_staff_assignment(
@@ -7417,11 +7576,27 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
                 d.*,
                 o.due_at_utc,
                 o.occurrence_status,
+                o.shift_id,
                 recipient.full_name AS recipient_name,
                 recipient.role AS recipient_role,
+                recipient.active AS recipient_active,
                 viewer.full_name AS viewer_name,
                 ack.acknowledgement_id,
-                ack.acknowledged_at
+                ack.acknowledged_at,
+                (
+                    SELECT MIN(ss.shift_staff_id)
+                    FROM shift_staff ss
+                    WHERE ss.shift_id = o.shift_id
+                      AND ss.user_id = d.user_id
+                      AND ss.active = 1
+                ) AS active_shift_staff_id,
+                (
+                    SELECT COUNT(*)
+                    FROM shift_staff ss
+                    WHERE ss.shift_id = o.shift_id
+                      AND ss.user_id = d.user_id
+                      AND ss.active = 1
+                ) AS active_shift_staff_count
             FROM staff_notice_deliveries d
             JOIN staff_notice_occurrences o
                 ON d.occurrence_id = o.occurrence_id
@@ -7466,6 +7641,21 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
                 "Viewed – Awaiting Acknowledgement"
             )
             and delivery["requirement_status"] == "Required"
+        )
+        delivery["can_remove_shift_assignment"] = (
+            delivery["shift_id"] is not None
+            and delivery["active_shift_staff_count"] == 1
+            and delivery["occurrence_status"]
+            not in ("No Shift Occurred", "Cancelled")
+        )
+        delivery["can_reinstate"] = (
+            delivery["can_remove_shift_assignment"]
+            and delivery["recipient_active"] == 1
+            and delivery["requirement_status"] != "Cancelled"
+            and (
+                delivery["requirement_status"] == "No Longer Required"
+                or delivery["recipient_access"] == 0
+            )
         )
         for field_name, display_name in (
             ("assigned_at_utc", "assigned_display"),
@@ -8525,8 +8715,225 @@ def staff_notice_tracking(notice_id):
 
     return render_template(
         "staff_notice_tracking.html",
+        recipient_change_result=request.args.get(
+            "recipient_change_result"
+        ),
         **tracking
     )
+
+
+def _load_staff_notice_shift_delivery_management_context(
+    conn,
+    delivery_id
+):
+    row = conn.execute("""
+        SELECT
+            d.*,
+            o.shift_id,
+            o.occurrence_status,
+            sns.notice_id,
+            sn.title,
+            sn.status AS notice_status,
+            sn.client_id,
+            (
+                SELECT MIN(ss.shift_staff_id)
+                FROM shift_staff ss
+                WHERE ss.shift_id = o.shift_id
+                  AND ss.user_id = d.user_id
+                  AND ss.active = 1
+            ) AS active_shift_staff_id,
+            (
+                SELECT COUNT(*)
+                FROM shift_staff ss
+                WHERE ss.shift_id = o.shift_id
+                  AND ss.user_id = d.user_id
+                  AND ss.active = 1
+            ) AS active_shift_staff_count
+        FROM staff_notice_deliveries d
+        JOIN staff_notice_occurrences o
+            ON d.occurrence_id = o.occurrence_id
+        JOIN staff_notice_schedules sns
+            ON o.schedule_id = sns.schedule_id
+        JOIN staff_notices sn
+            ON sns.notice_id = sn.notice_id
+        WHERE d.delivery_id = ?
+    """, (delivery_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+@app.route(
+    "/staff-notices/delivery/<int:delivery_id>/no-longer-required",
+    methods=["POST"]
+)
+def staff_notice_delivery_no_longer_required(delivery_id):
+    access_response = _staff_notice_management_access_response()
+    if access_response is not None:
+        return access_response
+
+    if request.form.get("confirm_removal") != "yes":
+        return "Confirm the worker removal before continuing.", 400
+    reason = request.form.get("reason", "")
+    if not reason.strip():
+        return "A worker-removal reason is required.", 400
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        delivery = _load_staff_notice_shift_delivery_management_context(
+            conn,
+            delivery_id
+        )
+        if delivery is None:
+            conn.rollback()
+            return "Staff Notice delivery not found", 404
+        if (
+            delivery["notice_status"] != "Published"
+            or delivery["shift_id"] is None
+            or delivery["occurrence_status"]
+            in ("No Shift Occurred", "Cancelled")
+        ):
+            conn.rollback()
+            return "This delivery cannot be removed from a shift.", 409
+        if delivery["active_shift_staff_count"] != 1:
+            conn.rollback()
+            return (
+                "The active shift assignment changed. Reload and retry.",
+                409
+            )
+
+        result = remove_shift_staff_assignment(
+            conn,
+            delivery["active_shift_staff_id"],
+            session["user_id"],
+            reason,
+            get_application_now_utc()
+        )
+        if result["assignments_removed"] != 1:
+            conn.rollback()
+            return (
+                "The active shift assignment changed. Reload and retry.",
+                409
+            )
+        conn.commit()
+        return redirect(url_for(
+            "staff_notice_tracking",
+            notice_id=delivery["notice_id"],
+            recipient_change_result="removed"
+        ))
+    except (ValueError, LookupError):
+        if conn.in_transaction:
+            conn.rollback()
+        return "The worker removal request is invalid.", 400
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "The worker could not be removed. No changes were made. "
+            "Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/staff-notices/delivery/<int:delivery_id>/reinstate",
+    methods=["POST"]
+)
+def staff_notice_delivery_reinstate(delivery_id):
+    access_response = _staff_notice_management_access_response()
+    if access_response is not None:
+        return access_response
+
+    if request.form.get("confirm_reinstatement") != "yes":
+        return "Confirm the reinstatement before continuing.", 400
+    reason = request.form.get("reason", "")
+    if not reason.strip():
+        return "A reinstatement reason is required.", 400
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        delivery = _load_staff_notice_shift_delivery_management_context(
+            conn,
+            delivery_id
+        )
+        if delivery is None:
+            conn.rollback()
+            return "Staff Notice delivery not found", 404
+        if (
+            delivery["notice_status"] != "Published"
+            or delivery["shift_id"] is None
+            or delivery["occurrence_status"]
+            in ("No Shift Occurred", "Cancelled")
+            or delivery["requirement_status"] == "Cancelled"
+        ):
+            conn.rollback()
+            return "This delivery cannot be reinstated.", 409
+        if delivery["active_shift_staff_count"] != 1:
+            conn.rollback()
+            return (
+                "An active eligible shift assignment is required.",
+                409
+            )
+        notice = _load_staff_notice_publish_record(
+            conn,
+            delivery["notice_id"]
+        )
+        eligible_user_ids = _load_initial_staff_notice_delivery_user_ids(
+            conn,
+            delivery["notice_id"],
+            {
+                "occurrence_kind": "Shift",
+                "shift_id": delivery["shift_id"]
+            },
+            delivery["eligibility_cutoff_at_utc"]
+        )
+        if (
+            notice is None
+            or delivery["user_id"] not in eligible_user_ids
+        ):
+            conn.rollback()
+            return (
+                "The worker is not eligible for this Staff Notice "
+                "occurrence.",
+                409
+            )
+
+        result = _restore_staff_notice_delivery_for_shift_assignment(
+            conn,
+            delivery,
+            session["user_id"],
+            reason,
+            get_application_now_utc()
+        )
+        if not any(result.values()):
+            conn.rollback()
+            return redirect(url_for(
+                "staff_notice_tracking",
+                notice_id=delivery["notice_id"],
+                recipient_change_result="unchanged"
+            ))
+        conn.commit()
+        return redirect(url_for(
+            "staff_notice_tracking",
+            notice_id=delivery["notice_id"],
+            recipient_change_result="reinstated"
+        ))
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "The reinstatement request is invalid.", 400
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "The delivery could not be reinstated. No changes were made. "
+            "Please retry.",
+            503
+        )
+    finally:
+        conn.close()
 
 
 @app.route("/staff-notices/<int:notice_id>/review")

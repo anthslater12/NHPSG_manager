@@ -13,6 +13,7 @@
                     <th>Acknowledged</th>
                     <th>Access / Reason</th>
                     <th>Compliance History</th>
+                    <th>Recipient Action</th>
                 </tr>
                 {% for delivery in deliveries %}
                     <tr>
@@ -117,6 +118,60 @@
                                 —
                             {% endif %}
                         </td>
+                        <td>
+                            {% if delivery.can_reinstate %}
+                                <form method="post"
+                                      action="{{ url_for(
+                                          'staff_notice_delivery_reinstate',
+                                          delivery_id=delivery.delivery_id
+                                      ) }}">
+                                    <label>
+                                        Reason
+                                        <input type="text"
+                                               name="reason"
+                                               required>
+                                    </label>
+                                    <label>
+                                        <input type="checkbox"
+                                               name="confirm_reinstatement"
+                                               value="yes"
+                                               required>
+                                        Restore this existing delivery and
+                                        preserve its compliance history.
+                                    </label>
+                                    <button type="submit">
+                                        Reinstate Delivery
+                                    </button>
+                                </form>
+                            {% elif delivery.can_remove_shift_assignment %}
+                                <form method="post"
+                                      action="{{ url_for(
+                                          'staff_notice_delivery_no_longer_required',
+                                          delivery_id=delivery.delivery_id
+                                      ) }}">
+                                    <label>
+                                        Removal reason
+                                        <input type="text"
+                                               name="reason"
+                                               required>
+                                    </label>
+                                    <label>
+                                        <input type="checkbox"
+                                               name="confirm_removal"
+                                               value="yes"
+                                               required>
+                                        Remove this worker from the shift,
+                                        revoke Staff Notice access, and
+                                        preserve all compliance history.
+                                    </label>
+                                    <button type="submit">
+                                        Remove Worker
+                                    </button>
+                                </form>
+                            {% else %}
+                                No recipient action available
+                            {% endif %}
+                        </td>
                     </tr>
                 {% endfor %}
             </table>
@@ -138,6 +193,23 @@
     <h2>Recipient Tracking</h2>
     <h3>{{ notice.title }}</h3>
     <p><small>All displayed dates and times use America/Vancouver.</small></p>
+    {% if recipient_change_result == "removed" %}
+        <p class="success">
+            The worker was removed from the shift. Their historical
+            compliance record was preserved.
+        </p>
+    {% elif recipient_change_result == "reinstated" %}
+        <p class="success">
+            The existing delivery was reinstated with its history preserved.
+        </p>
+    {% elif recipient_change_result == "unchanged" %}
+        <p>No change was required.</p>
+    {% endif %}
+    <p>
+        Replacement workers receive their own Staff Notice delivery through
+        the authoritative shift sign-on workflow. Compliance history is never
+        transferred between workers.
+    </p>
 
     <table class="management-detail-table">
         <tr>
