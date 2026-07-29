@@ -1429,6 +1429,10 @@ class StaffNoticeAcknowledgementInvalidationConflictError(ValueError):
     pass
 
 
+class StaffNoticeManagementLifecycleConflictError(ValueError):
+    pass
+
+
 class StaffNoticeShiftSignOnError(RuntimeError):
     pass
 
@@ -5277,6 +5281,38 @@ def _staff_notice_shift_occurrence_times(shift, notice, now_utc):
     return visible_from, due_at
 
 
+def _staff_notice_pending_shift_expected_end_at_utc(occurrence):
+    try:
+        shift_date = datetime.strptime(
+            occurrence["occurrence_date"],
+            "%Y-%m-%d"
+        ).date()
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "The pending Staff Notice occurrence date is invalid."
+        ) from error
+
+    shift_type = occurrence.get("planned_shift_type")
+    expected_end_clocks = {
+        "Day": datetime.strptime("15:00", "%H:%M").time(),
+        "Afternoon": datetime.strptime("23:00", "%H:%M").time(),
+        "Overnight": datetime.strptime("07:00", "%H:%M").time()
+    }
+    if shift_type not in expected_end_clocks:
+        raise ValueError(
+            "The pending Staff Notice occurrence shift type is invalid."
+        )
+    if shift_type == "Overnight":
+        shift_date += timedelta(days=1)
+
+    expected_end_local = _staff_notice_resolve_local_shift_datetime(
+        shift_date,
+        expected_end_clocks[shift_type],
+        "Expected shift end"
+    )
+    return expected_end_local.astimezone(timezone.utc)
+
+
 def _log_staff_notice_occurrence_created(
     conn,
     notice,
@@ -6246,6 +6282,41 @@ def _log_staff_notice_occurrence_bound(
     )
 
 
+def _log_staff_notice_no_shift_correction(
+    conn,
+    notice,
+    occurrence,
+    shift_id,
+    new_status,
+    actor_user_id,
+    corrected_at_utc
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_no_shift_correction",
+        summary=(
+            "Staff Notice No Shift Occurred corrected: "
+            f"{notice['title']}"
+        ),
+        user_id=actor_user_id,
+        client_id=notice["client_id"],
+        shift_id=shift_id,
+        related_table="staff_notice_occurrences",
+        related_id=occurrence["occurrence_id"],
+        details=(
+            f"Notice ID: {notice['notice_id']}; "
+            f"Occurrence ID: {occurrence['occurrence_id']}; "
+            f"Shift ID: {shift_id}; "
+            f"Previous status: No Shift Occurred; "
+            f"New status: {new_status}; "
+            f"Original reason: {occurrence['status_reason']}; "
+            f"Effective at UTC: {corrected_at_utc}"
+        ),
+        success=1
+    )
+
+
 def reconcile_staff_notice_shift_sign_on(
     conn,
     shift_id,
@@ -6293,10 +6364,43 @@ def reconcile_staff_notice_shift_sign_on(
 
     result = _staff_notice_reconciliation_result()
     for notice in _load_published_staff_notices_for_reconciliation(conn):
-        if not _staff_notice_applies_to_shift(notice, shift, now_utc):
+        schedule = notice["schedule"]
+        existing_specific_occurrence = None
+        if (
+            schedule is not None
+            and schedule["shift_applicability"] == "Specific Shift"
+        ):
+            existing_specific_occurrence = conn.execute("""
+                SELECT occurrence_id
+                FROM staff_notice_occurrences
+                WHERE schedule_id = ?
+                  AND occurrence_kind = 'Shift'
+                  AND shift_id IS NULL
+                  AND planned_client_id = ?
+                  AND occurrence_date = ?
+                  AND planned_shift_type = ?
+                  AND occurrence_status IN (
+                      'Pending Shift',
+                      'No Shift Occurred'
+                  )
+                ORDER BY occurrence_id
+                LIMIT 1
+            """, (
+                schedule["schedule_id"],
+                shift["client_id"],
+                shift["shift_date"],
+                shift["shift_type"]
+            )).fetchone()
+        if (
+            existing_specific_occurrence is None
+            and not _staff_notice_applies_to_shift(
+                notice,
+                shift,
+                now_utc
+            )
+        ):
             continue
 
-        schedule = notice["schedule"]
         occurrence_row = conn.execute("""
             SELECT *
             FROM staff_notice_occurrences
@@ -6310,6 +6414,17 @@ def reconcile_staff_notice_shift_sign_on(
         if occurrence_row is None and (
             schedule["shift_applicability"] == "Specific Shift"
         ):
+            exact_shift_count = conn.execute("""
+                SELECT COUNT(*) AS matching_shift_count
+                FROM shifts
+                WHERE client_id = ?
+                  AND shift_date = ?
+                  AND shift_type = ?
+            """, (
+                shift["client_id"],
+                shift["shift_date"],
+                shift["shift_type"]
+            )).fetchone()["matching_shift_count"]
             pending_row = conn.execute("""
                 SELECT *
                 FROM staff_notice_occurrences
@@ -6319,7 +6434,10 @@ def reconcile_staff_notice_shift_sign_on(
                   AND planned_client_id = ?
                   AND occurrence_date = ?
                   AND planned_shift_type = ?
-                  AND occurrence_status = 'Pending Shift'
+                  AND occurrence_status IN (
+                      'Pending Shift',
+                      'No Shift Occurred'
+                  )
                 ORDER BY occurrence_id
                 LIMIT 1
             """, (
@@ -6328,7 +6446,10 @@ def reconcile_staff_notice_shift_sign_on(
                 shift["shift_date"],
                 shift["shift_type"]
             )).fetchone()
-            if pending_row is not None:
+            if pending_row is not None and exact_shift_count != 1:
+                continue
+            if pending_row is not None and exact_shift_count == 1:
+                pending_occurrence = dict(pending_row)
                 visible_from, due_at = _staff_notice_shift_occurrence_times(
                     shift,
                     notice,
@@ -6342,6 +6463,10 @@ def reconcile_staff_notice_shift_sign_on(
                     format_staff_notice_utc_datetime(due_at)
                     if due_at is not None else None
                 )
+                new_status = _staff_notice_occurrence_status(
+                    visible_from,
+                    now_utc
+                )
                 cursor = conn.execute("""
                     UPDATE staff_notice_occurrences
                     SET shift_id = ?,
@@ -6349,31 +6474,60 @@ def reconcile_staff_notice_shift_sign_on(
                         due_at_utc = ?,
                         due_at_is_provisional = ?,
                         occurrence_status = ?,
-                        shift_bound_at_utc = ?
+                        shift_bound_at_utc = ?,
+                        status_reason = NULL,
+                        status_changed_at_utc = ?,
+                        status_changed_by_user_id = ?
                     WHERE occurrence_id = ?
                       AND shift_id IS NULL
-                      AND occurrence_status = 'Pending Shift'
+                      AND occurrence_status = ?
                 """, (
                     shift_id,
                     visible_from_at_utc,
                     due_at_utc,
                     int(due_at is not None),
-                    _staff_notice_occurrence_status(visible_from, now_utc),
+                    new_status,
                     reconciled_at_utc,
-                    pending_row["occurrence_id"]
+                    (
+                        reconciled_at_utc
+                        if pending_occurrence["occurrence_status"]
+                        == "No Shift Occurred"
+                        else pending_occurrence["status_changed_at_utc"]
+                    ),
+                    (
+                        signed_on_user_id
+                        if pending_occurrence["occurrence_status"]
+                        == "No Shift Occurred"
+                        else pending_occurrence["status_changed_by_user_id"]
+                    ),
+                    pending_occurrence["occurrence_id"],
+                    pending_occurrence["occurrence_status"]
                 ))
                 if cursor.rowcount == 1:
+                    if (
+                        pending_occurrence["occurrence_status"]
+                        == "No Shift Occurred"
+                    ):
+                        _log_staff_notice_no_shift_correction(
+                            conn,
+                            notice,
+                            pending_occurrence,
+                            shift_id,
+                            new_status,
+                            signed_on_user_id,
+                            reconciled_at_utc
+                        )
                     _log_staff_notice_occurrence_bound(
                         conn,
                         notice,
-                        pending_row["occurrence_id"],
+                        pending_occurrence["occurrence_id"],
                         shift_id
                     )
                 occurrence_row = conn.execute("""
                     SELECT *
                     FROM staff_notice_occurrences
                     WHERE occurrence_id = ?
-                """, (pending_row["occurrence_id"],)).fetchone()
+                """, (pending_occurrence["occurrence_id"],)).fetchone()
 
         if occurrence_row is None:
             visible_from, due_at = _staff_notice_shift_occurrence_times(
@@ -6487,14 +6641,15 @@ def _mark_staff_notice_delivery_no_longer_required(
     delivery,
     actor_user_id,
     reason,
-    effective_at_utc
+    effective_at_utc,
+    reason_code="Shift Assignment Removed"
 ):
     cursor = conn.execute("""
         UPDATE staff_notice_deliveries
         SET requirement_status = 'No Longer Required',
             status_changed_at_utc = ?,
             status_changed_by_user_id = ?,
-            current_reason_code = 'Shift Assignment Removed',
+            current_reason_code = ?,
             current_reason_text = ?
         WHERE delivery_id = ?
           AND requirement_status = 'Required'
@@ -6509,6 +6664,7 @@ def _mark_staff_notice_delivery_no_longer_required(
     """, (
         effective_at_utc,
         actor_user_id,
+        reason_code,
         reason,
         delivery["delivery_id"]
     ))
@@ -6533,7 +6689,7 @@ def _mark_staff_notice_delivery_no_longer_required(
                 'No Longer Required', NULL, NULL, ?, ?, ?, ?)
     """, (
         delivery["delivery_id"],
-        "Shift Assignment Removed",
+        reason_code,
         reason,
         actor_user_id,
         effective_at_utc
@@ -7565,7 +7721,14 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
                 s.shift_date,
                 s.shift_type,
                 shift_client.client_name AS shift_client_name,
-                planned_client.client_name AS planned_client_name
+                planned_client.client_name AS planned_client_name,
+                (
+                    SELECT COUNT(*)
+                    FROM shifts exact_shift
+                    WHERE exact_shift.client_id = o.planned_client_id
+                      AND exact_shift.shift_date = o.occurrence_date
+                      AND exact_shift.shift_type = o.planned_shift_type
+                ) AS exact_matching_shift_count
             FROM staff_notice_occurrences o
             JOIN staff_notice_schedules sns
                 ON o.schedule_id = sns.schedule_id
@@ -7603,6 +7766,25 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
             else None
         )
         occurrence["deliveries"] = []
+        occurrence["can_confirm_no_shift_occurred"] = False
+        occurrence["expected_shift_end_display"] = None
+        if (
+            occurrence["occurrence_kind"] == "Shift"
+            and occurrence["is_specific_shift_occurrence"] == 1
+            and occurrence["shift_id"] is None
+            and occurrence["occurrence_status"] == "Pending Shift"
+        ):
+            expected_shift_end = (
+                _staff_notice_pending_shift_expected_end_at_utc(occurrence)
+            )
+            occurrence["expected_shift_end_display"] = (
+                format_staff_notice_local_datetime(expected_shift_end)
+            )
+            occurrence["can_confirm_no_shift_occurred"] = (
+                notice["status"] == "Published"
+                and occurrence["exact_matching_shift_count"] == 0
+                and expected_shift_end < now_utc
+            )
         occurrence_by_id[occurrence["occurrence_id"]] = occurrence
 
     deliveries = [
@@ -7693,6 +7875,13 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
                 delivery["requirement_status"] == "No Longer Required"
                 or delivery["recipient_access"] == 0
             )
+        )
+        delivery["can_mark_no_longer_required"] = (
+            notice["status"] == "Published"
+            and delivery["requirement_status"] == "Required"
+            and delivery["acknowledgement_id"] is None
+            and delivery["occurrence_status"]
+            not in ("No Shift Occurred", "Cancelled")
         )
         delivery["can_invalidate_acknowledgement"] = (
             delivery["acknowledgement_id"] is not None
@@ -8776,6 +8965,10 @@ def staff_notice_tracking(notice_id):
         acknowledgement_invalidation_result=request.args.get(
             "acknowledgement_invalidation_result"
         ),
+        manual_requirement_result=request.args.get(
+            "manual_requirement_result"
+        ),
+        no_shift_result=request.args.get("no_shift_result"),
         **tracking
     )
 
@@ -9992,6 +10185,230 @@ def staff_notice_replace(notice_id):
     ))
 
 
+def _log_staff_notice_no_shift_occurred(
+    conn,
+    occurrence,
+    actor_user_id,
+    reason,
+    changed_at_utc
+):
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_no_shift_occurred",
+        summary=(
+            "Staff Notice confirmed with no shift occurrence: "
+            f"{occurrence['title']}"
+        ),
+        user_id=actor_user_id,
+        client_id=occurrence["planned_client_id"],
+        shift_id=None,
+        related_table="staff_notice_occurrences",
+        related_id=occurrence["occurrence_id"],
+        details=(
+            f"Notice ID: {occurrence['notice_id']}; "
+            f"Occurrence ID: {occurrence['occurrence_id']}; "
+            f"Planned client ID: {occurrence['planned_client_id']}; "
+            f"Occurrence date: {occurrence['occurrence_date']}; "
+            f"Planned shift type: {occurrence['planned_shift_type']}; "
+            "Previous status: Pending Shift; "
+            "New status: No Shift Occurred; "
+            f"Reason: {reason}; Effective at UTC: {changed_at_utc}"
+        ),
+        success=1
+    )
+
+
+def confirm_staff_notice_no_shift_occurred(
+    conn,
+    occurrence_id,
+    actor_user_id,
+    reason,
+    changed_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "No Shift Occurred confirmation requires an active transaction."
+        )
+    if not _is_valid_staff_notice_identifier(occurrence_id):
+        raise ValueError("A valid Staff Notice occurrence is required.")
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise ValueError("A valid management actor is required.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("A No Shift Occurred reason is required.")
+
+    reason = reason.strip()
+    changed_at_utc = format_staff_notice_utc_datetime(changed_at_utc)
+    now_utc = parse_staff_notice_utc_datetime(changed_at_utc)
+    occurrence_row = conn.execute("""
+        SELECT
+            o.*,
+            sns.notice_id,
+            sn.title,
+            sn.status AS notice_status
+        FROM staff_notice_occurrences o
+        JOIN staff_notice_schedules sns
+            ON o.schedule_id = sns.schedule_id
+        JOIN staff_notices sn
+            ON sns.notice_id = sn.notice_id
+        WHERE o.occurrence_id = ?
+    """, (occurrence_id,)).fetchone()
+    if occurrence_row is None:
+        raise LookupError("Staff Notice occurrence not found.")
+    occurrence = dict(occurrence_row)
+    if occurrence["occurrence_status"] == "No Shift Occurred":
+        return {
+            "occurrence_changed": 0,
+            "notice_id": occurrence["notice_id"]
+        }
+    if (
+        occurrence["notice_status"] != "Published"
+        or occurrence["occurrence_kind"] != "Shift"
+        or occurrence["is_specific_shift_occurrence"] != 1
+        or occurrence["shift_id"] is not None
+        or occurrence["occurrence_status"] != "Pending Shift"
+    ):
+        raise StaffNoticeManagementLifecycleConflictError(
+            "This Staff Notice occurrence cannot be marked No Shift "
+            "Occurred."
+        )
+
+    expected_end_at_utc = (
+        _staff_notice_pending_shift_expected_end_at_utc(occurrence)
+    )
+    if now_utc <= expected_end_at_utc:
+        raise StaffNoticeManagementLifecycleConflictError(
+            "The expected shift end has not passed."
+        )
+    exact_matching_shift_count = conn.execute("""
+        SELECT COUNT(*) AS matching_shift_count
+        FROM shifts
+        WHERE client_id = ?
+          AND shift_date = ?
+          AND shift_type = ?
+    """, (
+        occurrence["planned_client_id"],
+        occurrence["occurrence_date"],
+        occurrence["planned_shift_type"]
+    )).fetchone()["matching_shift_count"]
+    if exact_matching_shift_count != 0:
+        raise StaffNoticeManagementLifecycleConflictError(
+            "A matching shift exists. Reload and reconcile the occurrence."
+        )
+
+    cursor = conn.execute("""
+        UPDATE staff_notice_occurrences
+        SET occurrence_status = 'No Shift Occurred',
+            status_reason = ?,
+            status_changed_at_utc = ?,
+            status_changed_by_user_id = ?
+        WHERE occurrence_id = ?
+          AND shift_id IS NULL
+          AND occurrence_status = 'Pending Shift'
+    """, (
+        reason,
+        changed_at_utc,
+        actor_user_id,
+        occurrence_id
+    ))
+    if cursor.rowcount != 1:
+        current = conn.execute("""
+            SELECT occurrence_status
+            FROM staff_notice_occurrences
+            WHERE occurrence_id = ?
+        """, (occurrence_id,)).fetchone()
+        if (
+            current is not None
+            and current["occurrence_status"] == "No Shift Occurred"
+        ):
+            return {
+                "occurrence_changed": 0,
+                "notice_id": occurrence["notice_id"]
+            }
+        raise StaffNoticeManagementLifecycleConflictError(
+            "The Staff Notice occurrence changed. Reload and retry."
+        )
+
+    _log_staff_notice_no_shift_occurred(
+        conn,
+        occurrence,
+        actor_user_id,
+        reason,
+        changed_at_utc
+    )
+    return {
+        "occurrence_changed": 1,
+        "notice_id": occurrence["notice_id"]
+    }
+
+
+@app.route(
+    "/staff-notices/occurrence/<int:occurrence_id>/no-shift-occurred",
+    methods=["POST"]
+)
+def staff_notice_no_shift_occurred(occurrence_id):
+    access_response = _staff_notice_management_access_response()
+    if access_response is not None:
+        return access_response
+
+    if request.form.get("confirm_no_shift_occurred") != "yes":
+        return "Confirm that no shift occurred before continuing.", 400
+    reason = request.form.get("reason", "")
+    if not reason.strip():
+        return "A No Shift Occurred reason is required.", 400
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        changed_at_utc = get_application_now_utc()
+        result = confirm_staff_notice_no_shift_occurred(
+            conn,
+            occurrence_id,
+            session["user_id"],
+            reason,
+            changed_at_utc
+        )
+        conn.commit()
+    except LookupError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Staff Notice occurrence not found", 404
+    except StaffNoticeManagementLifecycleConflictError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 409
+    except ValueError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 400
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return (
+            "No Shift Occurred could not be confirmed. No changes were "
+            "made. Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "staff_notice_tracking",
+        notice_id=result["notice_id"],
+        no_shift_result=(
+            "confirmed" if result["occurrence_changed"] else "unchanged"
+        )
+    ))
+
+
 def _load_staff_notice_shift_delivery_management_context(
     conn,
     delivery_id
@@ -10005,6 +10422,14 @@ def _load_staff_notice_shift_delivery_management_context(
             sn.title,
             sn.status AS notice_status,
             sn.client_id,
+            (
+                SELECT MIN(ack.acknowledgement_id)
+                FROM acknowledgements ack
+                WHERE ack.source_table = 'staff_notice_deliveries'
+                  AND ack.source_id = d.delivery_id
+                  AND ack.user_id = d.user_id
+                  AND ack.active = 1
+            ) AS active_acknowledgement_id,
             (
                 SELECT MIN(ss.shift_staff_id)
                 FROM shift_staff ss
@@ -10029,6 +10454,148 @@ def _load_staff_notice_shift_delivery_management_context(
         WHERE d.delivery_id = ?
     """, (delivery_id,)).fetchone()
     return dict(row) if row is not None else None
+
+
+def mark_staff_notice_delivery_no_longer_required(
+    conn,
+    delivery_id,
+    actor_user_id,
+    reason,
+    effective_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Manual Staff Notice requirement changes require an active "
+            "transaction."
+        )
+    if not _is_valid_staff_notice_identifier(delivery_id):
+        raise ValueError("A valid Staff Notice delivery is required.")
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise ValueError("A valid management actor is required.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("A No Longer Required reason is required.")
+
+    reason = reason.strip()
+    effective_at_utc = format_staff_notice_utc_datetime(effective_at_utc)
+    delivery = _load_staff_notice_shift_delivery_management_context(
+        conn,
+        delivery_id
+    )
+    if delivery is None:
+        raise LookupError("Staff Notice delivery not found.")
+    if delivery["requirement_status"] == "No Longer Required":
+        return {
+            "delivery_changed": 0,
+            "notice_id": delivery["notice_id"]
+        }
+    if (
+        delivery["notice_status"] != "Published"
+        or delivery["occurrence_status"] in (
+            "No Shift Occurred",
+            "Cancelled"
+        )
+        or delivery["requirement_status"] != "Required"
+        or delivery["active_acknowledgement_id"] is not None
+    ):
+        raise StaffNoticeManagementLifecycleConflictError(
+            "This Staff Notice delivery is not an outstanding requirement."
+        )
+
+    changed = _mark_staff_notice_delivery_no_longer_required(
+        conn,
+        delivery,
+        actor_user_id,
+        reason,
+        effective_at_utc,
+        reason_code="Manual No Longer Required"
+    )
+    if changed != 1:
+        current = _load_staff_notice_shift_delivery_management_context(
+            conn,
+            delivery_id
+        )
+        if (
+            current is not None
+            and current["requirement_status"] == "No Longer Required"
+        ):
+            return {
+                "delivery_changed": 0,
+                "notice_id": current["notice_id"]
+            }
+        raise StaffNoticeManagementLifecycleConflictError(
+            "The Staff Notice delivery changed. Reload and retry."
+        )
+    return {
+        "delivery_changed": 1,
+        "notice_id": delivery["notice_id"]
+    }
+
+
+@app.route(
+    "/staff-notices/delivery/<int:delivery_id>/manual-no-longer-required",
+    methods=["POST"]
+)
+def staff_notice_delivery_manual_no_longer_required(delivery_id):
+    access_response = _staff_notice_management_access_response()
+    if access_response is not None:
+        return access_response
+
+    if request.form.get("confirm_no_longer_required") != "yes":
+        return "Confirm the requirement change before continuing.", 400
+    reason = request.form.get("reason", "")
+    if not reason.strip():
+        return "A No Longer Required reason is required.", 400
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        changed_at_utc = get_application_now_utc()
+        result = mark_staff_notice_delivery_no_longer_required(
+            conn,
+            delivery_id,
+            session["user_id"],
+            reason,
+            changed_at_utc
+        )
+        conn.commit()
+    except LookupError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Staff Notice delivery not found", 404
+    except StaffNoticeManagementLifecycleConflictError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 409
+    except ValueError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 400
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return (
+            "The Staff Notice requirement could not be changed. No changes "
+            "were made. Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "staff_notice_tracking",
+        notice_id=result["notice_id"],
+        manual_requirement_result=(
+            "changed" if result["delivery_changed"] else "unchanged"
+        )
+    ))
 
 
 @app.route(

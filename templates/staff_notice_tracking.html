@@ -182,33 +182,63 @@
                                         Reinstate Delivery
                                     </button>
                                 </form>
-                            {% elif delivery.can_remove_shift_assignment %}
-                                <form method="post"
-                                      action="{{ url_for(
-                                          'staff_notice_delivery_no_longer_required',
-                                          delivery_id=delivery.delivery_id
-                                      ) }}">
-                                    <label>
-                                        Removal reason
-                                        <input type="text"
-                                               name="reason"
-                                               required>
-                                    </label>
-                                    <label>
-                                        <input type="checkbox"
-                                               name="confirm_removal"
-                                               value="yes"
-                                               required>
-                                        Remove this worker from the shift,
-                                        revoke Staff Notice access, and
-                                        preserve all compliance history.
-                                    </label>
-                                    <button type="submit">
-                                        Remove Worker
-                                    </button>
-                                </form>
                             {% else %}
-                                No recipient action available
+                                {% if delivery.can_remove_shift_assignment %}
+                                    <form method="post"
+                                          action="{{ url_for(
+                                              'staff_notice_delivery_no_longer_required',
+                                              delivery_id=delivery.delivery_id
+                                          ) }}">
+                                        <label>
+                                            Removal reason
+                                            <input type="text"
+                                                   name="reason"
+                                                   required>
+                                        </label>
+                                        <label>
+                                            <input type="checkbox"
+                                                   name="confirm_removal"
+                                                   value="yes"
+                                                   required>
+                                            Remove this worker from the shift,
+                                            revoke Staff Notice access, and
+                                            preserve all compliance history.
+                                        </label>
+                                        <button type="submit">
+                                            Remove Worker
+                                        </button>
+                                    </form>
+                                {% endif %}
+                                {% if delivery.can_mark_no_longer_required %}
+                                    <form method="post"
+                                          action="{{ url_for(
+                                              'staff_notice_delivery_manual_no_longer_required',
+                                              delivery_id=delivery.delivery_id
+                                          ) }}">
+                                        <label>
+                                            No Longer Required reason
+                                            <input type="text"
+                                                   name="reason"
+                                                   required>
+                                        </label>
+                                        <label>
+                                            <input type="checkbox"
+                                                   name="confirm_no_longer_required"
+                                                   value="yes"
+                                                   required>
+                                            End only this acknowledgement
+                                            requirement. Preserve the worker's
+                                            shift assignment and all history.
+                                        </label>
+                                        <button type="submit">
+                                            Mark No Longer Required
+                                        </button>
+                                    </form>
+                                {% endif %}
+                                {% if not delivery.can_remove_shift_assignment
+                                      and not delivery.can_mark_no_longer_required %}
+                                    No recipient action available
+                                {% endif %}
                             {% endif %}
                         </td>
                     </tr>
@@ -271,6 +301,26 @@
         </p>
     {% elif recipient_change_result == "unchanged" %}
         <p>No change was required.</p>
+    {% endif %}
+    {% if manual_requirement_result == "changed" %}
+        <p class="success">
+            The acknowledgement requirement was marked No Longer Required.
+            The recipient's shift assignment and compliance history were
+            preserved.
+        </p>
+    {% elif manual_requirement_result == "unchanged" %}
+        <p>No change was required because the requirement had already ended.</p>
+    {% endif %}
+    {% if no_shift_result == "confirmed" %}
+        <p class="success">
+            No Shift Occurred was confirmed. The pending occurrence remains
+            available in management history.
+        </p>
+    {% elif no_shift_result == "unchanged" %}
+        <p>
+            No change was required because No Shift Occurred was already
+            confirmed.
+        </p>
     {% endif %}
     <p>
         Replacement workers receive their own Staff Notice delivery through
@@ -437,6 +487,7 @@
                     <th>Visible From</th>
                     <th>Due</th>
                     <th>Recipients</th>
+                    <th>Management Action</th>
                 </tr>
                 {% for occurrence in occurrences %}
                     <tr>
@@ -446,6 +497,42 @@
                         <td>{{ occurrence.visible_from_display or "—" }}</td>
                         <td>{{ occurrence.due_at_display or "—" }}</td>
                         <td>{{ occurrence.deliveries|length }}</td>
+                        <td>
+                            {% if occurrence.can_confirm_no_shift_occurred %}
+                                <form method="post"
+                                      action="{{ url_for(
+                                          'staff_notice_no_shift_occurred',
+                                          occurrence_id=occurrence.occurrence_id
+                                      ) }}">
+                                    <p>
+                                        Expected shift end:
+                                        {{
+                                            occurrence
+                                            .expected_shift_end_display
+                                        }}
+                                    </p>
+                                    <label>
+                                        Confirmation reason
+                                        <input type="text"
+                                               name="reason"
+                                               required>
+                                    </label>
+                                    <label>
+                                        <input type="checkbox"
+                                               name="confirm_no_shift_occurred"
+                                               value="yes"
+                                               required>
+                                        Confirm that no matching shift
+                                        occurred.
+                                    </label>
+                                    <button type="submit">
+                                        Confirm No Shift Occurred
+                                    </button>
+                                </form>
+                            {% else %}
+                                No action available
+                            {% endif %}
+                        </td>
                     </tr>
                 {% endfor %}
             </table>
