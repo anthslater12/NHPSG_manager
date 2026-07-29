@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+
+{% macro delivery_table(deliveries, empty_message) %}
+    {% if deliveries %}
+        <div class="table-scroll">
+            <table>
+                <tr>
+                    <th>Recipient</th>
+                    <th>Occurrence / Shift</th>
+                    <th>Status</th>
+                    <th>Due</th>
+                    <th>First Viewed</th>
+                    <th>Acknowledged</th>
+                    <th>Access / Reason</th>
+                    <th>Compliance History</th>
+                </tr>
+                {% for delivery in deliveries %}
+                    <tr>
+                        <td>
+                            {{ delivery.recipient_name }}<br>
+                            <small>{{ delivery.recipient_role }}</small>
+                        </td>
+                        <td>{{ delivery.context }}</td>
+                        <td>
+                            <strong>{{ delivery.derived_status }}</strong>
+                            {% if delivery.overdue %}
+                                <br><span class="error">Overdue</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {{ delivery.due_display or "No fixed deadline" }}
+                        </td>
+                        <td>
+                            {% if delivery.first_viewed_display %}
+                                {{ delivery.first_viewed_display }}<br>
+                                <small>
+                                    Viewed by {{ delivery.viewer_name }}
+                                </small>
+                            {% else %}
+                                Not viewed
+                            {% endif %}
+                        </td>
+                        <td>
+                            {{ delivery.acknowledged_display or "—" }}
+                        </td>
+                        <td>
+                            {% if delivery.recipient_access %}
+                                Available
+                            {% else %}
+                                Access revoked
+                            {% endif %}
+                            {% if delivery.current_reason_code %}
+                                <br>{{ delivery.current_reason_code }}
+                            {% endif %}
+                            {% if delivery.current_reason_text %}
+                                <br>{{ delivery.current_reason_text }}
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if delivery.history
+                                  or delivery.acknowledgement_history %}
+                                <details>
+                                    <summary>View history</summary>
+                                    {% if delivery.history %}
+                                        <strong>Delivery changes</strong>
+                                        <ul>
+                                            {% for event in delivery.history %}
+                                                <li>
+                                                    {{ event.changed_at_display }}
+                                                    — {{ event.event_type }}
+                                                    {% if event.reason_code %}
+                                                        — {{ event.reason_code }}
+                                                    {% endif %}
+                                                    {% if event.reason_text %}
+                                                        — {{ event.reason_text }}
+                                                    {% endif %}
+                                                    {% if event.changed_by_name %}
+                                                        — {{ event.changed_by_name }}
+                                                    {% endif %}
+                                                </li>
+                                            {% endfor %}
+                                        </ul>
+                                    {% endif %}
+                                    {% if delivery.acknowledgement_history %}
+                                        <strong>Acknowledgements</strong>
+                                        <ul>
+                                            {% for acknowledgement in
+                                                delivery.acknowledgement_history %}
+                                                <li>
+                                                    {{
+                                                        acknowledgement
+                                                        .acknowledged_at_display
+                                                    }}
+                                                    {% if acknowledgement.active %}
+                                                        — Active
+                                                    {% else %}
+                                                        — Invalidated
+                                                        {% if acknowledgement.invalidated_at_display %}
+                                                            at {{
+                                                                acknowledgement
+                                                                .invalidated_at_display
+                                                            }}
+                                                        {% endif %}
+                                                        {% if acknowledgement.invalidation_reason %}
+                                                            — {{
+                                                                acknowledgement
+                                                                .invalidation_reason
+                                                            }}
+                                                        {% endif %}
+                                                    {% endif %}
+                                                </li>
+                                            {% endfor %}
+                                        </ul>
+                                    {% endif %}
+                                </details>
+                            {% else %}
+                                —
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+        </div>
+    {% else %}
+        <p>{{ empty_message }}</p>
+    {% endif %}
+{% endmacro %}
+
+{% block content %}
+
+<div class="card">
+    <p>
+        <a href="{{ url_for('staff_notice_admin_list') }}">
+            ← Back to Staff Notices
+        </a>
+    </p>
+
+    <h2>Recipient Tracking</h2>
+    <h3>{{ notice.title }}</h3>
+    <p><small>All displayed dates and times use America/Vancouver.</small></p>
+
+    <table class="management-detail-table">
+        <tr>
+            <th>Status</th>
+            <td>{{ notice.status }}</td>
+        </tr>
+        <tr>
+            <th>Priority</th>
+            <td>{{ notice.priority }}</td>
+        </tr>
+        <tr>
+            <th>Scope</th>
+            <td>{{ notice.summary.scope }}</td>
+        </tr>
+        <tr>
+            <th>Audience</th>
+            <td>{{ notice.summary.audience }}</td>
+        </tr>
+        <tr>
+            <th>Application Period</th>
+            <td>{{ notice.summary.period }}</td>
+        </tr>
+        <tr>
+            <th>Schedule</th>
+            <td>{{ notice.summary.schedule }}</td>
+        </tr>
+        <tr>
+            <th>Created By</th>
+            <td>{{ notice.created_by }}</td>
+        </tr>
+        <tr>
+            <th>Published By</th>
+            <td>{{ notice.published_by or "—" }}</td>
+        </tr>
+        <tr>
+            <th>Published</th>
+            <td>{{ notice.published_display or "—" }}</td>
+        </tr>
+    </table>
+
+    <h3>Published Notice</h3>
+    <div style="white-space: pre-wrap;">{{ notice.notice_text }}</div>
+</div>
+
+<div class="card">
+    <h3>Compliance Summary</h3>
+    <table class="management-detail-table">
+        <tr>
+            <th>Occurrences</th>
+            <td>{{ counts.occurrences }}</td>
+            <th>Total Deliveries</th>
+            <td>{{ counts.deliveries }}</td>
+        </tr>
+        <tr>
+            <th>Outstanding</th>
+            <td>{{ counts.outstanding }}</td>
+            <th>Overdue</th>
+            <td>{{ counts.overdue }}</td>
+        </tr>
+        <tr>
+            <th>Not Viewed</th>
+            <td>{{ counts["Not Viewed"] }}</td>
+            <th>Viewed – Awaiting Acknowledgement</th>
+            <td>{{ counts["Viewed – Awaiting Acknowledgement"] }}</td>
+        </tr>
+        <tr>
+            <th>Acknowledged</th>
+            <td>{{ counts.Acknowledged }}</td>
+            <th>Acknowledged Late</th>
+            <td>{{ counts["Acknowledged Late"] }}</td>
+        </tr>
+        <tr>
+            <th>No Longer Required</th>
+            <td>{{ counts["No Longer Required"] }}</td>
+            <th>Cancelled</th>
+            <td>{{ counts.Cancelled }}</td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h3>Occurrences and Shift Context</h3>
+    {% if occurrences %}
+        <div class="table-scroll">
+            <table>
+                <tr>
+                    <th>Context</th>
+                    <th>Kind</th>
+                    <th>State</th>
+                    <th>Visible From</th>
+                    <th>Due</th>
+                    <th>Recipients</th>
+                </tr>
+                {% for occurrence in occurrences %}
+                    <tr>
+                        <td>{{ occurrence.context }}</td>
+                        <td>{{ occurrence.occurrence_kind }}</td>
+                        <td>{{ occurrence.occurrence_status }}</td>
+                        <td>{{ occurrence.visible_from_display or "—" }}</td>
+                        <td>{{ occurrence.due_at_display or "—" }}</td>
+                        <td>{{ occurrence.deliveries|length }}</td>
+                    </tr>
+                {% endfor %}
+            </table>
+        </div>
+    {% else %}
+        <p>No occurrences have been created for this notice.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>Current and Outstanding Compliance</h3>
+    {{ delivery_table(
+        current_deliveries,
+        "No recipient acknowledgements are outstanding."
+    ) }}
+</div>
+
+<div class="card">
+    <h3>Completed and Historical Compliance</h3>
+    {{ delivery_table(
+        historical_deliveries,
+        "No completed or historical recipient deliveries."
+    ) }}
+</div>
+
+{% endblock %}

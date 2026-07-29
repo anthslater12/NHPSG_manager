@@ -4,7 +4,7 @@
 
 <div class="card">
 
-    <h2>Staff Notice Drafts</h2>
+    <h2>Staff Notices</h2>
 
     {% if publication_result == "published" %}
         <p class="status-active">
@@ -41,12 +41,12 @@
                     <th>Created</th>
                     <th>Last Updated</th>
                     <th>State</th>
-                    <th>View</th>
+                    <th>View or Track</th>
                     <th>Edit</th>
                 </tr>
 
                 {% for notice in notices %}
-                    <tr class="{% if notice.draft_active %}row-active{% else %}row-inactive{% endif %}">
+                    <tr class="{% if notice.status == 'Draft' and notice.draft_active %}row-active{% elif notice.status == 'Draft' %}row-inactive{% endif %}">
                         <td>{{ notice.title }}</td>
                         <td>{{ notice.priority }}</td>
                         <td>{{ notice.status }}</td>
@@ -57,22 +57,39 @@
                         <td>{{ notice.created_at_utc }}</td>
                         <td>{{ notice.updated_at_utc or "—" }}</td>
                         <td>
-                            {% if notice.draft_active %}
+                            {% if notice.status == "Published" %}
+                                <span class="status-active">Published</span>
+                            {% elif notice.status == "Draft" and notice.draft_active %}
                                 <span class="status-active">Active Draft</span>
-                            {% else %}
+                            {% elif notice.status == "Draft" %}
                                 <span class="status-inactive">Inactive Draft</span>
+                            {% else %}
+                                <span class="status-inactive">
+                                    {{ notice.status }}
+                                </span>
                             {% endif %}
                         </td>
                         <td>
-                            <a href="{{ url_for(
-                                'staff_notice_admin_detail',
-                                notice_id=notice.notice_id
-                            ) }}">
-                                View
-                            </a>
+                            {% if notice.status == "Published" %}
+                                <a href="{{ url_for(
+                                    'staff_notice_tracking',
+                                    notice_id=notice.notice_id
+                                ) }}">
+                                    Track Recipients
+                                </a>
+                            {% elif notice.status == "Draft" %}
+                                <a href="{{ url_for(
+                                    'staff_notice_admin_detail',
+                                    notice_id=notice.notice_id
+                                ) }}">
+                                    View
+                                </a>
+                            {% else %}
+                                —
+                            {% endif %}
                         </td>
                         <td>
-                            {% if notice.draft_active %}
+                            {% if notice.status == "Draft" and notice.draft_active %}
                                 <a href="{{ url_for(
                                     'staff_notice_edit',
                                     notice_id=notice.notice_id
@@ -91,7 +108,7 @@
 
     {% else %}
 
-        <p>No Staff Notice drafts have been created.</p>
+        <p>No Staff Notices have been created.</p>
 
     {% endif %}
 

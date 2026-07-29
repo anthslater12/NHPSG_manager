@@ -3470,7 +3470,8 @@ def _load_staff_notice_admin_record(conn, notice_id):
             sn.*,
             c.client_name,
             creator.full_name AS created_by,
-            updater.full_name AS updated_by
+            updater.full_name AS updated_by,
+            publisher.full_name AS published_by
         FROM staff_notices sn
         LEFT JOIN clients c
             ON sn.client_id = c.client_id
@@ -3478,6 +3479,8 @@ def _load_staff_notice_admin_record(conn, notice_id):
             ON sn.created_by_user_id = creator.user_id
         LEFT JOIN users updater
             ON sn.updated_by_user_id = updater.user_id
+        LEFT JOIN users publisher
+            ON sn.published_by_user_id = publisher.user_id
         WHERE sn.notice_id = ?
     """, (notice_id,)).fetchone()
 
@@ -7262,6 +7265,340 @@ def reconcile_staff_notice_non_shift_requirements(now_utc=None):
                 )
 
 
+def reconcile_staff_notice_tracking_in_transaction(
+    conn,
+    notice,
+    now_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice tracking reconciliation requires an active "
+            "transaction."
+        )
+    if notice["status"] != "Published":
+        raise ValueError(
+            "Only published Staff Notices can be reconciled for tracking."
+        )
+
+    now_utc = parse_staff_notice_utc_datetime(now_utc)
+    result = _staff_notice_reconciliation_result()
+    if parse_staff_notice_utc_datetime(
+        notice["published_at_utc"]
+    ) > now_utc:
+        return result
+
+    reconciled_at_utc = format_staff_notice_utc_datetime(now_utc)
+    _merge_staff_notice_reconciliation_result(
+        result,
+        reconcile_staff_notice_audience_eligibility(
+            conn,
+            notice,
+            reconciled_at_utc
+        )
+    )
+    _merge_staff_notice_reconciliation_result(
+        result,
+        generate_due_staff_notice_occurrences(
+            conn,
+            notice,
+            reconciled_at_utc
+        )
+    )
+    _merge_staff_notice_reconciliation_result(
+        result,
+        reconcile_staff_notice_deliveries(
+            conn,
+            notice,
+            reconciled_at_utc
+        )
+    )
+    return result
+
+
+def _staff_notice_tracking_context(occurrence):
+    if occurrence["occurrence_kind"] == "Shift":
+        shift_date = (
+            occurrence["shift_date"]
+            or occurrence["occurrence_date"]
+        )
+        shift_type = (
+            occurrence["shift_type"]
+            or occurrence["planned_shift_type"]
+        )
+        client_name = (
+            occurrence["shift_client_name"]
+            or occurrence["planned_client_name"]
+        )
+        parts = [
+            part
+            for part in (client_name, shift_date, shift_type)
+            if part
+        ]
+        if occurrence["shift_id"] is None:
+            parts.append("Pending Shift")
+        return " — ".join(parts)
+    if occurrence["occurrence_date"] is not None:
+        return occurrence["occurrence_date"]
+    return "General"
+
+
+def _load_staff_notice_tracking(conn, notice_id, now_utc):
+    now_utc = parse_staff_notice_utc_datetime(now_utc)
+    notice = _load_staff_notice_admin_record(conn, notice_id)
+    if notice is None or notice["status"] != "Published":
+        return None
+
+    notice["summary"] = build_staff_notice_plain_language_summary(notice)
+    for field_name in (
+        "created_at_utc",
+        "published_at_utc",
+        "effective_start_at_utc",
+        "expires_at_utc"
+    ):
+        display_name = field_name.replace("_at_utc", "_display")
+        notice[display_name] = (
+            format_staff_notice_local_datetime(notice[field_name])
+            if notice[field_name] is not None
+            else None
+        )
+
+    occurrences = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT
+                o.*,
+                s.shift_date,
+                s.shift_type,
+                shift_client.client_name AS shift_client_name,
+                planned_client.client_name AS planned_client_name
+            FROM staff_notice_occurrences o
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            LEFT JOIN shifts s
+                ON o.shift_id = s.shift_id
+            LEFT JOIN clients shift_client
+                ON s.client_id = shift_client.client_id
+            LEFT JOIN clients planned_client
+                ON o.planned_client_id = planned_client.client_id
+            WHERE sns.notice_id = ?
+            ORDER BY
+                COALESCE(
+                    o.visible_from_at_utc,
+                    o.occurrence_date,
+                    o.created_at_utc
+                ),
+                o.occurrence_id
+        """, (notice_id,)).fetchall()
+    ]
+    occurrence_by_id = {}
+    for occurrence in occurrences:
+        occurrence["context"] = _staff_notice_tracking_context(occurrence)
+        occurrence["visible_from_display"] = (
+            format_staff_notice_local_datetime(
+                occurrence["visible_from_at_utc"]
+            )
+            if occurrence["visible_from_at_utc"] is not None
+            else None
+        )
+        occurrence["due_at_display"] = (
+            format_staff_notice_local_datetime(
+                occurrence["due_at_utc"]
+            )
+            if occurrence["due_at_utc"] is not None
+            else None
+        )
+        occurrence["deliveries"] = []
+        occurrence_by_id[occurrence["occurrence_id"]] = occurrence
+
+    deliveries = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT
+                d.*,
+                o.due_at_utc,
+                o.occurrence_status,
+                recipient.full_name AS recipient_name,
+                recipient.role AS recipient_role,
+                viewer.full_name AS viewer_name,
+                ack.acknowledgement_id,
+                ack.acknowledged_at
+            FROM staff_notice_deliveries d
+            JOIN staff_notice_occurrences o
+                ON d.occurrence_id = o.occurrence_id
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            JOIN users recipient
+                ON d.user_id = recipient.user_id
+            LEFT JOIN users viewer
+                ON d.viewed_by_user_id = viewer.user_id
+            LEFT JOIN acknowledgements ack
+                ON ack.source_table = 'staff_notice_deliveries'
+               AND ack.source_id = d.delivery_id
+               AND ack.user_id = d.user_id
+               AND ack.active = 1
+            WHERE sns.notice_id = ?
+            ORDER BY d.delivery_id
+        """, (notice_id,)).fetchall()
+    ]
+    delivery_by_id = {
+        delivery["delivery_id"]: delivery
+        for delivery in deliveries
+    }
+
+    for delivery in deliveries:
+        delivery["derived_status"] = get_recipient_staff_notice_status(
+            active_acknowledgement_at_utc=delivery["acknowledged_at"],
+            due_at_utc=delivery["due_at_utc"],
+            requirement_status=delivery["requirement_status"],
+            first_viewed_at_utc=delivery["first_viewed_at_utc"]
+        )
+        delivery["overdue"] = (
+            delivery["acknowledged_at"] is None
+            and delivery["requirement_status"] == "Required"
+            and delivery["due_at_utc"] is not None
+            and parse_staff_notice_utc_datetime(
+                delivery["due_at_utc"]
+            ) < now_utc
+        )
+        delivery["outstanding"] = (
+            delivery["derived_status"] in (
+                "Not Viewed",
+                "Viewed – Awaiting Acknowledgement"
+            )
+            and delivery["requirement_status"] == "Required"
+        )
+        for field_name, display_name in (
+            ("assigned_at_utc", "assigned_display"),
+            (
+                "eligibility_cutoff_at_utc",
+                "eligibility_cutoff_display"
+            ),
+            ("first_viewed_at_utc", "first_viewed_display"),
+            ("acknowledged_at", "acknowledged_display"),
+            ("due_at_utc", "due_display"),
+            ("status_changed_at_utc", "status_changed_display"),
+            ("access_revoked_at_utc", "access_revoked_display")
+        ):
+            delivery[display_name] = (
+                format_staff_notice_local_datetime(delivery[field_name])
+                if delivery[field_name] is not None
+                else None
+            )
+        delivery["context"] = occurrence_by_id[
+            delivery["occurrence_id"]
+        ]["context"]
+        delivery["history"] = []
+        delivery["acknowledgement_history"] = []
+        occurrence_by_id[
+            delivery["occurrence_id"]
+        ]["deliveries"].append(delivery)
+
+    if deliveries:
+        placeholders = ", ".join("?" for _ in deliveries)
+        delivery_ids = tuple(delivery_by_id)
+        history_rows = conn.execute(f"""
+            SELECT
+                h.*,
+                actor.full_name AS changed_by_name
+            FROM staff_notice_delivery_history h
+            LEFT JOIN users actor
+                ON h.changed_by_user_id = actor.user_id
+            WHERE h.delivery_id IN ({placeholders})
+            ORDER BY
+                h.changed_at_utc,
+                h.delivery_history_id
+        """, delivery_ids).fetchall()
+        for row in history_rows:
+            history = dict(row)
+            history["changed_at_display"] = (
+                format_staff_notice_local_datetime(
+                    history["changed_at_utc"]
+                )
+            )
+            delivery_by_id[history["delivery_id"]]["history"].append(
+                history
+            )
+
+        acknowledgement_rows = conn.execute(f"""
+            SELECT
+                ack.*,
+                invalidator.full_name AS invalidated_by_name
+            FROM acknowledgements ack
+            LEFT JOIN users invalidator
+                ON ack.invalidated_by_user_id = invalidator.user_id
+            WHERE ack.source_table = 'staff_notice_deliveries'
+              AND ack.source_id IN ({placeholders})
+            ORDER BY
+                ack.acknowledged_at,
+                ack.acknowledgement_id
+        """, delivery_ids).fetchall()
+        for row in acknowledgement_rows:
+            acknowledgement = dict(row)
+            acknowledgement["acknowledged_at_display"] = (
+                format_staff_notice_local_datetime(
+                    acknowledgement["acknowledged_at"]
+                )
+            )
+            acknowledgement["invalidated_at_display"] = (
+                format_staff_notice_local_datetime(
+                    acknowledgement["invalidated_at_utc"]
+                )
+                if acknowledgement["invalidated_at_utc"] is not None
+                else None
+            )
+            delivery_by_id[
+                acknowledgement["source_id"]
+            ]["acknowledgement_history"].append(acknowledgement)
+
+    status_counts = {
+        status: 0
+        for status in (
+            "Not Viewed",
+            "Viewed – Awaiting Acknowledgement",
+            "Acknowledged",
+            "Acknowledged Late",
+            "No Longer Required",
+            "Cancelled"
+        )
+    }
+    for delivery in deliveries:
+        status_counts[delivery["derived_status"]] += 1
+
+    current_deliveries = sorted(
+        (delivery for delivery in deliveries if delivery["outstanding"]),
+        key=lambda delivery: (
+            0 if delivery["overdue"] else 1,
+            delivery["due_at_utc"] or "9999-12-31T23:59:59Z",
+            delivery["recipient_name"].casefold(),
+            delivery["occurrence_id"],
+            delivery["delivery_id"]
+        )
+    )
+    historical_deliveries = sorted(
+        (delivery for delivery in deliveries if not delivery["outstanding"]),
+        key=lambda delivery: (
+            delivery["assigned_at_utc"],
+            delivery["delivery_id"]
+        ),
+        reverse=True
+    )
+    return {
+        "notice": notice,
+        "occurrences": occurrences,
+        "current_deliveries": current_deliveries,
+        "historical_deliveries": historical_deliveries,
+        "counts": {
+            "occurrences": len(occurrences),
+            "deliveries": len(deliveries),
+            "outstanding": len(current_deliveries),
+            "overdue": sum(
+                1 for delivery in deliveries if delivery["overdue"]
+            ),
+            **status_counts
+        }
+    }
+
+
 class StaffNoticeRecipientError(ValueError):
     pass
 
@@ -8005,17 +8342,31 @@ def staff_notice_admin_list():
                 sn.draft_active,
                 sn.created_at_utc,
                 sn.updated_at_utc,
+                sn.published_at_utc,
                 c.client_name,
-                u.full_name AS created_by
+                creator.full_name AS created_by,
+                publisher.full_name AS published_by
             FROM staff_notices sn
             LEFT JOIN clients c
                 ON sn.client_id = c.client_id
-            JOIN users u
-                ON sn.created_by_user_id = u.user_id
-            WHERE sn.status = 'Draft'
-            ORDER BY sn.draft_active DESC,
-                     COALESCE(sn.updated_at_utc, sn.created_at_utc) DESC,
-                     sn.notice_id DESC
+            JOIN users creator
+                ON sn.created_by_user_id = creator.user_id
+            LEFT JOIN users publisher
+                ON sn.published_by_user_id = publisher.user_id
+            ORDER BY
+                CASE sn.status
+                    WHEN 'Draft' THEN 0
+                    WHEN 'Published' THEN 1
+                    WHEN 'Withdrawn' THEN 2
+                    WHEN 'Replaced' THEN 3
+                END,
+                sn.draft_active DESC,
+                COALESCE(
+                    sn.published_at_utc,
+                    sn.updated_at_utc,
+                    sn.created_at_utc
+                ) DESC,
+                sn.notice_id DESC
         """).fetchall()
     finally:
         conn.close()
@@ -8127,6 +8478,54 @@ def staff_notice_admin_detail(notice_id):
         "staff_notice_admin_detail.html",
         notice=notice,
         summary=build_staff_notice_plain_language_summary(notice)
+    )
+
+
+@app.route("/staff-notices/<int:notice_id>/tracking")
+def staff_notice_tracking(notice_id):
+    access_response = _staff_notice_management_access_response()
+
+    if access_response is not None:
+        return access_response
+
+    conn = get_db()
+    now_utc = get_application_now_utc()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        notice = _load_staff_notice_publish_record(conn, notice_id)
+        if notice is None or notice["status"] != "Published":
+            conn.rollback()
+            return "Published Staff Notice not found", 404
+
+        reconcile_staff_notice_tracking_in_transaction(
+            conn,
+            notice,
+            now_utc
+        )
+        tracking = _load_staff_notice_tracking(
+            conn,
+            notice_id,
+            now_utc
+        )
+        if tracking is None:
+            raise RuntimeError(
+                "Published Staff Notice tracking became unavailable."
+            )
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "Staff Notice recipient tracking could not be loaded. "
+            "Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return render_template(
+        "staff_notice_tracking.html",
+        **tracking
     )
 
 

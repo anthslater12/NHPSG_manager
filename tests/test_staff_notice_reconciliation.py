@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -188,7 +189,10 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     acknowledgement_type TEXT NOT NULL,
                     acknowledged_at TEXT NOT NULL,
                     comment TEXT,
-                    active INTEGER NOT NULL DEFAULT 1
+                    active INTEGER NOT NULL DEFAULT 1,
+                    invalidated_at_utc TEXT,
+                    invalidated_by_user_id INTEGER,
+                    invalidation_reason TEXT
                 );
             """)
 
@@ -3081,6 +3085,464 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.database_snapshot(), before)
+
+    def management_tracking_request(
+        self,
+        path,
+        *,
+        user_id=1,
+        role="Admin",
+        now_utc=None
+    ):
+        if now_utc is None:
+            now_utc = datetime(
+                2026,
+                8,
+                3,
+                17,
+                0,
+                tzinfo=timezone.utc
+            )
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = user_id
+            session_data["role"] = role
+            session_data["full_name"] = f"Manager {user_id}"
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=now_utc
+        ):
+            response = client.get(path)
+        return client, response
+
+    def create_management_tracking_matrix(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(("Selected Individual", None, 2),)
+        )
+        self.seed_eligibility(
+            fixture,
+            2,
+            sources="Selected Individual"
+        )
+        occurrence_id = self.seed_one_time_occurrence(
+            fixture,
+            due_at="2026-08-03T16:00:00Z"
+        )
+        conn = self.open_database()
+        try:
+            conn.executemany("""
+                INSERT INTO users (user_id, full_name, role, active)
+                VALUES (?, ?, 'Behaviour Consultant', 1)
+            """, (
+                (6, "Late Recipient"),
+                (7, "NLR Recipient"),
+                (8, "Cancelled Recipient")
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+        user_ids = (2, 3, 5, 6, 7, 8)
+        deliveries = {
+            user_id: self.seed_delivery(occurrence_id, user_id)
+            for user_id in user_ids
+        }
+        conn = self.open_database()
+        try:
+            conn.executemany("""
+                INSERT INTO staff_notice_delivery_history
+                (
+                    delivery_id,
+                    event_type,
+                    new_requirement_status,
+                    new_recipient_access,
+                    changed_at_utc
+                )
+                VALUES (?, 'Assigned', 'Required', 1, ?)
+            """, (
+                (
+                    delivery_id,
+                    "2026-08-01T16:00:00Z"
+                )
+                for delivery_id in deliveries.values()
+            ))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T15:00:00Z',
+                    viewed_by_user_id = 3
+                WHERE delivery_id = ?
+            """, (deliveries[3],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T14:00:00Z',
+                    viewed_by_user_id = 5
+                WHERE delivery_id = ?
+            """, (deliveries[5],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET first_viewed_at_utc = '2026-08-03T14:00:00Z',
+                    viewed_by_user_id = 6
+                WHERE delivery_id = ?
+            """, (deliveries[6],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET requirement_status = 'No Longer Required',
+                    recipient_access = 0,
+                    current_reason_code = 'Eligibility Ended',
+                    current_reason_text = 'Historical removal test.'
+                WHERE delivery_id = ?
+            """, (deliveries[7],))
+            conn.execute("""
+                UPDATE staff_notice_deliveries
+                SET requirement_status = 'Cancelled',
+                    recipient_access = 0,
+                    current_reason_code = 'Notice Cancelled',
+                    current_reason_text = 'Historical cancellation test.'
+                WHERE delivery_id = ?
+            """, (deliveries[8],))
+            conn.commit()
+        finally:
+            conn.close()
+        self.seed_staff_notice_acknowledgement(
+            deliveries[5],
+            5,
+            "2026-08-03T16:00:00Z"
+        )
+        self.seed_staff_notice_acknowledgement(
+            deliveries[6],
+            6,
+            "2026-08-03T16:00:01Z"
+        )
+        return fixture, occurrence_id, deliveries
+
+    def test_management_tracking_permissions_list_navigation_and_missing_states(
+        self
+    ):
+        fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(("Selected Individual", None, 2),)
+        )
+        draft_fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None"
+        )
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notices
+                SET status = 'Draft',
+                    draft_active = 1,
+                    published_by_user_id = NULL,
+                    published_at_utc = NULL
+                WHERE notice_id = ?
+            """, (draft_fixture["notice_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+
+        _, admin_list = self.management_tracking_request(
+            "/staff-notices/manage"
+        )
+        self.assertEqual(admin_list.status_code, 200)
+        self.assertIn(b"Track Recipients", admin_list.data)
+        self.assertIn(
+            (
+                f"/staff-notices/{fixture['notice_id']}/tracking"
+            ).encode(),
+            admin_list.data
+        )
+        for role, user_id in (
+            ("Admin", 1),
+            ("Program Manager", 5),
+            ("Director", 1)
+        ):
+            with self.subTest(role=role):
+                _, response = self.management_tracking_request(
+                    f"/staff-notices/{fixture['notice_id']}/tracking",
+                    user_id=user_id,
+                    role=role
+                )
+                self.assertEqual(response.status_code, 200)
+
+        anonymous = app.app.test_client().get(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+        _, worker = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking",
+            user_id=2,
+            role="Support Worker"
+        )
+        _, draft = self.management_tracking_request(
+            f"/staff-notices/{draft_fixture['notice_id']}/tracking"
+        )
+        _, missing = self.management_tracking_request(
+            "/staff-notices/999999/tracking"
+        )
+        self.assertEqual(anonymous.status_code, 302)
+        self.assertEqual(worker.status_code, 403)
+        self.assertEqual(draft.status_code, 404)
+        self.assertEqual(missing.status_code, 404)
+
+    def test_management_tracking_statuses_counts_history_and_read_only_display(
+        self
+    ):
+        fixture, _, deliveries = self.create_management_tracking_matrix()
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                UPDATE staff_notices
+                SET title = '<script>tracking()</script>',
+                    notice_text = '<script>alert(1)</script>'
+                WHERE notice_id = ?
+            """, (fixture["notice_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        _, response = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        for status in (
+            b"Not Viewed",
+            "Viewed \u2013 Awaiting Acknowledgement".encode(),
+            b"Acknowledged",
+            b"Acknowledged Late",
+            b"No Longer Required",
+            b"Cancelled"
+        ):
+            self.assertIn(status, response.data)
+        self.assertIn(b"Total Deliveries", response.data)
+        self.assertRegex(
+            response.data,
+            br"Total Deliveries</th>\s*<td>6</td>"
+        )
+        self.assertRegex(
+            response.data,
+            br"Outstanding</th>\s*<td>2</td>"
+        )
+        self.assertRegex(
+            response.data,
+            br"Overdue</th>\s*<td>2</td>"
+        )
+        self.assertIn(b"Support Worker", response.data)
+        self.assertIn(b"Viewed by Behaviour Consultant", response.data)
+        self.assertIn(b"Historical removal test.", response.data)
+        self.assertIn(b"Historical cancellation test.", response.data)
+        self.assertIn(b"Delivery changes", response.data)
+        self.assertIn(b"&lt;script&gt;alert(1)&lt;/script&gt;", response.data)
+        self.assertNotIn(b"<script>alert(1)</script>", response.data)
+        for delivery_id in deliveries.values():
+            self.assertEqual(
+                sum(
+                    delivery_id == row["delivery_id"]
+                    for row in self.delivery_rows(fixture)
+                ),
+                1
+            )
+        self.assertEqual(self.database_snapshot(), before)
+
+    def test_management_tracking_shift_context_and_zero_delivery_state(self):
+        fixture, shift_id, _ = self.create_shift_notice_delivery(
+            scheduled_end_time="15:00"
+        )
+        _, shift_response = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+        self.assertEqual(shift_response.status_code, 200)
+        self.assertIn(b"Active Client", shift_response.data)
+        self.assertIn(b"2026-08-03", shift_response.data)
+        self.assertIn(b"Day", shift_response.data)
+        self.assertIn(b"Occurrences and Shift Context", shift_response.data)
+        self.assertNotEqual(shift_id, 0)
+
+        empty_fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(("Selected Individual", None, 4),)
+        )
+        _, empty_response = self.management_tracking_request(
+            f"/staff-notices/{empty_fixture['notice_id']}/tracking"
+        )
+        self.assertEqual(empty_response.status_code, 200)
+        self.assertRegex(
+            empty_response.data,
+            br"Total Deliveries</th>\s*<td>0</td>"
+        )
+        self.assertIn(
+            b"No occurrences have been created",
+            empty_response.data
+        )
+
+    def test_management_tracking_uses_corrected_deadline_dynamically(self):
+        fixture, occurrence_id, deliveries = (
+            self.create_management_tracking_matrix()
+        )
+        _, boundary_response = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+        boundary_rows = re.findall(
+            br"<tr[^>]*>.*?</tr>",
+            boundary_response.data,
+            re.DOTALL
+        )
+        boundary_recipient_row = next(
+            row for row in boundary_rows
+            if b"Program Manager" in row
+        )
+        self.assertIn(b">Acknowledged<", boundary_recipient_row)
+        self.assertNotIn(b"Acknowledged Late", boundary_recipient_row)
+
+        conn = self.open_database()
+        try:
+            original_acknowledged_at = conn.execute("""
+                SELECT acknowledged_at
+                FROM acknowledgements
+                WHERE source_table = 'staff_notice_deliveries'
+                  AND source_id = ?
+                  AND active = 1
+            """, (deliveries[5],)).fetchone()["acknowledged_at"]
+            conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET due_at_utc = '2026-08-03T15:59:59Z',
+                    due_at_is_provisional = 0
+                WHERE occurrence_id = ?
+            """, (occurrence_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        _, corrected_response = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+        corrected_rows = re.findall(
+            br"<tr[^>]*>.*?</tr>",
+            corrected_response.data,
+            re.DOTALL
+        )
+        corrected_recipient_row = next(
+            row for row in corrected_rows
+            if b"Program Manager" in row
+        )
+        self.assertIn(b"Acknowledged Late", corrected_recipient_row)
+        conn = self.open_database()
+        try:
+            management_status = next(
+                delivery["derived_status"]
+                for delivery in app._load_staff_notice_tracking(
+                    conn,
+                    fixture["notice_id"],
+                    datetime(
+                        2026,
+                        8,
+                        3,
+                        17,
+                        0,
+                        tzinfo=timezone.utc
+                    )
+                )["historical_deliveries"]
+                if delivery["user_id"] == 5
+            )
+            worker_status = app._load_recipient_staff_notice_deliveries(
+                conn,
+                5,
+                datetime(
+                    2026,
+                    8,
+                    3,
+                    17,
+                    0,
+                    tzinfo=timezone.utc
+                )
+            )[0]["derived_status"]
+            self.assertEqual(management_status, worker_status)
+            self.assertEqual(
+                conn.execute("""
+                    SELECT acknowledged_at
+                    FROM acknowledgements
+                    WHERE source_table = 'staff_notice_deliveries'
+                      AND source_id = ?
+                      AND active = 1
+                """, (deliveries[5],)).fetchone()["acknowledged_at"],
+                original_acknowledged_at
+            )
+        finally:
+            conn.close()
+
+    def test_management_tracking_reconciles_only_notice_and_is_idempotent(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(("Selected Individual", None, 2),)
+        )
+        self.seed_one_time_occurrence(fixture)
+        unrelated = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(("Selected Individual", None, 3),)
+        )
+        self.seed_one_time_occurrence(unrelated)
+
+        _, first = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+        first_snapshot = self.database_snapshot()
+        _, repeated = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(len(self.delivery_rows(fixture)), 1)
+        self.assertEqual(self.delivery_rows(unrelated), [])
+        self.assertEqual(self.database_snapshot(), first_snapshot)
+
+    def test_management_tracking_reconciliation_failure_rolls_back(self):
+        fixture = self.create_published_notice(
+            occurrence_basis="One Time",
+            recurrence_pattern="Once",
+            shift_applicability="None",
+            audience_rules=(("Selected Individual", None, 2),)
+        )
+        self.seed_one_time_occurrence(fixture)
+        conn = self.open_database()
+        try:
+            conn.execute("""
+                CREATE TRIGGER control_tracking_reconciliation_failure
+                BEFORE INSERT ON activity_log
+                WHEN NEW.activity_type =
+                    'staff_notice_audience_eligibility_started'
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'controlled tracking reconciliation failure'
+                    );
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        before = self.database_snapshot()
+
+        _, response = self.management_tracking_request(
+            f"/staff-notices/{fixture['notice_id']}/tracking"
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"Please retry", response.data)
         self.assertEqual(self.database_snapshot(), before)
 
     def post_worker_end(self, shift_id, completed_at, data=None):
