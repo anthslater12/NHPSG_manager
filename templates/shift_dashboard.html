@@ -2,11 +2,19 @@
 
 {% block content %}
 
+{% set shift_cancelled = shift.status == "Cancelled" %}
+
 <div class="card">
     <h2>{{ shift.shift_type }} Shift</h2>
 
     <p><strong>Date:</strong> {{ shift.shift_date }}</p>
     <p><strong>Status:</strong> {{ shift.status }}</p>
+    {% if shift_cancelled %}
+        <p class="error">
+            This shift is cancelled and is available as a read-only
+            historical record.
+        </p>
+    {% endif %}
 </div>
 
 <div class="card">
@@ -56,7 +64,13 @@
 </div>
 
 <div class="card">
-    <h3>Staff Currently on Shift</h3>
+    <h3>
+        {% if shift_cancelled %}
+            Historical Shift Staffing
+        {% else %}
+            Staff Currently on Shift
+        {% endif %}
+    </h3>
 
     {% if staff %}
         <table>
@@ -74,7 +88,15 @@
                 <td>{{ person.role }}</td>
                 <td>{{ person.actual_start_time }}</td>
                 <td>{{ person.sign_on_at }}</td>
-                <td>{% if person.active %}Signed On{% else %}Signed Off{% endif %}</td>
+                <td>
+                    {% if shift_cancelled and not person.active %}
+                        Assignment Cancelled
+                    {% elif person.active %}
+                        Signed On
+                    {% else %}
+                        Signed Off
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </table>
@@ -83,6 +105,7 @@
     {% endif %}
 </div>
 
+{% if not shift_cancelled %}
 <div class="card">
     <h3>Quick Entry</h3>
 
@@ -114,6 +137,7 @@
         <a class="quick-button" href="/incident/new">+ Incident</a>
     </div>
 </div>
+{% endif %}
 
 {% if food_fluid_authorized %}
 
@@ -266,14 +290,16 @@
             </p>
         {% endif %}
 
-				<div class="care-footer">
+				{% if not shift_cancelled %}
+                <div class="care-footer">
 
 					<a class="button-small"
 					href="/shift/{{ shift.shift_id }}/care-task-entry/{{ entry.entry_id }}/edit">
 						✏ Edit
 					</a>
 
-</div>
+                </div>
+                {% endif %}
 
 		{% else %}
 
@@ -282,10 +308,12 @@
 		<span style="background:#e2e3e5; padding:6px 10px; border-radius:6px;">⭕ Pending</span>
 		</p>
 
-        <a class="quick-button"
-           href="/shift/{{ shift.shift_id }}/care-task/{{ task.care_task_id }}/record">
-            Record Task
-        </a>
+        {% if not shift_cancelled %}
+            <a class="quick-button"
+               href="/shift/{{ shift.shift_id }}/care-task/{{ task.care_task_id }}/record">
+                Record Task
+            </a>
+        {% endif %}
 
     {% endif %}
 
@@ -454,6 +482,7 @@
                             </p>
                         {% endif %}
 
+                        {% if not shift_cancelled %}
                         <div class="care-footer">
 
                             <a
@@ -466,6 +495,7 @@
                             </a>
 
                         </div>
+                        {% endif %}
 
                     {% else %}
 
@@ -481,14 +511,16 @@
                             </span>
                         </p>
 
-                        <a
-                            class="quick-button"
-                            href="/shift/{{ shift.shift_id
-                                }}/housekeeping-task/{{ task.housekeeping_task_id
-                                }}/record"
-                        >
-                            Record Task
-                        </a>
+                        {% if not shift_cancelled %}
+                            <a
+                                class="quick-button"
+                                href="/shift/{{ shift.shift_id
+                                    }}/housekeeping-task/{{ task.housekeeping_task_id
+                                    }}/record"
+                            >
+                                Record Task
+                            </a>
+                        {% endif %}
 
                     {% endif %}
 
@@ -527,10 +559,10 @@
     {% endif %}
 </div>
 
+{% if not shift_cancelled %}
 <hr>
 
 <div style="text-align:center; margin-top:30px;">
-
     <a class="quick-button"
        href="/shift/{{ shift.shift_id }}/end-shift">
 
@@ -539,5 +571,6 @@
     </a>
 
 </div>
+{% endif %}
 
 {% endblock %}

@@ -1179,6 +1179,450 @@ STAFF_NOTICE_MANAGEMENT_ROLES = frozenset({
     "Director"
 })
 
+SHIFT_CANCELLED_STATUS = "Cancelled"
+SHIFT_CANCELLATION_REASON_CODE = "Shift Cancelled"
+
+
+class ShiftCancellationConflictError(RuntimeError):
+    pass
+
+
+def _shift_is_cancelled(shift):
+    return shift is not None and shift["status"] == SHIFT_CANCELLED_STATUS
+
+
+def _cancelled_shift_response():
+    return "Cancelled shifts are historical and cannot be changed.", 409
+
+
+def _shift_assignment_has_start_or_completion_evidence(assignment):
+    return any((
+        assignment["sign_on_at"] is not None,
+        bool(
+            isinstance(assignment["actual_start_time"], str)
+            and assignment["actual_start_time"].strip()
+        ),
+        assignment["actual_end_time"] is not None,
+        assignment["actual_end_at_utc"] is not None,
+        assignment["sign_off_at"] is not None,
+        assignment["start_checklist_completed"] not in (None, 0),
+        assignment["end_checklist_completed"] not in (None, 0)
+    ))
+
+
+def _shift_cancellation_audits(conn, shift_id):
+    return conn.execute("""
+        SELECT *
+        FROM activity_log
+        WHERE activity_class = 'SHIFT'
+          AND activity_type = 'shift_cancelled'
+          AND related_table = 'shifts'
+          AND related_id = ?
+        ORDER BY activity_id
+    """, (shift_id,)).fetchall()
+
+
+def _shift_cancellation_audit_is_consistent(audit, shift):
+    return (
+        audit["user_id"] is not None
+        and audit["client_id"] == shift["client_id"]
+        and audit["shift_id"] == shift["shift_id"]
+        and audit["related_table"] == "shifts"
+        and audit["related_id"] == shift["shift_id"]
+        and audit["summary"] == "Shift cancelled"
+        and audit["success"] == 1
+        and isinstance(audit["details"], str)
+        and f"Shift ID: {shift['shift_id']};" in audit["details"]
+        and f"Actor User ID: {audit['user_id']};" in audit["details"]
+        and f"Client ID: {shift['client_id']};" in audit["details"]
+        and "Reason: " in audit["details"]
+        and "Effective at UTC: " in audit["details"]
+        and "Deactivated assignment IDs: " in audit["details"]
+        and "Deactivated assignment count: " in audit["details"]
+    )
+
+
+def cancel_shift_in_transaction(
+    conn,
+    shift_id,
+    actor_user_id,
+    reason,
+    cancelled_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Shift cancellation requires an active transaction."
+        )
+    if not _is_valid_staff_notice_identifier(shift_id):
+        raise ValueError("A valid shift is required.")
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise PermissionError("An active authorized manager is required.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("A cancellation reason is required.")
+
+    reason = reason.strip()
+    cancelled_at_utc = format_staff_notice_utc_datetime(
+        cancelled_at_utc
+    )
+    actor = get_active_authenticated_user(conn, actor_user_id)
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to cancel shifts."
+        )
+
+    shift_row = conn.execute("""
+        SELECT *
+        FROM shifts
+        WHERE shift_id = ?
+    """, (shift_id,)).fetchone()
+    if shift_row is None:
+        raise LookupError("Shift not found.")
+    shift = dict(shift_row)
+
+    cancellation_audits = _shift_cancellation_audits(conn, shift_id)
+    if shift["status"] == SHIFT_CANCELLED_STATUS:
+        if (
+            len(cancellation_audits) == 1
+            and _shift_cancellation_audit_is_consistent(
+                cancellation_audits[0],
+                shift
+            )
+        ):
+            return {
+                "cancelled": 0,
+                "assignments_deactivated": 0,
+                "assignment_ids": (),
+                "occurrences_cancelled": 0,
+                "deliveries_cancelled": 0,
+                "delivery_access_revoked": 0
+            }
+        raise ShiftCancellationConflictError(
+            "The cancelled shift has inconsistent cancellation history."
+        )
+    if shift["status"] != "Open":
+        raise ShiftCancellationConflictError(
+            "Only an open shift can be cancelled."
+        )
+    if cancellation_audits:
+        raise ShiftCancellationConflictError(
+            "The open shift has inconsistent cancellation history."
+        )
+    if shift["actual_end_at_utc"] is not None:
+        raise ShiftCancellationConflictError(
+            "A completed shift cannot be cancelled."
+        )
+
+    assignments = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT *
+            FROM shift_staff
+            WHERE shift_id = ?
+            ORDER BY shift_staff_id
+        """, (shift_id,)).fetchall()
+    ]
+    if any(
+        _shift_assignment_has_start_or_completion_evidence(assignment)
+        for assignment in assignments
+    ):
+        raise ShiftCancellationConflictError(
+            "A shift with genuine start or completion evidence "
+            "cannot be cancelled."
+        )
+
+    cursor = conn.execute("""
+        UPDATE shifts
+        SET status = 'Cancelled'
+        WHERE shift_id = ?
+          AND status = 'Open'
+          AND actual_end_at_utc IS NULL
+    """, (shift_id,))
+    if cursor.rowcount != 1:
+        raise ShiftCancellationConflictError(
+            "The shift changed while cancellation was being recorded."
+        )
+
+    deactivated_assignment_ids = []
+    for assignment in assignments:
+        if assignment["active"] != 1:
+            continue
+        cursor = conn.execute("""
+            UPDATE shift_staff
+            SET active = 0
+            WHERE shift_staff_id = ?
+              AND active = 1
+              AND sign_on_at IS NULL
+              AND (
+                  actual_start_time IS NULL
+                  OR TRIM(actual_start_time) = ''
+              )
+              AND actual_end_time IS NULL
+              AND actual_end_at_utc IS NULL
+              AND sign_off_at IS NULL
+              AND COALESCE(start_checklist_completed, 0) = 0
+              AND COALESCE(end_checklist_completed, 0) = 0
+        """, (assignment["shift_staff_id"],))
+        if cursor.rowcount != 1:
+            raise ShiftCancellationConflictError(
+                "A shift assignment changed while cancellation "
+                "was being recorded."
+            )
+        deactivated_assignment_ids.append(
+            assignment["shift_staff_id"]
+        )
+
+    exact_shift_count = conn.execute("""
+        SELECT COUNT(*) AS shift_count
+        FROM shifts
+        WHERE client_id = ?
+          AND shift_date = ?
+          AND shift_type = ?
+    """, (
+        shift["client_id"],
+        shift["shift_date"],
+        shift["shift_type"]
+    )).fetchone()["shift_count"]
+
+    occurrence_parameters = [shift_id]
+    unbound_clause = ""
+    if exact_shift_count == 1:
+        unbound_clause = """
+            OR (
+                o.shift_id IS NULL
+                AND o.planned_client_id = ?
+                AND o.occurrence_date = ?
+                AND o.planned_shift_type = ?
+            )
+        """
+        occurrence_parameters.extend((
+            shift["client_id"],
+            shift["shift_date"],
+            shift["shift_type"]
+        ))
+
+    occurrences = [
+        dict(row)
+        for row in conn.execute(f"""
+            SELECT
+                o.*,
+                sn.notice_id,
+                sn.title,
+                sn.client_id
+            FROM staff_notice_occurrences o
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            JOIN staff_notices sn
+                ON sns.notice_id = sn.notice_id
+            WHERE sn.status = 'Published'
+              AND (
+                  o.shift_id = ?
+                  {unbound_clause}
+              )
+              AND o.occurrence_status IN (
+                  'Pending Shift',
+                  'Scheduled',
+                  'Active',
+                  'No Shift Occurred'
+              )
+            ORDER BY o.occurrence_id
+        """, tuple(occurrence_parameters)).fetchall()
+    ]
+
+    occurrences_cancelled = 0
+    occurrence_ids = []
+    for occurrence in occurrences:
+        previous_status = occurrence["occurrence_status"]
+        if occurrence["shift_id"] is None:
+            bind_cursor = conn.execute("""
+                UPDATE staff_notice_occurrences
+                SET shift_id = ?,
+                    shift_bound_at_utc = ?
+                WHERE occurrence_id = ?
+                  AND shift_id IS NULL
+            """, (
+                shift_id,
+                cancelled_at_utc,
+                occurrence["occurrence_id"]
+            ))
+            if bind_cursor.rowcount != 1:
+                raise ShiftCancellationConflictError(
+                    "A Staff Notice occurrence changed during "
+                    "shift cancellation."
+                )
+            _log_staff_notice_occurrence_bound(
+                conn,
+                occurrence,
+                occurrence["occurrence_id"],
+                shift_id
+            )
+
+        cursor = conn.execute("""
+            UPDATE staff_notice_occurrences
+            SET occurrence_status = 'Cancelled',
+                status_reason = 'Shift Cancelled',
+                status_changed_at_utc = ?,
+                status_changed_by_user_id = ?
+            WHERE occurrence_id = ?
+              AND occurrence_status = ?
+        """, (
+            cancelled_at_utc,
+            actor_user_id,
+            occurrence["occurrence_id"],
+            previous_status
+        ))
+        if cursor.rowcount != 1:
+            raise ShiftCancellationConflictError(
+                "A Staff Notice occurrence changed during "
+                "shift cancellation."
+            )
+        occurrences_cancelled += 1
+        occurrence_ids.append(occurrence["occurrence_id"])
+        log_activity(
+            conn,
+            activity_class="STAFF_NOTICE",
+            activity_type="staff_notice_occurrence_status_changed",
+            summary=(
+                "Staff Notice occurrence cancelled: "
+                f"{occurrence['title']}"
+            ),
+            user_id=actor_user_id,
+            client_id=occurrence["client_id"],
+            shift_id=shift_id,
+            related_table="staff_notice_occurrences",
+            related_id=occurrence["occurrence_id"],
+            details=(
+                f"Notice ID: {occurrence['notice_id']}; "
+                f"Occurrence ID: {occurrence['occurrence_id']}; "
+                f"Previous status: {previous_status}; "
+                "New status: Cancelled; "
+                "Reason code: Shift Cancelled; "
+                f"Reason: {reason}; Effective at UTC: "
+                f"{cancelled_at_utc}"
+            ),
+            success=1
+        )
+
+    deliveries = []
+    if occurrence_ids:
+        placeholders = ",".join("?" for _ in occurrence_ids)
+        deliveries = [
+            dict(row)
+            for row in conn.execute(f"""
+                SELECT
+                    d.*,
+                    o.shift_id,
+                    sn.notice_id,
+                    sn.title,
+                    sn.client_id
+                FROM staff_notice_deliveries d
+                JOIN staff_notice_occurrences o
+                    ON d.occurrence_id = o.occurrence_id
+                JOIN staff_notice_schedules sns
+                    ON o.schedule_id = sns.schedule_id
+                JOIN staff_notices sn
+                    ON sns.notice_id = sn.notice_id
+                WHERE d.occurrence_id IN ({placeholders})
+                ORDER BY d.delivery_id
+            """, tuple(occurrence_ids)).fetchall()
+        ]
+
+    deliveries_cancelled = 0
+    delivery_access_revoked = 0
+    for delivery in deliveries:
+        deliveries_cancelled += _cancel_staff_notice_delivery(
+            conn,
+            delivery,
+            actor_user_id,
+            reason,
+            cancelled_at_utc,
+            reason_code=SHIFT_CANCELLATION_REASON_CODE
+        )
+        delivery_access_revoked += (
+            _revoke_staff_notice_delivery_access(
+                conn,
+                delivery,
+                actor_user_id,
+                reason,
+                cancelled_at_utc,
+                reason_code=SHIFT_CANCELLATION_REASON_CODE
+            )
+        )
+
+    persisted_shift = conn.execute("""
+        SELECT status, actual_end_at_utc
+        FROM shifts
+        WHERE shift_id = ?
+    """, (shift_id,)).fetchone()
+    if (
+        persisted_shift is None
+        or persisted_shift["status"] != SHIFT_CANCELLED_STATUS
+        or persisted_shift["actual_end_at_utc"] is not None
+    ):
+        raise RuntimeError("Shift cancellation verification failed.")
+    remaining_active = conn.execute("""
+        SELECT COUNT(*) AS active_count
+        FROM shift_staff
+        WHERE shift_id = ?
+          AND active = 1
+    """, (shift_id,)).fetchone()["active_count"]
+    if remaining_active != 0:
+        raise RuntimeError("Shift assignment cancellation verification failed.")
+    if occurrence_ids:
+        placeholders = ",".join("?" for _ in occurrence_ids)
+        remaining_occurrences = conn.execute(f"""
+            SELECT COUNT(*) AS occurrence_count
+            FROM staff_notice_occurrences
+            WHERE occurrence_id IN ({placeholders})
+              AND (
+                  occurrence_status <> 'Cancelled'
+                  OR status_reason <> 'Shift Cancelled'
+              )
+        """, tuple(occurrence_ids)).fetchone()["occurrence_count"]
+        accessible_deliveries = conn.execute(f"""
+            SELECT COUNT(*) AS delivery_count
+            FROM staff_notice_deliveries
+            WHERE occurrence_id IN ({placeholders})
+              AND recipient_access <> 0
+        """, tuple(occurrence_ids)).fetchone()["delivery_count"]
+        if remaining_occurrences or accessible_deliveries:
+            raise RuntimeError(
+                "Staff Notice shift cancellation verification failed."
+            )
+
+    assignment_id_text = (
+        ", ".join(str(value) for value in deactivated_assignment_ids)
+        if deactivated_assignment_ids else "None"
+    )
+    log_activity(
+        conn,
+        activity_class="SHIFT",
+        activity_type="shift_cancelled",
+        summary="Shift cancelled",
+        user_id=actor_user_id,
+        client_id=shift["client_id"],
+        shift_id=shift_id,
+        related_table="shifts",
+        related_id=shift_id,
+        details=(
+            f"Shift ID: {shift_id}; Actor User ID: {actor_user_id}; "
+            f"Client ID: {shift['client_id']}; Reason: {reason}; "
+            f"Effective at UTC: {cancelled_at_utc}; "
+            "Deactivated assignment IDs: "
+            f"{assignment_id_text}; Deactivated assignment count: "
+            f"{len(deactivated_assignment_ids)}"
+        ),
+        success=1
+    )
+
+    return {
+        "cancelled": 1,
+        "assignments_deactivated": len(deactivated_assignment_ids),
+        "assignment_ids": tuple(deactivated_assignment_ids),
+        "occurrences_cancelled": occurrences_cancelled,
+        "deliveries_cancelled": deliveries_cancelled,
+        "delivery_access_revoked": delivery_access_revoked
+    }
+
 STAFF_NOTICE_SELECTABLE_ROLES = frozenset({
     "Admin",
     "Program Manager",
@@ -4686,6 +5130,15 @@ def _load_staff_notice_matching_shifts(
             ):
                 continue
 
+        if shift["status"] == SHIFT_CANCELLED_STATUS:
+            if applicability == "Specific Shift":
+                _append_staff_notice_preview_message(
+                    blocking_errors,
+                    "The selected specific shift is cancelled and cannot "
+                    "receive Staff Notice requirements."
+                )
+            continue
+
         if not _staff_notice_schedule_applies_on_date(
             schedule,
             shift_date,
@@ -6345,6 +6798,10 @@ def reconcile_staff_notice_shift_sign_on(
     if shift_row is None:
         raise ValueError("Shift not found for Staff Notice reconciliation.")
     shift = dict(shift_row)
+    if shift["status"] != "Open":
+        raise StaffNoticeShiftSignOnError(
+            "Staff Notice reconciliation requires an open shift."
+        )
 
     assignment = conn.execute("""
         SELECT shift_staff_id, actual_start_time
@@ -6908,6 +7365,7 @@ def remove_shift_staff_assignment(
             s.client_id,
             s.shift_date,
             s.shift_type,
+            s.status AS shift_status,
             u.full_name
         FROM shift_staff ss
         JOIN shifts s
@@ -6918,6 +7376,10 @@ def remove_shift_staff_assignment(
     """, (shift_staff_id,)).fetchone()
     if assignment is None:
         raise LookupError("Shift staff assignment not found.")
+    if assignment["shift_status"] != "Open":
+        raise ShiftCancellationConflictError(
+            "Cancelled or non-open shifts cannot be restaffed."
+        )
     if assignment["active"] != 1:
         return {
             "assignments_removed": 0,
@@ -7121,6 +7583,10 @@ def complete_shift_staff_assignment(
         raise LookupError("Shift staff assignment not found.")
     assignment = dict(assignment_row)
     stored_actual_end = assignment["actual_end_at_utc"]
+    if assignment["shift_status"] != "Open":
+        raise ShiftStaffCompletionError(
+            "Cancelled or non-open shifts cannot be completed."
+        )
 
     if assignment["active"] != 1:
         if stored_actual_end is None:
@@ -12000,6 +12466,157 @@ def client_new():
 # SHIFT MANAGEMENT
 #####################################################################
 
+@app.route("/shifts/manage")
+def shift_management():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+            return "Access denied", 403
+        shifts = conn.execute("""
+            SELECT
+                s.*,
+                c.client_name,
+                COUNT(ss.shift_staff_id) AS assignment_count,
+                SUM(CASE WHEN ss.active = 1 THEN 1 ELSE 0 END)
+                    AS active_assignment_count
+            FROM shifts s
+            JOIN clients c
+                ON s.client_id = c.client_id
+            LEFT JOIN shift_staff ss
+                ON s.shift_id = ss.shift_id
+            GROUP BY s.shift_id
+            ORDER BY s.shift_date DESC, s.shift_type, s.shift_id DESC
+        """).fetchall()
+        return render_template("shift_management.html", shifts=shifts)
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+
+@app.route("/shift/<int:shift_id>/cancel", methods=["GET", "POST"])
+def shift_cancel(shift_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    shift = None
+    assignments = []
+    error = None
+    error_status = 400
+    reason = request.form.get("reason", "").strip()
+
+    try:
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+            return "Access denied", 403
+        shift = conn.execute("""
+            SELECT s.*, c.client_name
+            FROM shifts s
+            JOIN clients c
+                ON s.client_id = c.client_id
+            WHERE s.shift_id = ?
+        """, (shift_id,)).fetchone()
+        if shift is None:
+            return "Shift not found", 404
+        assignments = conn.execute("""
+            SELECT ss.*, u.full_name, u.role
+            FROM shift_staff ss
+            JOIN users u
+                ON ss.user_id = u.user_id
+            WHERE ss.shift_id = ?
+            ORDER BY ss.shift_staff_id
+        """, (shift_id,)).fetchall()
+
+        if request.method == "POST":
+            if request.form.get("confirm") != "yes":
+                raise ValueError(
+                    "You must explicitly confirm shift cancellation."
+                )
+            if not reason:
+                raise ValueError("A cancellation reason is required.")
+
+            conn.execute("BEGIN IMMEDIATE")
+            cancelled_at_utc = get_application_now_utc()
+            result = cancel_shift_in_transaction(
+                conn,
+                shift_id,
+                session["user_id"],
+                reason,
+                cancelled_at_utc
+            )
+            conn.commit()
+            return redirect(url_for(
+                "shift_management",
+                cancellation_result=(
+                    "cancelled" if result["cancelled"] else "unchanged"
+                )
+            ))
+    except PermissionError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Access denied", 403
+    except LookupError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Shift not found", 404
+    except ShiftCancellationConflictError as caught_error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        error = str(caught_error)
+        error_status = 409
+    except ValueError as caught_error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        error = str(caught_error)
+        error_status = 400
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        error = (
+            "The shift could not be cancelled. No changes were made. "
+            "Please retry."
+        )
+        error_status = 503
+    finally:
+        conn.close()
+
+    return render_template(
+        "shift_cancel.html",
+        shift=shift,
+        assignments=assignments,
+        reason=reason,
+        error=error
+    ), error_status if error else 200
+
+
+def _find_cancelled_matching_shift(conn, client_id, shift_date, shift_type):
+    return conn.execute("""
+        SELECT shift_id
+        FROM shifts
+        WHERE client_id = ?
+          AND shift_date = ?
+          AND shift_type = ?
+          AND status = 'Cancelled'
+        ORDER BY shift_id
+        LIMIT 1
+    """, (client_id, shift_date, shift_type)).fetchone()
+
+
 def auto_sign_on_user(user_id):
     current_datetime = datetime.now(VANCOUVER_TIMEZONE)
     shift_type = get_current_shift_type(current_datetime)
@@ -12020,6 +12637,16 @@ def auto_sign_on_user(user_id):
         """, (shift_date, shift_type)).fetchone()
 
         if shift is None:
+            if _find_cancelled_matching_shift(
+                conn,
+                1,
+                shift_date,
+                shift_type
+            ) is not None:
+                raise ShiftCancellationConflictError(
+                    "This shift was cancelled. A replacement cannot be "
+                    "created through sign-on."
+                )
             cur = conn.execute("""
                 INSERT INTO shifts
                 (client_id, shift_date, shift_type, status)
@@ -12118,6 +12745,16 @@ def shift_sign_on():
 
                 # If no open shift exists, create one
                 if shift is None:
+                    if _find_cancelled_matching_shift(
+                        conn,
+                        1,
+                        shift_date,
+                        shift_type
+                    ) is not None:
+                        raise ShiftCancellationConflictError(
+                            "This shift was cancelled. A replacement "
+                            "cannot be created through sign-on."
+                        )
                     cur = conn.execute("""
                         INSERT INTO shifts
                         (client_id, shift_date, shift_type, status)
@@ -12163,6 +12800,10 @@ def shift_sign_on():
                 return redirect(
                     url_for("shift_dashboard", shift_id=shift_id)
                 )
+            except ShiftCancellationConflictError as caught_error:
+                if conn.in_transaction:
+                    conn.rollback()
+                error = str(caught_error)
             except Exception:
                 if conn.in_transaction:
                     conn.rollback()
@@ -12194,12 +12835,13 @@ def shift_dashboard(shift_id):
 
     now_utc = get_application_now_utc()
     try:
-        conn.execute("BEGIN IMMEDIATE")
         recipient = _get_authenticated_staff_notice_recipient(conn)
-        reconcile_staff_notice_non_shift_requirements_in_transaction(
-            conn,
-            now_utc
-        )
+        if not _shift_is_cancelled(shift):
+            conn.execute("BEGIN IMMEDIATE")
+            reconcile_staff_notice_non_shift_requirements_in_transaction(
+                conn,
+                now_utc
+            )
         staff_notice_collection = (
             _get_staff_notice_recipient_collections(
                 conn,
@@ -12207,7 +12849,8 @@ def shift_dashboard(shift_id):
                 now_utc
             )
         )
-        conn.commit()
+        if conn.in_transaction:
+            conn.commit()
     except PermissionError:
         if conn.in_transaction:
             conn.rollback()
@@ -12244,10 +12887,13 @@ def shift_dashboard(shift_id):
         FROM shift_staff ss
         JOIN users u ON ss.user_id = u.user_id
         WHERE ss.shift_id = ?
-            AND ss.active = 1
+            AND (
+                ? = 'Cancelled'
+                OR ss.active = 1
+            )
             AND u.role = 'Support Worker'
         ORDER BY ss.sign_on_at
-    """, (shift_id,)).fetchall()
+    """, (shift_id, shift["status"])).fetchall()
 
     notes = conn.execute("""
         SELECT sn.*, u.full_name
@@ -12385,6 +13031,9 @@ def toileting_event_new(shift_id):
     if shift is None:
         conn.close()
         return "Shift not found", 404
+    if _shift_is_cancelled(shift):
+        conn.close()
+        return _cancelled_shift_response()
 
     if request.method == "POST":
         event_type = request.form.get("event_type", "").strip()
@@ -12953,7 +13602,8 @@ def manager_sign_off(shift_staff_id):
                 u.full_name,
                 s.shift_date,
                 s.shift_type,
-                s.client_id
+                s.client_id,
+                s.status
             FROM shift_staff ss
             JOIN users u
                 ON ss.user_id = u.user_id
@@ -12963,6 +13613,8 @@ def manager_sign_off(shift_staff_id):
         """, (shift_staff_id,)).fetchone()
         if staff_shift is None:
             return "Shift staff record not found", 404
+        if _shift_is_cancelled(staff_shift):
+            return _cancelled_shift_response()
 
         if request.method == "POST":
             if not values["reason"]:
@@ -13083,6 +13735,9 @@ def start_checklist(shift_id):
     if shift is None:
         conn.close()
         return "Shift not found", 404
+    if _shift_is_cancelled(shift):
+        conn.close()
+        return _cancelled_shift_response()
 
     if request.method == "POST":
 
@@ -13166,6 +13821,9 @@ def end_shift(shift_id):
         if shift is None:
             conn.close()
             return "Shift not found", 404
+        if _shift_is_cancelled(shift):
+            conn.close()
+            return _cancelled_shift_response()
 
         if request.method == "POST":
             completed_at = get_application_now_utc()
@@ -14154,6 +14812,9 @@ def shift_add_note(shift_id):
     if shift is None:
         conn.close()
         return "Shift not found", 404
+    if _shift_is_cancelled(shift):
+        conn.close()
+        return _cancelled_shift_response()
 
     if request.method == "POST":
         note_text = request.form["note_text"]
@@ -17595,6 +18256,9 @@ def shift_care_task_record(shift_id, care_task_id):
     if shift is None:
         conn.close()
         return "Shift not found", 404
+    if _shift_is_cancelled(shift):
+        conn.close()
+        return _cancelled_shift_response()
 
     if task is None:
         conn.close()
@@ -17728,7 +18392,8 @@ def shift_care_task_entry_edit(shift_id, entry_id):
             care_tasks.task_name,
             care_tasks.comment_required_attempted,
             care_tasks.comment_required_not_completed,
-            shifts.client_id
+            shifts.client_id,
+            shifts.status AS shift_status
         FROM shift_care_task_entries
         JOIN care_tasks
             ON care_tasks.care_task_id =
@@ -17746,6 +18411,9 @@ def shift_care_task_entry_edit(shift_id, entry_id):
     if entry is None:
         conn.close()
         return "Care task entry not found", 404
+    if entry["shift_status"] == SHIFT_CANCELLED_STATUS:
+        conn.close()
+        return _cancelled_shift_response()
 
     if request.method == "POST":
         outcome = request.form.get("status", "")
@@ -18639,6 +19307,9 @@ def shift_housekeeping_task_record(
     if shift is None:
         conn.close()
         return "Shift not found", 404
+    if _shift_is_cancelled(shift):
+        conn.close()
+        return _cancelled_shift_response()
 
     if task is None:
         conn.close()
@@ -18813,6 +19484,9 @@ def shift_housekeeping_task_entry_edit(
     if shift is None:
         conn.close()
         return "Shift not found", 404
+    if _shift_is_cancelled(shift):
+        conn.close()
+        return _cancelled_shift_response()
 
     if entry is None:
         conn.close()

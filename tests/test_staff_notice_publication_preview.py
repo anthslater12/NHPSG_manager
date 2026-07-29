@@ -415,6 +415,7 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
         shift_type,
         *,
         client_id=1,
+        status="Open",
         staff=()
     ):
         conn = sqlite3.connect(self.database_path)
@@ -424,8 +425,14 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
             conn.execute("""
                 INSERT INTO shifts
                 (shift_id, client_id, shift_date, shift_type, status)
-                VALUES (?, ?, ?, ?, 'Open')
-            """, (shift_id, client_id, shift_date, shift_type))
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                shift_id,
+                client_id,
+                shift_date,
+                shift_type,
+                status
+            ))
             for index, (user_id, active) in enumerate(staff, start=1):
                 conn.execute("""
                     INSERT INTO shift_staff
@@ -1534,6 +1541,25 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
         self.assertTrue(any(
             "cannot safely choose" in error
             for error in multiple["blocking_errors"]
+        ))
+
+    def test_cancelled_specific_shift_blocks_publication(self):
+        notice_id = self.specific_shift_notice()
+        self.add_shift(
+            20,
+            "2026-08-20",
+            "Overnight",
+            status="Cancelled",
+            staff=((2, 0),)
+        )
+
+        preview = self.preview(notice_id)
+
+        self.assertFalse(preview["ready_for_publication"])
+        self.assertEqual(preview["matching_shifts"], [])
+        self.assertTrue(any(
+            "specific shift is cancelled" in error
+            for error in preview["blocking_errors"]
         ))
 
     def test_blocked_future_specific_shift_does_not_promise_pending_creation(self):

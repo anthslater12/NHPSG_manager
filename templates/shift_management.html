@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Shift Management</h2>
+    <p>Review future, unstaffed, active, and historical shifts.</p>
+
+    {% if request.args.get("cancellation_result") == "cancelled" %}
+        <p class="success">The shift was cancelled.</p>
+    {% elif request.args.get("cancellation_result") == "unchanged" %}
+        <p>The shift was already consistently cancelled. No changes were made.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    {% if shifts %}
+        <table>
+            <tr>
+                <th>Date</th>
+                <th>Client</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Assignments</th>
+                <th>Actions</th>
+            </tr>
+            {% for shift in shifts %}
+                <tr>
+                    <td>{{ shift.shift_date }}</td>
+                    <td>{{ shift.client_name }}</td>
+                    <td>{{ shift.shift_type }}</td>
+                    <td>{{ shift.status }}</td>
+                    <td>
+                        {{ shift.active_assignment_count or 0 }} active /
+                        {{ shift.assignment_count }} total
+                    </td>
+                    <td>
+                        <a href="{{ url_for(
+                            'shift_dashboard',
+                            shift_id=shift.shift_id
+                        ) }}">View</a>
+                        {% if shift.status == "Open" %}
+                            |
+                            <a href="{{ url_for(
+                                'shift_cancel',
+                                shift_id=shift.shift_id
+                            ) }}">Cancel</a>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No shifts found.</p>
+    {% endif %}
+</div>
+
+{% endblock %}
