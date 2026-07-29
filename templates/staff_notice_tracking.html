@@ -193,6 +193,13 @@
     <h2>Recipient Tracking</h2>
     <h3>{{ notice.title }}</h3>
     <p><small>All displayed dates and times use America/Vancouver.</small></p>
+    {% if withdrawal_result == "withdrawn" %}
+        <p class="status-inactive">
+            Staff Notice withdrawn successfully.
+        </p>
+    {% elif withdrawal_result == "unchanged" %}
+        <p>No change was required because this notice was already withdrawn.</p>
+    {% endif %}
     {% if recipient_change_result == "removed" %}
         <p class="success">
             The worker was removed from the shift. Their historical
@@ -251,6 +258,44 @@
     </table>
 
     <h3>Published Notice</h3>
+    {% if notice.status == 'Published' %}
+        <div class="card">
+            <h4>Withdraw Notice</h4>
+            <p>
+                Withdrawal is permanent. Outstanding deliveries will be
+                cancelled, recipient access will be revoked, and all prior
+                viewing and acknowledgement history will be preserved.
+            </p>
+            <form method="post"
+                  action="{{ url_for(
+                      'staff_notice_withdraw',
+                      notice_id=notice.notice_id
+                  ) }}">
+                <label>
+                    Withdrawal reason
+                    <input type="text"
+                           name="withdrawal_reason"
+                           required>
+                </label>
+                <label>
+                    <input type="checkbox"
+                           name="confirm_withdrawal"
+                           value="yes"
+                           required>
+                    Permanently withdraw this Staff Notice.
+                </label>
+                <button type="submit">Withdraw Notice</button>
+            </form>
+        </div>
+    {% elif notice.status == 'Withdrawn' %}
+        <div class="error-message">
+            <strong>
+                Withdrawn by {{ notice.withdrawn_by }}
+                on {{ notice.withdrawn_at_display }}
+            </strong><br>
+            Reason: {{ notice.withdrawal_reason }}
+        </div>
+    {% endif %}
     <div style="white-space: pre-wrap;">{{ notice.notice_text }}</div>
 </div>
 

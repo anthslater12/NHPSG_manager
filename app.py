@@ -3471,7 +3471,8 @@ def _load_staff_notice_admin_record(conn, notice_id):
             c.client_name,
             creator.full_name AS created_by,
             updater.full_name AS updated_by,
-            publisher.full_name AS published_by
+            publisher.full_name AS published_by,
+            withdrawer.full_name AS withdrawn_by
         FROM staff_notices sn
         LEFT JOIN clients c
             ON sn.client_id = c.client_id
@@ -3481,6 +3482,8 @@ def _load_staff_notice_admin_record(conn, notice_id):
             ON sn.updated_by_user_id = updater.user_id
         LEFT JOIN users publisher
             ON sn.published_by_user_id = publisher.user_id
+        LEFT JOIN users withdrawer
+            ON sn.withdrawn_by_user_id = withdrawer.user_id
         WHERE sn.notice_id = ?
     """, (notice_id,)).fetchone()
 
@@ -6526,7 +6529,8 @@ def _revoke_staff_notice_delivery_access(
     delivery,
     actor_user_id,
     reason,
-    effective_at_utc
+    effective_at_utc,
+    reason_code="Shift Assignment Removed"
 ):
     cursor = conn.execute("""
         UPDATE staff_notice_deliveries
@@ -6558,7 +6562,7 @@ def _revoke_staff_notice_delivery_access(
         VALUES (?, 'Access Revoked', NULL, NULL, 1, 0, ?, ?, ?, ?)
     """, (
         delivery["delivery_id"],
-        "Shift Assignment Removed",
+        reason_code,
         reason,
         actor_user_id,
         effective_at_utc
@@ -7504,7 +7508,10 @@ def _staff_notice_tracking_context(occurrence):
 def _load_staff_notice_tracking(conn, notice_id, now_utc):
     now_utc = parse_staff_notice_utc_datetime(now_utc)
     notice = _load_staff_notice_admin_record(conn, notice_id)
-    if notice is None or notice["status"] != "Published":
+    if notice is None or notice["status"] not in (
+        "Published",
+        "Withdrawn"
+    ):
         return None
 
     notice["summary"] = build_staff_notice_plain_language_summary(notice)
@@ -7512,7 +7519,8 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
         "created_at_utc",
         "published_at_utc",
         "effective_start_at_utc",
-        "expires_at_utc"
+        "expires_at_utc",
+        "withdrawn_at_utc"
     ):
         display_name = field_name.replace("_at_utc", "_display")
         notice[display_name] = (
@@ -8683,15 +8691,19 @@ def staff_notice_tracking(notice_id):
     try:
         conn.execute("BEGIN IMMEDIATE")
         notice = _load_staff_notice_publish_record(conn, notice_id)
-        if notice is None or notice["status"] != "Published":
+        if notice is None or notice["status"] not in (
+            "Published",
+            "Withdrawn"
+        ):
             conn.rollback()
-            return "Published Staff Notice not found", 404
+            return "Staff Notice not found", 404
 
-        reconcile_staff_notice_tracking_in_transaction(
-            conn,
-            notice,
-            now_utc
-        )
+        if notice["status"] == "Published":
+            reconcile_staff_notice_tracking_in_transaction(
+                conn,
+                notice,
+                now_utc
+            )
         tracking = _load_staff_notice_tracking(
             conn,
             notice_id,
@@ -8718,8 +8730,323 @@ def staff_notice_tracking(notice_id):
         recipient_change_result=request.args.get(
             "recipient_change_result"
         ),
+        withdrawal_result=request.args.get("withdrawal_result"),
         **tracking
     )
+
+
+def _cancel_staff_notice_delivery_for_withdrawal(
+    conn,
+    delivery,
+    actor_user_id,
+    reason,
+    effective_at_utc
+):
+    cursor = conn.execute("""
+        UPDATE staff_notice_deliveries
+        SET requirement_status = 'Cancelled',
+            status_changed_at_utc = ?,
+            status_changed_by_user_id = ?,
+            current_reason_code = 'Notice Withdrawn',
+            current_reason_text = ?
+        WHERE delivery_id = ?
+          AND requirement_status = 'Required'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM acknowledgements ack
+              WHERE ack.source_table = 'staff_notice_deliveries'
+                AND ack.source_id = staff_notice_deliveries.delivery_id
+                AND ack.user_id = staff_notice_deliveries.user_id
+                AND ack.active = 1
+          )
+    """, (
+        effective_at_utc,
+        actor_user_id,
+        reason,
+        delivery["delivery_id"]
+    ))
+    if cursor.rowcount != 1:
+        return 0
+
+    conn.execute("""
+        INSERT INTO staff_notice_delivery_history
+        (
+            delivery_id,
+            event_type,
+            previous_requirement_status,
+            new_requirement_status,
+            previous_recipient_access,
+            new_recipient_access,
+            reason_code,
+            reason_text,
+            changed_by_user_id,
+            changed_at_utc
+        )
+        VALUES (?, 'Cancelled', 'Required', 'Cancelled',
+                NULL, NULL, 'Notice Withdrawn', ?, ?, ?)
+    """, (
+        delivery["delivery_id"],
+        reason,
+        actor_user_id,
+        effective_at_utc
+    ))
+    _log_staff_notice_delivery_transition(
+        conn,
+        activity_type="staff_notice_delivery_cancelled",
+        summary="Staff Notice delivery cancelled",
+        delivery=delivery,
+        actor_user_id=actor_user_id,
+        reason=reason,
+        effective_at_utc=effective_at_utc
+    )
+    return 1
+
+
+def _withdraw_staff_notice_in_transaction(
+    conn,
+    notice_id,
+    actor_user_id,
+    withdrawal_reason,
+    withdrawn_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice withdrawal requires an active transaction."
+        )
+    if not isinstance(withdrawal_reason, str) or not (
+        withdrawal_reason.strip()
+    ):
+        raise ValueError("A withdrawal reason is required.")
+    if not _is_valid_staff_notice_identifier(notice_id):
+        raise ValueError("A valid Staff Notice is required.")
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise ValueError("A valid withdrawing user is required.")
+
+    withdrawal_reason = withdrawal_reason.strip()
+    withdrawn_at_utc = format_staff_notice_utc_datetime(
+        withdrawn_at_utc
+    )
+    notice_row = conn.execute("""
+        SELECT notice_id, title, client_id, status
+        FROM staff_notices
+        WHERE notice_id = ?
+    """, (notice_id,)).fetchone()
+    if notice_row is None:
+        raise LookupError("Staff Notice not found.")
+    notice = dict(notice_row)
+    if notice["status"] == "Withdrawn":
+        return {
+            "withdrawn": 0,
+            "occurrences_cancelled": 0,
+            "deliveries_cancelled": 0,
+            "delivery_access_revoked": 0
+        }
+    if notice["status"] != "Published":
+        raise ValueError(
+            "Only a published Staff Notice can be withdrawn."
+        )
+
+    cursor = conn.execute("""
+        UPDATE staff_notices
+        SET status = 'Withdrawn',
+            withdrawn_by_user_id = ?,
+            withdrawn_at_utc = ?,
+            withdrawal_reason = ?
+        WHERE notice_id = ?
+          AND status = 'Published'
+    """, (
+        actor_user_id,
+        withdrawn_at_utc,
+        withdrawal_reason,
+        notice_id
+    ))
+    if cursor.rowcount != 1:
+        raise RuntimeError(
+            "The Staff Notice changed while it was being withdrawn."
+        )
+
+    occurrences = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT
+                o.*,
+                sn.notice_id,
+                sn.title,
+                sn.client_id
+            FROM staff_notice_occurrences o
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            JOIN staff_notices sn
+                ON sns.notice_id = sn.notice_id
+            WHERE sns.notice_id = ?
+            ORDER BY o.occurrence_id
+        """, (notice_id,)).fetchall()
+    ]
+    occurrences_cancelled = 0
+    for occurrence in occurrences:
+        previous_status = occurrence["occurrence_status"]
+        if previous_status not in ("Pending Shift", "Scheduled"):
+            continue
+        cursor = conn.execute("""
+            UPDATE staff_notice_occurrences
+            SET occurrence_status = 'Cancelled',
+                status_reason = 'Notice Withdrawn',
+                status_changed_at_utc = ?,
+                status_changed_by_user_id = ?
+            WHERE occurrence_id = ?
+              AND occurrence_status = ?
+        """, (
+            withdrawn_at_utc,
+            actor_user_id,
+            occurrence["occurrence_id"],
+            previous_status
+        ))
+        if cursor.rowcount != 1:
+            continue
+        occurrences_cancelled += 1
+        log_activity(
+            conn,
+            activity_class="STAFF_NOTICE",
+            activity_type="staff_notice_occurrence_status_changed",
+            summary=(
+                "Staff Notice occurrence cancelled: "
+                f"{notice['title']}"
+            ),
+            user_id=actor_user_id,
+            client_id=notice["client_id"],
+            shift_id=occurrence["shift_id"],
+            related_table="staff_notice_occurrences",
+            related_id=occurrence["occurrence_id"],
+            details=(
+                f"Notice ID: {notice_id}; Occurrence ID: "
+                f"{occurrence['occurrence_id']}; Previous status: "
+                f"{previous_status}; New status: Cancelled; "
+                "Reason code: Notice Withdrawn; "
+                f"Reason: {withdrawal_reason}; Effective at UTC: "
+                f"{withdrawn_at_utc}"
+            ),
+            success=1
+        )
+
+    deliveries = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT
+                d.*,
+                o.shift_id,
+                sn.notice_id,
+                sn.title,
+                sn.client_id
+            FROM staff_notice_deliveries d
+            JOIN staff_notice_occurrences o
+                ON d.occurrence_id = o.occurrence_id
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            JOIN staff_notices sn
+                ON sns.notice_id = sn.notice_id
+            WHERE sns.notice_id = ?
+            ORDER BY d.delivery_id
+        """, (notice_id,)).fetchall()
+    ]
+    deliveries_cancelled = 0
+    delivery_access_revoked = 0
+    for delivery in deliveries:
+        deliveries_cancelled += (
+            _cancel_staff_notice_delivery_for_withdrawal(
+                conn,
+                delivery,
+                actor_user_id,
+                withdrawal_reason,
+                withdrawn_at_utc
+            )
+        )
+        delivery_access_revoked += (
+            _revoke_staff_notice_delivery_access(
+                conn,
+                delivery,
+                actor_user_id,
+                withdrawal_reason,
+                withdrawn_at_utc,
+                reason_code="Notice Withdrawn"
+            )
+        )
+
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_withdrawn",
+        summary=f"Staff Notice withdrawn: {notice['title']}",
+        user_id=actor_user_id,
+        client_id=notice["client_id"],
+        shift_id=None,
+        related_table="staff_notices",
+        related_id=notice_id,
+        details=(
+            f"Notice ID: {notice_id}; Reason: {withdrawal_reason}; "
+            f"Withdrawn at UTC: {withdrawn_at_utc}; "
+            f"Occurrences cancelled: {occurrences_cancelled}; "
+            f"Deliveries cancelled: {deliveries_cancelled}; "
+            f"Delivery access revoked: {delivery_access_revoked}"
+        ),
+        success=1
+    )
+    return {
+        "withdrawn": 1,
+        "occurrences_cancelled": occurrences_cancelled,
+        "deliveries_cancelled": deliveries_cancelled,
+        "delivery_access_revoked": delivery_access_revoked
+    }
+
+
+@app.route("/staff-notices/<int:notice_id>/withdraw", methods=["POST"])
+def staff_notice_withdraw(notice_id):
+    access_response = _staff_notice_management_access_response()
+    if access_response is not None:
+        return access_response
+
+    if request.form.get("confirm_withdrawal") != "yes":
+        return "Confirm the Staff Notice withdrawal.", 400
+    withdrawal_reason = request.form.get("withdrawal_reason", "")
+    if not withdrawal_reason.strip():
+        return "A withdrawal reason is required.", 400
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        result = _withdraw_staff_notice_in_transaction(
+            conn,
+            notice_id,
+            session["user_id"],
+            withdrawal_reason,
+            get_application_now_utc()
+        )
+        conn.commit()
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Staff Notice not found.", 404
+    except ValueError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return str(error), 409
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "The Staff Notice could not be withdrawn. No changes were "
+            "made. Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "staff_notice_tracking",
+        notice_id=notice_id,
+        withdrawal_result=(
+            "withdrawn" if result["withdrawn"] else "unchanged"
+        )
+    ))
 
 
 def _load_staff_notice_shift_delivery_management_context(
