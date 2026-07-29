@@ -93,6 +93,39 @@
                                                         .acknowledged_at_display
                                                     }}
                                                     {% if acknowledgement.active %}
+                                                        {% if delivery.can_invalidate_acknowledgement
+                                                              and acknowledgement.acknowledgement_id
+                                                              == delivery.acknowledgement_id %}
+                                                            <form
+                                                                method="post"
+                                                                action="{{ url_for(
+                                                                    'staff_notice_acknowledgement_invalidate',
+                                                                    acknowledgement_id=acknowledgement.acknowledgement_id
+                                                                ) }}"
+                                                            >
+                                                                <label>
+                                                                    Invalidation reason
+                                                                    <input
+                                                                        type="text"
+                                                                        name="invalidation_reason"
+                                                                        required
+                                                                    >
+                                                                </label>
+                                                                <label>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        name="confirm_invalidation"
+                                                                        value="yes"
+                                                                        required
+                                                                    >
+                                                                    Invalidate this acknowledgement
+                                                                    and preserve its history.
+                                                                </label>
+                                                                <button type="submit">
+                                                                    Invalidate Acknowledgement
+                                                                </button>
+                                                            </form>
+                                                        {% endif %}
                                                         — Active
                                                     {% else %}
                                                         — Invalidated
@@ -106,6 +139,12 @@
                                                             — {{
                                                                 acknowledgement
                                                                 .invalidation_reason
+                                                            }}
+                                                        {% endif %}
+                                                        {% if acknowledgement.invalidated_by_name %}
+                                                            — {{
+                                                                acknowledgement
+                                                                .invalidated_by_name
                                                             }}
                                                         {% endif %}
                                                     {% endif %}
@@ -208,6 +247,17 @@
         <p>
             No change was required because the existing replacement Draft was
             reused.
+        </p>
+    {% endif %}
+    {% if acknowledgement_invalidation_result == "invalidated" %}
+        <p class="status-active">
+            The acknowledgement was invalidated. Its original history was
+            preserved and the recipient may acknowledge again.
+        </p>
+    {% elif acknowledgement_invalidation_result == "unchanged" %}
+        <p>
+            No change was required because this acknowledgement was already
+            invalidated.
         </p>
     {% endif %}
     {% if recipient_change_result == "removed" %}

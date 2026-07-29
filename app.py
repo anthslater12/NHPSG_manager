@@ -1318,6 +1318,11 @@ STAFF_NOTICE_REPLACEMENT_FORM_KEYS = frozenset({
     "confirm_replacement"
 })
 
+STAFF_NOTICE_ACKNOWLEDGEMENT_INVALIDATION_FORM_KEYS = frozenset({
+    "invalidation_reason",
+    "confirm_invalidation"
+})
+
 STAFF_NOTICE_SCALAR_FORM_KEYS = frozenset({
     "title",
     "notice_text",
@@ -1417,6 +1422,10 @@ class StaffNoticeStalePublicationError(ValueError):
 
 
 class StaffNoticeReplacementConflictError(ValueError):
+    pass
+
+
+class StaffNoticeAcknowledgementInvalidationConflictError(ValueError):
     pass
 
 
@@ -7610,6 +7619,7 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
                 viewer.full_name AS viewer_name,
                 ack.acknowledgement_id,
                 ack.acknowledged_at,
+                ack.acknowledgement_type,
                 (
                     SELECT MIN(ss.shift_staff_id)
                     FROM shift_staff ss
@@ -7683,6 +7693,17 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
                 delivery["requirement_status"] == "No Longer Required"
                 or delivery["recipient_access"] == 0
             )
+        )
+        delivery["can_invalidate_acknowledgement"] = (
+            delivery["acknowledgement_id"] is not None
+            and delivery["acknowledgement_type"] == "Acknowledgement"
+            and notice["status"] == "Published"
+            and delivery["requirement_status"] == "Required"
+            and delivery["recipient_access"] == 1
+            and delivery["first_viewed_at_utc"] is not None
+            and delivery["viewed_by_user_id"] == delivery["user_id"]
+            and delivery["occurrence_status"]
+            not in ("No Shift Occurred", "Cancelled")
         )
         for field_name, display_name in (
             ("assigned_at_utc", "assigned_display"),
@@ -8752,8 +8773,384 @@ def staff_notice_tracking(notice_id):
         ),
         withdrawal_result=request.args.get("withdrawal_result"),
         replacement_result=request.args.get("replacement_result"),
+        acknowledgement_invalidation_result=request.args.get(
+            "acknowledgement_invalidation_result"
+        ),
         **tracking
     )
+
+
+def _load_staff_notice_acknowledgement_invalidation_context(
+    conn,
+    acknowledgement_id
+):
+    acknowledgement_row = conn.execute("""
+        SELECT *
+        FROM acknowledgements
+        WHERE acknowledgement_id = ?
+    """, (acknowledgement_id,)).fetchone()
+    if acknowledgement_row is None:
+        raise LookupError("Staff Notice acknowledgement not found.")
+    acknowledgement = dict(acknowledgement_row)
+    if acknowledgement["source_table"] != "staff_notice_deliveries":
+        raise LookupError("Staff Notice acknowledgement not found.")
+
+    delivery_row = conn.execute("""
+        SELECT
+            d.*,
+            o.shift_id,
+            o.occurrence_status,
+            sns.notice_id,
+            sn.title,
+            sn.client_id,
+            sn.status AS notice_status
+        FROM staff_notice_deliveries d
+        JOIN staff_notice_occurrences o
+            ON d.occurrence_id = o.occurrence_id
+        JOIN staff_notice_schedules sns
+            ON o.schedule_id = sns.schedule_id
+        JOIN staff_notices sn
+            ON sns.notice_id = sn.notice_id
+        WHERE d.delivery_id = ?
+    """, (acknowledgement["source_id"],)).fetchone()
+    if delivery_row is None:
+        raise StaffNoticeAcknowledgementInvalidationConflictError(
+            "The acknowledgement has no valid Staff Notice delivery."
+        )
+    delivery = dict(delivery_row)
+    if (
+        acknowledgement["source_id"] != delivery["delivery_id"]
+        or acknowledgement["user_id"] != delivery["user_id"]
+        or acknowledgement["acknowledgement_type"] != "Acknowledgement"
+    ):
+        raise StaffNoticeAcknowledgementInvalidationConflictError(
+            "The acknowledgement does not match its Staff Notice delivery."
+        )
+    return acknowledgement, delivery
+
+
+def invalidate_staff_notice_acknowledgement(
+    conn,
+    acknowledgement_id,
+    actor_user_id,
+    invalidation_reason,
+    invalidated_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice acknowledgement invalidation requires an "
+            "active transaction."
+        )
+    if not _is_valid_staff_notice_identifier(acknowledgement_id):
+        raise ValueError("A valid acknowledgement is required.")
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise PermissionError("Staff Notice management access denied.")
+    if not isinstance(invalidation_reason, str) or not (
+        invalidation_reason.strip()
+    ):
+        raise ValueError("An invalidation reason is required.")
+
+    actor = conn.execute("""
+        SELECT user_id, role, active
+        FROM users
+        WHERE user_id = ?
+    """, (actor_user_id,)).fetchone()
+    if (
+        actor is None
+        or type(actor["active"]) is not int
+        or actor["active"] != 1
+        or not user_can_manage_staff_notices({
+            "user_id": actor["user_id"],
+            "role": actor["role"]
+        })
+    ):
+        raise PermissionError("Staff Notice management access denied.")
+
+    invalidation_reason = invalidation_reason.strip()
+    invalidated_at_utc = format_staff_notice_utc_datetime(
+        invalidated_at_utc
+    )
+    acknowledgement, delivery = (
+        _load_staff_notice_acknowledgement_invalidation_context(
+            conn,
+            acknowledgement_id
+        )
+    )
+    invalidation_values = (
+        acknowledgement["invalidated_at_utc"],
+        acknowledgement["invalidated_by_user_id"],
+        acknowledgement["invalidation_reason"]
+    )
+
+    if acknowledgement["active"] == 0:
+        valid_invalidation_history = (
+            all(value is not None for value in invalidation_values)
+            and _is_valid_staff_notice_identifier(
+                acknowledgement["invalidated_by_user_id"]
+            )
+            and isinstance(acknowledgement["invalidation_reason"], str)
+            and acknowledgement["invalidation_reason"].strip()
+        )
+        if valid_invalidation_history:
+            try:
+                valid_invalidation_history = (
+                    format_staff_notice_utc_datetime(
+                        acknowledgement["invalidated_at_utc"]
+                    )
+                    == acknowledgement["invalidated_at_utc"]
+                )
+            except ValueError:
+                valid_invalidation_history = False
+        if valid_invalidation_history:
+            invalidator = conn.execute("""
+                SELECT user_id
+                FROM users
+                WHERE user_id = ?
+            """, (
+                acknowledgement["invalidated_by_user_id"],
+            )).fetchone()
+            valid_invalidation_history = invalidator is not None
+        if valid_invalidation_history:
+            return {
+                "invalidated": 0,
+                "acknowledgement_id": acknowledgement_id,
+                "delivery_id": delivery["delivery_id"],
+                "notice_id": delivery["notice_id"]
+            }
+        raise StaffNoticeAcknowledgementInvalidationConflictError(
+            "The inactive acknowledgement has incomplete invalidation "
+            "history."
+        )
+    if acknowledgement["active"] != 1 or any(
+        value is not None for value in invalidation_values
+    ):
+        raise StaffNoticeAcknowledgementInvalidationConflictError(
+            "The acknowledgement has inconsistent invalidation history."
+        )
+    if (
+        delivery["notice_status"] != "Published"
+        or delivery["requirement_status"] != "Required"
+        or delivery["recipient_access"] != 1
+        or delivery["first_viewed_at_utc"] is None
+        or delivery["viewed_by_user_id"] != delivery["user_id"]
+        or delivery["occurrence_status"]
+        in ("No Shift Occurred", "Cancelled")
+    ):
+        raise StaffNoticeAcknowledgementInvalidationConflictError(
+            "This acknowledgement cannot be invalidated because its "
+            "delivery is not available for re-acknowledgement."
+        )
+
+    active_count = conn.execute("""
+        SELECT COUNT(*) AS count
+        FROM acknowledgements
+        WHERE source_table = 'staff_notice_deliveries'
+          AND source_id = ?
+          AND user_id = ?
+          AND active = 1
+    """, (
+        delivery["delivery_id"],
+        delivery["user_id"]
+    )).fetchone()["count"]
+    if active_count != 1:
+        raise StaffNoticeAcknowledgementInvalidationConflictError(
+            "The delivery has inconsistent active acknowledgement history."
+        )
+
+    cursor = conn.execute("""
+        UPDATE acknowledgements
+        SET active = 0,
+            invalidated_at_utc = ?,
+            invalidated_by_user_id = ?,
+            invalidation_reason = ?
+        WHERE acknowledgement_id = ?
+          AND source_table = 'staff_notice_deliveries'
+          AND source_id = ?
+          AND user_id = ?
+          AND active = 1
+          AND invalidated_at_utc IS NULL
+          AND invalidated_by_user_id IS NULL
+          AND invalidation_reason IS NULL
+    """, (
+        invalidated_at_utc,
+        actor_user_id,
+        invalidation_reason,
+        acknowledgement_id,
+        delivery["delivery_id"],
+        delivery["user_id"]
+    ))
+    if cursor.rowcount != 1:
+        raise StaffNoticeAcknowledgementInvalidationConflictError(
+            "The acknowledgement changed before it could be invalidated."
+        )
+
+    verified_acknowledgement, verified_delivery = (
+        _load_staff_notice_acknowledgement_invalidation_context(
+            conn,
+            acknowledgement_id
+        )
+    )
+    preserved_fields = (
+        "acknowledgement_id",
+        "source_table",
+        "source_id",
+        "user_id",
+        "acknowledged_at",
+        "comment",
+        "acknowledgement_type"
+    )
+    if any(
+        verified_acknowledgement[field] != acknowledgement[field]
+        for field in preserved_fields
+    ) or (
+        verified_acknowledgement["active"] != 0
+        or verified_acknowledgement["invalidated_at_utc"]
+        != invalidated_at_utc
+        or verified_acknowledgement["invalidated_by_user_id"]
+        != actor_user_id
+        or verified_acknowledgement["invalidation_reason"]
+        != invalidation_reason
+        or verified_delivery != delivery
+    ):
+        raise RuntimeError(
+            "Staff Notice acknowledgement invalidation verification failed."
+        )
+    remaining_active = conn.execute("""
+        SELECT COUNT(*) AS count
+        FROM acknowledgements
+        WHERE source_table = 'staff_notice_deliveries'
+          AND source_id = ?
+          AND user_id = ?
+          AND active = 1
+    """, (
+        delivery["delivery_id"],
+        delivery["user_id"]
+    )).fetchone()["count"]
+    if remaining_active != 0:
+        raise RuntimeError(
+            "Staff Notice acknowledgement remained active after "
+            "invalidation."
+        )
+
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_acknowledgement_invalidated",
+        summary=(
+            "Staff Notice acknowledgement invalidated: "
+            f"{delivery['title']}"
+        ),
+        user_id=actor_user_id,
+        client_id=delivery["client_id"],
+        shift_id=delivery["shift_id"],
+        related_table="acknowledgements",
+        related_id=acknowledgement_id,
+        details=(
+            f"Notice ID: {delivery['notice_id']}; Occurrence ID: "
+            f"{delivery['occurrence_id']}; Delivery ID: "
+            f"{delivery['delivery_id']}; Recipient User ID: "
+            f"{delivery['user_id']}; Acknowledgement ID: "
+            f"{acknowledgement_id}; Acknowledged at UTC: "
+            f"{acknowledgement['acknowledged_at']}; Invalidated by User "
+            f"ID: {actor_user_id}; Reason: {invalidation_reason}; "
+            f"Invalidated at UTC: {invalidated_at_utc}"
+        ),
+        success=1
+    )
+    return {
+        "invalidated": 1,
+        "acknowledgement_id": acknowledgement_id,
+        "delivery_id": delivery["delivery_id"],
+        "notice_id": delivery["notice_id"]
+    }
+
+
+@app.route(
+    "/staff-notices/acknowledgement/<int:acknowledgement_id>/invalidate",
+    methods=["POST"]
+)
+def staff_notice_acknowledgement_invalidate(acknowledgement_id):
+    access_response = _staff_notice_management_access_response()
+    if access_response is not None:
+        return access_response
+    if (
+        set(request.form.keys())
+        != STAFF_NOTICE_ACKNOWLEDGEMENT_INVALIDATION_FORM_KEYS
+    ):
+        return "Invalid acknowledgement invalidation form.", 400
+    try:
+        invalidation_reason = _staff_notice_single_form_value(
+            request.form,
+            "invalidation_reason",
+            required=True
+        )
+        confirmation = _staff_notice_single_form_value(
+            request.form,
+            "confirm_invalidation",
+            required=True
+        )
+    except ValueError as error:
+        return str(error), 400
+    if confirmation != "yes":
+        return "Confirm the acknowledgement invalidation.", 400
+
+    conn = get_db()
+    result = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        invalidated_at_utc = get_application_now_utc()
+        result = invalidate_staff_notice_acknowledgement(
+            conn,
+            acknowledgement_id,
+            session["user_id"],
+            invalidation_reason,
+            invalidated_at_utc
+        )
+        conn.commit()
+    except LookupError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Staff Notice acknowledgement not found.", 404
+    except PermissionError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Access denied", 403
+    except StaffNoticeAcknowledgementInvalidationConflictError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 409
+    except ValueError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 400
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return (
+            "The Staff Notice acknowledgement could not be invalidated. "
+            "No changes were made. Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "staff_notice_tracking",
+        notice_id=result["notice_id"],
+        acknowledgement_invalidation_result=(
+            "invalidated" if result["invalidated"] else "unchanged"
+        )
+    ))
 
 
 def _cancel_staff_notice_delivery(
@@ -15378,26 +15775,43 @@ def create_acknowledgement(
             acknowledged_at
         )
 
-    cur = conn.execute("""
-        INSERT INTO acknowledgements
-        (
+    try:
+        cur = conn.execute("""
+            INSERT INTO acknowledgements
+            (
+                source_table,
+                source_id,
+                user_id,
+                acknowledged_at,
+                acknowledgement_type,
+                comment,
+                active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+        """, (
             source_table,
             source_id,
             user_id,
             acknowledged_at,
             acknowledgement_type,
-            comment,
-            active
-        )
-        VALUES (?, ?, ?, ?, ?, ?, 1)
-    """, (
-        source_table,
-        source_id,
-        user_id,
-        acknowledged_at,
-        acknowledgement_type,
-        comment
-    ))
+            comment
+        ))
+    except sqlite3.IntegrityError:
+        raced_existing = conn.execute("""
+            SELECT acknowledgement_id
+            FROM acknowledgements
+            WHERE source_table = ?
+              AND source_id = ?
+              AND user_id = ?
+              AND active = 1
+        """, (
+            source_table,
+            source_id,
+            user_id
+        )).fetchone()
+        if raced_existing is None:
+            raise
+        return raced_existing["acknowledgement_id"]
 
     acknowledgement_id = cur.lastrowid
 
