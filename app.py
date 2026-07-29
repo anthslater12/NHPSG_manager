@@ -1313,6 +1313,11 @@ STAFF_NOTICE_PUBLICATION_FORM_KEYS = frozenset({
     "expected_updated_at_utc"
 })
 
+STAFF_NOTICE_REPLACEMENT_FORM_KEYS = frozenset({
+    "replacement_reason",
+    "confirm_replacement"
+})
+
 STAFF_NOTICE_SCALAR_FORM_KEYS = frozenset({
     "title",
     "notice_text",
@@ -1408,6 +1413,10 @@ class StaffNoticePublicationNotReadyError(ValueError):
 
 
 class StaffNoticeStalePublicationError(ValueError):
+    pass
+
+
+class StaffNoticeReplacementConflictError(ValueError):
     pass
 
 
@@ -3472,7 +3481,11 @@ def _load_staff_notice_admin_record(conn, notice_id):
             creator.full_name AS created_by,
             updater.full_name AS updated_by,
             publisher.full_name AS published_by,
-            withdrawer.full_name AS withdrawn_by
+            withdrawer.full_name AS withdrawn_by,
+            replacer.full_name AS replaced_by,
+            successor.notice_id AS replacement_notice_id,
+            successor.title AS replacement_notice_title,
+            successor.status AS replacement_notice_status
         FROM staff_notices sn
         LEFT JOIN clients c
             ON sn.client_id = c.client_id
@@ -3484,6 +3497,10 @@ def _load_staff_notice_admin_record(conn, notice_id):
             ON sn.published_by_user_id = publisher.user_id
         LEFT JOIN users withdrawer
             ON sn.withdrawn_by_user_id = withdrawer.user_id
+        LEFT JOIN users replacer
+            ON sn.replaced_by_user_id = replacer.user_id
+        LEFT JOIN staff_notices successor
+            ON successor.replaces_notice_id = sn.notice_id
         WHERE sn.notice_id = ?
     """, (notice_id,)).fetchone()
 
@@ -7510,7 +7527,8 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
     notice = _load_staff_notice_admin_record(conn, notice_id)
     if notice is None or notice["status"] not in (
         "Published",
-        "Withdrawn"
+        "Withdrawn",
+        "Replaced"
     ):
         return None
 
@@ -7520,7 +7538,8 @@ def _load_staff_notice_tracking(conn, notice_id, now_utc):
         "published_at_utc",
         "effective_start_at_utc",
         "expires_at_utc",
-        "withdrawn_at_utc"
+        "withdrawn_at_utc",
+        "replaced_at_utc"
     ):
         display_name = field_name.replace("_at_utc", "_display")
         notice[display_name] = (
@@ -8693,7 +8712,8 @@ def staff_notice_tracking(notice_id):
         notice = _load_staff_notice_publish_record(conn, notice_id)
         if notice is None or notice["status"] not in (
             "Published",
-            "Withdrawn"
+            "Withdrawn",
+            "Replaced"
         ):
             conn.rollback()
             return "Staff Notice not found", 404
@@ -8731,23 +8751,26 @@ def staff_notice_tracking(notice_id):
             "recipient_change_result"
         ),
         withdrawal_result=request.args.get("withdrawal_result"),
+        replacement_result=request.args.get("replacement_result"),
         **tracking
     )
 
 
-def _cancel_staff_notice_delivery_for_withdrawal(
+def _cancel_staff_notice_delivery(
     conn,
     delivery,
     actor_user_id,
     reason,
-    effective_at_utc
+    effective_at_utc,
+    *,
+    reason_code
 ):
     cursor = conn.execute("""
         UPDATE staff_notice_deliveries
         SET requirement_status = 'Cancelled',
             status_changed_at_utc = ?,
             status_changed_by_user_id = ?,
-            current_reason_code = 'Notice Withdrawn',
+            current_reason_code = ?,
             current_reason_text = ?
         WHERE delivery_id = ?
           AND requirement_status = 'Required'
@@ -8762,6 +8785,7 @@ def _cancel_staff_notice_delivery_for_withdrawal(
     """, (
         effective_at_utc,
         actor_user_id,
+        reason_code,
         reason,
         delivery["delivery_id"]
     ))
@@ -8783,9 +8807,10 @@ def _cancel_staff_notice_delivery_for_withdrawal(
             changed_at_utc
         )
         VALUES (?, 'Cancelled', 'Required', 'Cancelled',
-                NULL, NULL, 'Notice Withdrawn', ?, ?, ?)
+                NULL, NULL, ?, ?, ?, ?)
     """, (
         delivery["delivery_id"],
+        reason_code,
         reason,
         actor_user_id,
         effective_at_utc
@@ -8952,12 +8977,13 @@ def _withdraw_staff_notice_in_transaction(
     delivery_access_revoked = 0
     for delivery in deliveries:
         deliveries_cancelled += (
-            _cancel_staff_notice_delivery_for_withdrawal(
+            _cancel_staff_notice_delivery(
                 conn,
                 delivery,
                 actor_user_id,
                 withdrawal_reason,
-                withdrawn_at_utc
+                withdrawn_at_utc,
+                reason_code="Notice Withdrawn"
             )
         )
         delivery_access_revoked += (
@@ -9045,6 +9071,526 @@ def staff_notice_withdraw(notice_id):
         notice_id=notice_id,
         withdrawal_result=(
             "withdrawn" if result["withdrawn"] else "unchanged"
+        )
+    ))
+
+
+def _copy_staff_notice_replacement_configuration(
+    conn,
+    original_notice,
+    actor_user_id,
+    replacement_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice replacement copying requires an active transaction."
+        )
+
+    cursor = conn.execute("""
+        INSERT INTO staff_notices
+        (
+            title,
+            notice_text,
+            priority,
+            client_id,
+            status,
+            draft_active,
+            effective_start_at_utc,
+            expires_at_utc,
+            until_withdrawn,
+            version_number,
+            replaces_notice_id,
+            created_by_user_id,
+            created_at_utc
+        )
+        VALUES (?, ?, ?, ?, 'Draft', 1, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        original_notice["title"],
+        original_notice["notice_text"],
+        original_notice["priority"],
+        original_notice["client_id"],
+        original_notice["effective_start_at_utc"],
+        original_notice["expires_at_utc"],
+        original_notice["until_withdrawn"],
+        original_notice["version_number"] + 1,
+        original_notice["notice_id"],
+        actor_user_id,
+        replacement_at_utc
+    ))
+    replacement_notice_id = cursor.lastrowid
+
+    original_audiences = conn.execute("""
+        SELECT audience_id
+        FROM staff_notice_audiences
+        WHERE notice_id = ?
+        ORDER BY audience_id
+    """, (original_notice["notice_id"],)).fetchall()
+    for original_audience in original_audiences:
+        cursor = conn.execute("""
+            INSERT INTO staff_notice_audiences
+            (notice_id, created_at_utc)
+            VALUES (?, ?)
+        """, (replacement_notice_id, replacement_at_utc))
+        replacement_audience_id = cursor.lastrowid
+        rules = conn.execute("""
+            SELECT rule_type, role_name, user_id
+            FROM staff_notice_audience_rules
+            WHERE audience_id = ?
+            ORDER BY audience_rule_id
+        """, (original_audience["audience_id"],)).fetchall()
+        for rule in rules:
+            conn.execute("""
+                INSERT INTO staff_notice_audience_rules
+                (
+                    audience_id,
+                    rule_type,
+                    role_name,
+                    user_id,
+                    created_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                replacement_audience_id,
+                rule["rule_type"],
+                rule["role_name"],
+                rule["user_id"],
+                replacement_at_utc
+            ))
+
+    original_schedules = conn.execute("""
+        SELECT *
+        FROM staff_notice_schedules
+        WHERE notice_id = ?
+        ORDER BY schedule_id
+    """, (original_notice["notice_id"],)).fetchall()
+    for schedule in original_schedules:
+        cursor = conn.execute("""
+            INSERT INTO staff_notice_schedules
+            (
+                notice_id,
+                occurrence_basis,
+                recurrence_pattern,
+                shift_applicability,
+                interval_days,
+                recurrence_anchor_date,
+                specific_calendar_date,
+                specific_shift_client_id,
+                specific_shift_date,
+                specific_shift_type,
+                one_time_due_at_utc,
+                created_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            replacement_notice_id,
+            schedule["occurrence_basis"],
+            schedule["recurrence_pattern"],
+            schedule["shift_applicability"],
+            schedule["interval_days"],
+            schedule["recurrence_anchor_date"],
+            schedule["specific_calendar_date"],
+            schedule["specific_shift_client_id"],
+            schedule["specific_shift_date"],
+            schedule["specific_shift_type"],
+            schedule["one_time_due_at_utc"],
+            replacement_at_utc
+        ))
+        replacement_schedule_id = cursor.lastrowid
+        shift_types = conn.execute("""
+            SELECT shift_type
+            FROM staff_notice_schedule_shift_types
+            WHERE schedule_id = ?
+            ORDER BY schedule_shift_type_id
+        """, (schedule["schedule_id"],)).fetchall()
+        for shift_type in shift_types:
+            conn.execute("""
+                INSERT INTO staff_notice_schedule_shift_types
+                (schedule_id, shift_type)
+                VALUES (?, ?)
+            """, (
+                replacement_schedule_id,
+                shift_type["shift_type"]
+            ))
+        weekdays = conn.execute("""
+            SELECT weekday_number
+            FROM staff_notice_schedule_weekdays
+            WHERE schedule_id = ?
+            ORDER BY schedule_weekday_id
+        """, (schedule["schedule_id"],)).fetchall()
+        for weekday in weekdays:
+            conn.execute("""
+                INSERT INTO staff_notice_schedule_weekdays
+                (schedule_id, weekday_number)
+                VALUES (?, ?)
+            """, (
+                replacement_schedule_id,
+                weekday["weekday_number"]
+            ))
+
+    return replacement_notice_id
+
+
+def _replace_staff_notice_in_transaction(
+    conn,
+    notice_id,
+    actor_user_id,
+    replacement_reason,
+    replacement_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice replacement requires an active transaction."
+        )
+    if not _is_valid_staff_notice_identifier(notice_id):
+        raise ValueError("A valid Staff Notice is required.")
+    if not _is_valid_staff_notice_identifier(actor_user_id):
+        raise PermissionError("Staff Notice management access denied.")
+    if not isinstance(replacement_reason, str) or not (
+        replacement_reason.strip()
+    ):
+        raise ValueError("A replacement reason is required.")
+
+    replacement_reason = replacement_reason.strip()
+    replacement_at_utc = format_staff_notice_utc_datetime(
+        replacement_at_utc
+    )
+    actor = conn.execute("""
+        SELECT user_id, role, active
+        FROM users
+        WHERE user_id = ?
+    """, (actor_user_id,)).fetchone()
+    if (
+        actor is None
+        or type(actor["active"]) is not int
+        or actor["active"] != 1
+        or not user_can_manage_staff_notices({
+            "user_id": actor["user_id"],
+            "role": actor["role"]
+        })
+    ):
+        raise PermissionError("Staff Notice management access denied.")
+
+    notice_row = conn.execute("""
+        SELECT *
+        FROM staff_notices
+        WHERE notice_id = ?
+    """, (notice_id,)).fetchone()
+    if notice_row is None:
+        raise LookupError("Staff Notice not found.")
+    notice = dict(notice_row)
+    successors = conn.execute("""
+        SELECT notice_id
+        FROM staff_notices
+        WHERE replaces_notice_id = ?
+        ORDER BY notice_id
+    """, (notice_id,)).fetchall()
+
+    if notice["status"] == "Replaced":
+        if len(successors) == 1:
+            return {
+                "replaced": 0,
+                "replacement_notice_id": successors[0]["notice_id"],
+                "occurrences_cancelled": 0,
+                "deliveries_cancelled": 0,
+                "delivery_access_revoked": 0
+            }
+        raise StaffNoticeReplacementConflictError(
+            "The replaced Staff Notice has an inconsistent successor."
+        )
+    if notice["status"] != "Published":
+        raise StaffNoticeReplacementConflictError(
+            "Only a published Staff Notice can be replaced."
+        )
+    if successors:
+        raise StaffNoticeReplacementConflictError(
+            "The Staff Notice already has a replacement successor."
+        )
+
+    cursor = conn.execute("""
+        UPDATE staff_notices
+        SET status = 'Replaced',
+            replaced_by_user_id = ?,
+            replaced_at_utc = ?,
+            replacement_reason = ?
+        WHERE notice_id = ?
+          AND status = 'Published'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM staff_notices successor
+              WHERE successor.replaces_notice_id = staff_notices.notice_id
+          )
+    """, (
+        actor_user_id,
+        replacement_at_utc,
+        replacement_reason,
+        notice_id
+    ))
+    if cursor.rowcount != 1:
+        raise StaffNoticeReplacementConflictError(
+            "The Staff Notice changed while it was being replaced."
+        )
+
+    replacement_notice_id = (
+        _copy_staff_notice_replacement_configuration(
+            conn,
+            notice,
+            actor_user_id,
+            replacement_at_utc
+        )
+    )
+
+    occurrences = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT o.*
+            FROM staff_notice_occurrences o
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            WHERE sns.notice_id = ?
+            ORDER BY o.occurrence_id
+        """, (notice_id,)).fetchall()
+    ]
+    occurrences_cancelled = 0
+    for occurrence in occurrences:
+        previous_status = occurrence["occurrence_status"]
+        if previous_status not in ("Pending Shift", "Scheduled"):
+            continue
+        cursor = conn.execute("""
+            UPDATE staff_notice_occurrences
+            SET occurrence_status = 'Cancelled',
+                status_reason = 'Notice Replaced',
+                status_changed_at_utc = ?,
+                status_changed_by_user_id = ?
+            WHERE occurrence_id = ?
+              AND occurrence_status = ?
+        """, (
+            replacement_at_utc,
+            actor_user_id,
+            occurrence["occurrence_id"],
+            previous_status
+        ))
+        if cursor.rowcount != 1:
+            continue
+        occurrences_cancelled += 1
+        log_activity(
+            conn,
+            activity_class="STAFF_NOTICE",
+            activity_type="staff_notice_occurrence_status_changed",
+            summary=(
+                "Staff Notice occurrence cancelled: "
+                f"{notice['title']}"
+            ),
+            user_id=actor_user_id,
+            client_id=notice["client_id"],
+            shift_id=occurrence["shift_id"],
+            related_table="staff_notice_occurrences",
+            related_id=occurrence["occurrence_id"],
+            details=(
+                f"Notice ID: {notice_id}; Occurrence ID: "
+                f"{occurrence['occurrence_id']}; Previous status: "
+                f"{previous_status}; New status: Cancelled; "
+                "Reason code: Notice Replaced; "
+                f"Reason: {replacement_reason}; Effective at UTC: "
+                f"{replacement_at_utc}"
+            ),
+            success=1
+        )
+
+    deliveries = [
+        dict(row)
+        for row in conn.execute("""
+            SELECT
+                d.*,
+                o.shift_id,
+                sn.notice_id,
+                sn.title,
+                sn.client_id
+            FROM staff_notice_deliveries d
+            JOIN staff_notice_occurrences o
+                ON d.occurrence_id = o.occurrence_id
+            JOIN staff_notice_schedules sns
+                ON o.schedule_id = sns.schedule_id
+            JOIN staff_notices sn
+                ON sns.notice_id = sn.notice_id
+            WHERE sns.notice_id = ?
+            ORDER BY d.delivery_id
+        """, (notice_id,)).fetchall()
+    ]
+    deliveries_cancelled = 0
+    delivery_access_revoked = 0
+    for delivery in deliveries:
+        deliveries_cancelled += _cancel_staff_notice_delivery(
+            conn,
+            delivery,
+            actor_user_id,
+            replacement_reason,
+            replacement_at_utc,
+            reason_code="Notice Replaced"
+        )
+        delivery_access_revoked += _revoke_staff_notice_delivery_access(
+            conn,
+            delivery,
+            actor_user_id,
+            replacement_reason,
+            replacement_at_utc,
+            reason_code="Notice Replaced"
+        )
+
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_replacement_created",
+        summary=(
+            "Staff Notice replacement draft created: "
+            f"{notice['title']}"
+        ),
+        user_id=actor_user_id,
+        client_id=notice["client_id"],
+        shift_id=None,
+        related_table="staff_notices",
+        related_id=replacement_notice_id,
+        details=(
+            f"Original notice ID: {notice_id}; Replacement notice ID: "
+            f"{replacement_notice_id}; Version number: "
+            f"{notice['version_number'] + 1}; Reason: "
+            f"{replacement_reason}; Created at UTC: {replacement_at_utc}"
+        ),
+        success=1
+    )
+    log_activity(
+        conn,
+        activity_class="STAFF_NOTICE",
+        activity_type="staff_notice_replaced",
+        summary=f"Staff Notice replaced: {notice['title']}",
+        user_id=actor_user_id,
+        client_id=notice["client_id"],
+        shift_id=None,
+        related_table="staff_notices",
+        related_id=notice_id,
+        details=(
+            f"Notice ID: {notice_id}; Replacement notice ID: "
+            f"{replacement_notice_id}; Reason: {replacement_reason}; "
+            f"Replaced at UTC: {replacement_at_utc}; "
+            f"Occurrences cancelled: {occurrences_cancelled}; "
+            f"Deliveries cancelled: {deliveries_cancelled}; "
+            f"Delivery access revoked: {delivery_access_revoked}"
+        ),
+        success=1
+    )
+    return {
+        "replaced": 1,
+        "replacement_notice_id": replacement_notice_id,
+        "occurrences_cancelled": occurrences_cancelled,
+        "deliveries_cancelled": deliveries_cancelled,
+        "delivery_access_revoked": delivery_access_revoked
+    }
+
+
+@app.route(
+    "/staff-notices/<int:notice_id>/replace",
+    methods=["GET", "POST"]
+)
+def staff_notice_replace(notice_id):
+    access_response = _staff_notice_management_access_response()
+    if access_response is not None:
+        return access_response
+
+    if request.method == "GET":
+        conn = get_db()
+        try:
+            notice = _load_staff_notice_admin_record(conn, notice_id)
+            successors = conn.execute("""
+                SELECT notice_id
+                FROM staff_notices
+                WHERE replaces_notice_id = ?
+                ORDER BY notice_id
+            """, (notice_id,)).fetchall()
+        finally:
+            conn.close()
+        if notice is None:
+            return "Staff Notice not found.", 404
+        if notice["status"] == "Replaced":
+            if len(successors) == 1:
+                return redirect(url_for(
+                    "staff_notice_admin_detail",
+                    notice_id=successors[0]["notice_id"]
+                ))
+            return (
+                "The replaced Staff Notice has an inconsistent successor.",
+                409
+            )
+        if notice["status"] != "Published":
+            return "Only a published Staff Notice can be replaced.", 409
+        return render_template(
+            "staff_notice_replace.html",
+            notice=notice,
+            summary=build_staff_notice_plain_language_summary(notice),
+            error=None
+        )
+
+    if set(request.form.keys()) != STAFF_NOTICE_REPLACEMENT_FORM_KEYS:
+        return "Invalid Staff Notice replacement form.", 400
+    if request.form.get("confirm_replacement") != "yes":
+        return "Confirm the Staff Notice replacement.", 400
+    replacement_reason = request.form.get("replacement_reason", "")
+    if not replacement_reason.strip():
+        return "A replacement reason is required.", 400
+
+    conn = get_db()
+    result = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        replacement_at_utc = get_application_now_utc()
+        result = _replace_staff_notice_in_transaction(
+            conn,
+            notice_id,
+            session["user_id"],
+            replacement_reason,
+            replacement_at_utc
+        )
+        conn.commit()
+    except LookupError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Staff Notice not found.", 404
+    except StaffNoticeReplacementConflictError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 409
+    except PermissionError:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return "Access denied", 403
+    except ValueError as error:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return str(error), 400
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        return (
+            "The Staff Notice could not be replaced. No changes were "
+            "made. Please retry.",
+            503
+        )
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "staff_notice_admin_detail",
+        notice_id=result["replacement_notice_id"],
+        replacement_result=(
+            "created" if result["replaced"] else "unchanged"
         )
     ))
 

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <p>
+        <a href="{{ url_for(
+            'staff_notice_tracking',
+            notice_id=notice.notice_id
+        ) }}">
+            ← Back to Recipient Tracking
+        </a>
+    </p>
+
+    <h2>Replace Staff Notice</h2>
+    <h3>{{ notice.title }}</h3>
+
+    {% if error %}
+        <div class="error-message">{{ error }}</div>
+    {% endif %}
+
+    <p>
+        Replacement is permanent. The published notice will become Replaced,
+        eligible future occurrences and outstanding requirements will be
+        cancelled, and recipient access will be revoked. Existing compliance
+        history will be preserved.
+    </p>
+    <p>
+        A new version {{ notice.version_number + 1 }} Draft will be created
+        with this notice's content, audience, application period, and schedule
+        configuration. Review and publish that Draft separately.
+    </p>
+
+    <table class="management-detail-table">
+        <tr>
+            <th>Version</th>
+            <td>{{ notice.version_number }}</td>
+        </tr>
+        <tr>
+            <th>Priority</th>
+            <td>{{ notice.priority }}</td>
+        </tr>
+        <tr>
+            <th>Scope</th>
+            <td>{{ summary.scope }}</td>
+        </tr>
+        <tr>
+            <th>Audience</th>
+            <td>{{ summary.audience }}</td>
+        </tr>
+        <tr>
+            <th>Application Period</th>
+            <td>{{ summary.period }}</td>
+        </tr>
+        <tr>
+            <th>Schedule</th>
+            <td>{{ summary.schedule }}</td>
+        </tr>
+    </table>
+
+    <form method="post">
+        <label for="replacement_reason">Replacement reason</label>
+        <input
+            type="text"
+            id="replacement_reason"
+            name="replacement_reason"
+            required
+        >
+
+        <label>
+            <input
+                type="checkbox"
+                name="confirm_replacement"
+                value="yes"
+                required
+            >
+            Permanently replace this Staff Notice and create one linked Draft.
+        </label>
+
+        <button type="submit">Replace Notice and Create Draft</button>
+    </form>
+</div>
+
+{% endblock %}

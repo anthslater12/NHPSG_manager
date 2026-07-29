@@ -200,6 +200,16 @@
     {% elif withdrawal_result == "unchanged" %}
         <p>No change was required because this notice was already withdrawn.</p>
     {% endif %}
+    {% if replacement_result == "created" %}
+        <p class="status-inactive">
+            Staff Notice replaced and replacement Draft created successfully.
+        </p>
+    {% elif replacement_result == "unchanged" %}
+        <p>
+            No change was required because the existing replacement Draft was
+            reused.
+        </p>
+    {% endif %}
     {% if recipient_change_result == "removed" %}
         <p class="success">
             The worker was removed from the shift. Their historical
@@ -287,6 +297,19 @@
                 <button type="submit">Withdraw Notice</button>
             </form>
         </div>
+        <div class="card">
+            <h4>Replace Notice</h4>
+            <p>
+                Replace this immutable notice with a linked new-version Draft
+                while preserving all existing compliance history.
+            </p>
+            <a href="{{ url_for(
+                'staff_notice_replace',
+                notice_id=notice.notice_id
+            ) }}">
+                Review Replacement
+            </a>
+        </div>
     {% elif notice.status == 'Withdrawn' %}
         <div class="error-message">
             <strong>
@@ -294,6 +317,23 @@
                 on {{ notice.withdrawn_at_display }}
             </strong><br>
             Reason: {{ notice.withdrawal_reason }}
+        </div>
+    {% elif notice.status == 'Replaced' %}
+        <div class="error-message">
+            <strong>
+                Replaced by {{ notice.replaced_by }}
+                on {{ notice.replaced_at_display }}
+            </strong><br>
+            Reason: {{ notice.replacement_reason }}
+            {% if notice.replacement_notice_id %}
+                <br>
+                <a href="{{ url_for(
+                    'staff_notice_admin_detail',
+                    notice_id=notice.replacement_notice_id
+                ) }}">
+                    View Replacement Draft
+                </a>
+            {% endif %}
         </div>
     {% endif %}
     <div style="white-space: pre-wrap;">{{ notice.notice_text }}</div>

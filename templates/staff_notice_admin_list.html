@@ -70,7 +70,11 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if notice.status in ("Published", "Withdrawn") %}
+                            {% if notice.status in (
+                                "Published",
+                                "Withdrawn",
+                                "Replaced"
+                            ) %}
                                 <a href="{{ url_for(
                                     'staff_notice_tracking',
                                     notice_id=notice.notice_id
