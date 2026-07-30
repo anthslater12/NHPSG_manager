@@ -110,7 +110,11 @@
     <h3>Quick Entry</h3>
 
     <div class="quick-grid">
-        <a class="quick-button" href="/shift/{{ shift.shift_id }}/note">+ Staff Note</a>
+        {% if shift_notes_editable %}
+            <a class="quick-button" href="/shift/{{ shift.shift_id }}/note">
+                Edit Staff Notes
+            </a>
+        {% endif %}
         <a
             class="quick-button"
             href="{{ url_for(
@@ -540,20 +544,27 @@
 <div class="card">
     <h3>Staff Notes for this Shift</h3>
 
-    {% if notes %}
-        {% for note in notes %}
-            <div style="border-bottom:1px solid #ccc; padding:10px 0;">
-                <p>
-                    <strong>{{ note.full_name }}</strong>
-                    — {{ note.created_at }}
-                    {% if note.follow_up_required %}
-                        <span style="color:red;"><strong>Follow-up required</strong></span>
-                    {% endif %}
-                </p>
+    {% if shift_notes_saved %}
+        <p class="success">Staff notes saved.</p>
+    {% endif %}
 
-                <p>{{ note.note_text }}</p>
-            </div>
-        {% endfor %}
+    {% set shared_note = notes[0] if notes else none %}
+    {% if shift_notes_editable %}
+        <form
+            method="post"
+            action="{{ url_for('shift_add_note', shift_id=shift.shift_id) }}"
+        >
+            <label for="note_text">Shared staff notes</label>
+            <textarea
+                id="note_text"
+                name="note_text"
+                rows="8"
+                required
+            >{{ shared_note.note_text if shared_note else "" }}</textarea>
+            <button type="submit">Save Staff Notes</button>
+        </form>
+    {% elif shared_note %}
+        <p>{{ shared_note.note_text }}</p>
     {% else %}
         <p>No staff notes entered for this shift yet.</p>
     {% endif %}
