@@ -11805,7 +11805,7 @@ def get_active_shift_staff():
 
     return active_staff
 
-def get_management_inbox():
+def get_management_inbox(current_user_id):
     conn = get_db()
 
     high_priority_actions = conn.execute("""
@@ -11836,11 +11836,12 @@ def get_management_inbox():
             FROM acknowledgements ack
             WHERE ack.source_table = 'shift_notes'
               AND ack.source_id = sn.note_id
+              AND ack.user_id = ?
               AND ack.active = 1
         )
         ORDER BY sn.shift_date DESC  -- CHANGED from note_date
         LIMIT 5
-    """).fetchall()
+    """, (current_user_id,)).fetchall()
 
     recent_incidents = conn.execute("""
         SELECT
@@ -12168,7 +12169,7 @@ def reset_user_password(user_id):
 # DASHBOARDS
 #####################################################################
 
-def get_dashboard_stats():
+def get_dashboard_stats(current_user_id):
     conn = get_db()
 
     outstanding_action_count = conn.execute("""
@@ -12211,9 +12212,10 @@ def get_dashboard_stats():
             FROM acknowledgements ack
             WHERE ack.source_table = 'shift_notes'
               AND ack.source_id = sn.note_id
+              AND ack.user_id = ?
               AND ack.active = 1
         )
-    """).fetchone()["count"]
+    """, (current_user_id,)).fetchone()["count"]
 
     open_incidents = conn.execute("""
         SELECT COUNT(*) AS count
@@ -12264,8 +12266,8 @@ def dashboard():
                 "Staff Notices could not be loaded. Please retry.",
                 503
             )
-        stats = get_dashboard_stats()
-        inbox = get_management_inbox()
+        stats = get_dashboard_stats(current_user["user_id"])
+        inbox = get_management_inbox(current_user["user_id"])
         active_staff = get_active_shift_staff()
         manager_alerts = get_manager_alerts()
 
