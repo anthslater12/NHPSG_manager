@@ -4,6 +4,7 @@
 
 {% set shift_cancelled = shift.status == "Cancelled" %}
 
+<div class="shift-dashboard-top-row">
 <div class="card">
     <h2>{{ shift.shift_type }} Shift</h2>
 
@@ -61,6 +62,36 @@
             View All Staff Notices
         </a>
     </p>
+</div>
+</div>
+
+<div class="card">
+    <h3>Staff Notes for this Shift</h3>
+
+    {% if shift_notes_saved %}
+        <p class="success">Staff notes saved.</p>
+    {% endif %}
+
+    {% set shared_note = notes[0] if notes else none %}
+    {% if shift_notes_editable %}
+        <form
+            method="post"
+            action="{{ url_for('shift_add_note', shift_id=shift.shift_id) }}"
+        >
+            <label for="note_text">Shared staff notes</label>
+            <textarea
+                id="note_text"
+                name="note_text"
+                rows="8"
+                required
+            >{{ shared_note.note_text if shared_note else "" }}</textarea>
+            <button type="submit">Save Staff Notes</button>
+        </form>
+    {% elif shared_note %}
+        <p>{{ shared_note.note_text }}</p>
+    {% else %}
+        <p>No staff notes entered for this shift yet.</p>
+    {% endif %}
 </div>
 
 <div class="card">
@@ -124,7 +155,6 @@
         >
             + Toileting
         </a>
-        <a class="quick-button" href="/shift/{{ shift.shift_id }}/medication">+ Medication</a>
         {% if food_fluid_authorized %}
             <a
                 class="quick-button"
@@ -538,35 +568,6 @@
 
         <p>No active housekeeping tasks found.</p>
 
-    {% endif %}
-</div>
-
-<div class="card">
-    <h3>Staff Notes for this Shift</h3>
-
-    {% if shift_notes_saved %}
-        <p class="success">Staff notes saved.</p>
-    {% endif %}
-
-    {% set shared_note = notes[0] if notes else none %}
-    {% if shift_notes_editable %}
-        <form
-            method="post"
-            action="{{ url_for('shift_add_note', shift_id=shift.shift_id) }}"
-        >
-            <label for="note_text">Shared staff notes</label>
-            <textarea
-                id="note_text"
-                name="note_text"
-                rows="8"
-                required
-            >{{ shared_note.note_text if shared_note else "" }}</textarea>
-            <button type="submit">Save Staff Notes</button>
-        </form>
-    {% elif shared_note %}
-        <p>{{ shared_note.note_text }}</p>
-    {% else %}
-        <p>No staff notes entered for this shift yet.</p>
     {% endif %}
 </div>
 
