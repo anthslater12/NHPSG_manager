@@ -375,6 +375,14 @@ class StaffNoticeDraftManagementTests(unittest.TestCase):
                 app,
                 "get_manager_alerts",
                 return_value=[]
+            ),
+            mock.patch.object(
+                app,
+                "_load_management_staff_notice_dashboard",
+                return_value={
+                    "dashboard": [],
+                    "outstanding_count": 0
+                }
             )
         ):
             response = self.client.get("/dashboard")

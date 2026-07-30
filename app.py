@@ -1179,11 +1179,19 @@ STAFF_NOTICE_MANAGEMENT_ROLES = frozenset({
     "Director"
 })
 
+SHIFT_AUTO_SIGN_ON_ROLES = frozenset({
+    "Support Worker"
+})
+
 SHIFT_CANCELLED_STATUS = "Cancelled"
 SHIFT_CANCELLATION_REASON_CODE = "Shift Cancelled"
 
 
 class ShiftCancellationConflictError(RuntimeError):
+    pass
+
+
+class UserLifecycleConflictError(RuntimeError):
     pass
 
 
@@ -8021,6 +8029,46 @@ def reconcile_staff_notice_non_shift_requirements_in_transaction(
     return result
 
 
+def reconcile_staff_notice_user_lifecycle_in_transaction(
+    conn,
+    user_id,
+    actor_user_id,
+    effective_at_utc
+):
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "Staff Notice user lifecycle reconciliation requires an "
+            "active transaction."
+        )
+    actor = get_active_authenticated_user(conn, actor_user_id)
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to manage users."
+        )
+    target = conn.execute("""
+        SELECT user_id, role, active
+        FROM users
+        WHERE user_id = ?
+    """, (user_id,)).fetchone()
+    if target is None:
+        raise LookupError("User not found for Staff Notice reconciliation.")
+
+    result = reconcile_staff_notice_non_shift_requirements_in_transaction(
+        conn,
+        effective_at_utc
+    )
+    verified_target = conn.execute("""
+        SELECT user_id, role, active
+        FROM users
+        WHERE user_id = ?
+    """, (user_id,)).fetchone()
+    if verified_target is None or tuple(verified_target) != tuple(target):
+        raise RuntimeError(
+            "User lifecycle reconciliation verification failed."
+        )
+    return result
+
+
 def reconcile_staff_notice_non_shift_requirements(now_utc=None):
     if now_utc is None:
         now_utc = get_application_now_utc()
@@ -8734,6 +8782,41 @@ def _get_staff_notice_recipient_collections(
         "all": deliveries,
         "outstanding_count": len(current)
     }
+
+
+def _load_management_staff_notice_dashboard(user_id, now_utc=None):
+    conn = None
+    try:
+        conn = get_db()
+        conn.execute("BEGIN IMMEDIATE")
+        if now_utc is None:
+            now_utc = get_application_now_utc()
+        actor = get_active_authenticated_user(conn, user_id)
+        if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+            raise PermissionError(
+                "An active management user is required."
+            )
+        reconcile_staff_notice_non_shift_requirements_in_transaction(
+            conn,
+            now_utc
+        )
+        collections = _get_staff_notice_recipient_collections(
+            conn,
+            actor["user_id"],
+            now_utc
+        )
+        conn.commit()
+        return collections
+    except BaseException:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except BaseException:
+                pass
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _load_staff_notice_recipient_delivery(
@@ -11848,29 +11931,55 @@ def login():
 
 
         if user and check_password_hash(user["password_hash"], password):
-            session["user_id"] = user["user_id"]
-            session["full_name"] = user["full_name"]
-            session["role"] = user["role"]
-            session["last_activity"] = time.time()
-
             conn = get_db()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                login_at_utc = get_application_now_utc()
+                current_user = conn.execute("""
+                    SELECT *
+                    FROM users
+                    WHERE user_id = ?
+                      AND active = 1
+                """, (user["user_id"],)).fetchone()
+                if current_user is None:
+                    raise PermissionError(
+                        "The user is no longer active."
+                    )
+                log_activity(
+                    conn,
+                    activity_class="LOGIN",
+                    activity_type="user_login",
+                    summary=(
+                        f"User logged in: {current_user['full_name']}"
+                    ),
+                    user_id=current_user["user_id"],
+                    success=1
+                )
+                reconcile_staff_notice_non_shift_requirements_in_transaction(
+                    conn,
+                    login_at_utc
+                )
+                conn.commit()
+            except BaseException:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
+                error = (
+                    "Login could not be completed. Please retry."
+                )
+            else:
+                session["user_id"] = current_user["user_id"]
+                session["full_name"] = current_user["full_name"]
+                session["role"] = current_user["role"]
+                session["last_activity"] = time.time()
 
-            log_activity(
-                conn,
-                activity_class="LOGIN",
-                activity_type="user_login",
-                summary=f"User logged in: {user['full_name']}",
-                user_id=user["user_id"],
-                success=1
-            )
+                if current_user["must_change_password"] == 1:
+                    return redirect(url_for("change_password"))
 
-            conn.commit()
-            conn.close()
-
-            if user["must_change_password"] == 1:
-                return redirect(url_for("change_password"))
-
-            return redirect(url_for("dashboard"))
+                return redirect(url_for("dashboard"))
+            finally:
+                conn.close()
 
         else:
             error = "Invalid username or password."
@@ -12114,7 +12223,29 @@ def dashboard():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] in ["Admin", "Program Manager", "Director"]:
+    conn = get_db()
+    try:
+        current_user = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    if current_user["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
+        try:
+            staff_notice_collection = (
+                _load_management_staff_notice_dashboard(
+                    current_user["user_id"]
+                )
+            )
+        except BaseException:
+            return (
+                "Staff Notices could not be loaded. Please retry.",
+                503
+            )
         stats = get_dashboard_stats()
         inbox = get_management_inbox()
         active_staff = get_active_shift_staff()
@@ -12124,13 +12255,20 @@ def dashboard():
             "admin_dashboard.html",
             active_staff=active_staff,
             manager_alerts=manager_alerts,
+            staff_notices=staff_notice_collection["dashboard"],
+            staff_notice_outstanding_count=(
+                staff_notice_collection["outstanding_count"]
+            ),
             **stats,
             **inbox
         )
 
+    if current_user["role"] not in SHIFT_AUTO_SIGN_ON_ROLES:
+        return redirect(url_for("staff_notice_history"))
+
     try:
         shift_id, start_checklist_completed = auto_sign_on_user(
-            session["user_id"]
+            current_user["user_id"]
         )
     except StaffNoticeShiftSignOnError as error:
         return str(error), 503
@@ -12218,10 +12356,21 @@ def user_new():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in ["Admin", "Program Manager", "Director"]:
+    authorization_conn = get_db()
+    try:
+        actor = get_active_authenticated_user(
+            authorization_conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        authorization_conn.close()
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
         return "Access denied", 403
 
     error = None
+    error_status = 400
 
     if request.method == "POST":
         username = request.form["username"].strip()
@@ -12235,11 +12384,21 @@ def user_new():
             from werkzeug.security import generate_password_hash
 
             conn = get_db()
-
             try:
+                conn.execute("BEGIN IMMEDIATE")
+                changed_at_utc = get_application_now_utc()
+                actor = get_active_authenticated_user(
+                    conn,
+                    session["user_id"]
+                )
+                if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+                    raise PermissionError(
+                        "Current user is not allowed to manage users."
+                    )
                 cur = conn.execute("""
                     INSERT INTO users
-                    (username, password_hash, full_name, role, active, must_change_password)
+                    (username, password_hash, full_name, role, active,
+                     must_change_password)
                     VALUES (?, ?, ?, ?, 1, 1)
                 """, (
                     username,
@@ -12247,39 +12406,75 @@ def user_new():
                     full_name,
                     role
                 ))
-
                 new_user_id = cur.lastrowid
-
                 log_activity(
                     conn,
                     activity_class="USER",
                     activity_type="user_created",
                     summary=f"User created: {full_name} ({role})",
-                    user_id=session["user_id"],
+                    user_id=actor["user_id"],
                     related_table="users",
                     related_id=new_user_id,
                     details=f"Username: {username}; Role: {role}",
                     success=1
                 )
-
+                reconcile_staff_notice_user_lifecycle_in_transaction(
+                    conn,
+                    new_user_id,
+                    actor["user_id"],
+                    changed_at_utc
+                )
+                created_user = conn.execute("""
+                    SELECT username, full_name, role, active
+                    FROM users
+                    WHERE user_id = ?
+                """, (new_user_id,)).fetchone()
+                if (
+                    created_user is None
+                    or created_user["username"] != username
+                    or created_user["full_name"] != full_name
+                    or created_user["role"] != role
+                    or created_user["active"] != 1
+                ):
+                    raise RuntimeError(
+                        "User creation verification failed."
+                    )
                 conn.commit()
-                conn.close()
-
                 return redirect(url_for("users"))
-
             except sqlite3.IntegrityError:
-                conn.close()
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
                 error = "That username already exists."
+            except PermissionError:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
+                return "Access denied", 403
+            except BaseException:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
+                error = (
+                    "The user could not be created. No changes were made. "
+                    "Please retry."
+                )
+                error_status = 503
+            finally:
+                conn.close()
 
-    return render_template("user_new.html", error=error)
+    return render_template(
+        "user_new.html",
+        error=error
+    ), error_status if error else 200
 
 @app.route("/user/edit/<int:user_id>", methods=["GET", "POST"])
 def user_edit(user_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
-
-    if session["role"] not in ["Admin", "Program Manager", "Director"]:
-        return "Access denied", 403
 
     status_filter = request.args.get(
         "status",
@@ -12290,6 +12485,18 @@ def user_edit(user_id):
         status_filter = "all"
 
     conn = get_db()
+
+    try:
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        conn.close()
+        return "Access denied", 403
 
     user = conn.execute("""
         SELECT user_id, username, full_name, role, active
@@ -12302,6 +12509,7 @@ def user_edit(user_id):
         return "User not found", 404
 
     error = None
+    error_status = 400
 
     if request.method == "POST":
         username = request.form["username"].strip()
@@ -12313,17 +12521,69 @@ def user_edit(user_id):
             error = "Username and full name are required."
         else:
             try:
-                conn.execute("""
+                conn.execute("BEGIN IMMEDIATE")
+                changed_at_utc = get_application_now_utc()
+                actor = get_active_authenticated_user(
+                    conn,
+                    session["user_id"]
+                )
+                if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+                    raise PermissionError(
+                        "Current user is not allowed to manage users."
+                    )
+                current_user = conn.execute("""
+                    SELECT user_id, username, full_name, role, active
+                    FROM users
+                    WHERE user_id = ?
+                """, (user_id,)).fetchone()
+                if current_user is None:
+                    raise LookupError("User not found.")
+                if (
+                    current_user["username"] != user["username"]
+                    or current_user["full_name"] != user["full_name"]
+                    or current_user["role"] != user["role"]
+                    or current_user["active"] != user["active"]
+                ):
+                    raise UserLifecycleConflictError(
+                        "The user changed while this request was being "
+                        "processed. Reload and retry."
+                    )
+                if (
+                    current_user["username"] == username
+                    and current_user["full_name"] == full_name
+                    and current_user["role"] == role
+                    and current_user["active"] == active
+                ):
+                    conn.rollback()
+                    conn.close()
+                    return redirect(
+                        url_for("users", status=status_filter)
+                    )
+
+                cursor = conn.execute("""
                     UPDATE users
                     SET username = ?, full_name = ?, role = ?, active = ?
                     WHERE user_id = ?
+                      AND username = ?
+                      AND full_name = ?
+                      AND role = ?
+                      AND active = ?
                 """, (
                     username,
                     full_name,
                     role,
                     active,
-                    user_id
+                    user_id,
+                    current_user["username"],
+                    current_user["full_name"],
+                    current_user["role"],
+                    current_user["active"]
                 ))
+                if cursor.rowcount != 1:
+                    raise UserLifecycleConflictError(
+                        "The user changed while this request was being "
+                        "processed. Reload and retry."
+                    )
 
                 details = (
                     f"Username: {user['username']} → {username}; "
@@ -12337,20 +12597,78 @@ def user_edit(user_id):
                     activity_class="USER",
                     activity_type="user_updated",
                     summary=f"User updated: {full_name}",
-                    user_id=session["user_id"],
+                    user_id=actor["user_id"],
                     related_table="users",
                     related_id=user_id,
                     details=details,
                     success=1
                 )
 
+                if (
+                    current_user["role"] != role
+                    or current_user["active"] != active
+                ):
+                    reconcile_staff_notice_user_lifecycle_in_transaction(
+                        conn,
+                        user_id,
+                        actor["user_id"],
+                        changed_at_utc
+                    )
+                verified_user = conn.execute("""
+                    SELECT username, full_name, role, active
+                    FROM users
+                    WHERE user_id = ?
+                """, (user_id,)).fetchone()
+                if (
+                    verified_user is None
+                    or verified_user["username"] != username
+                    or verified_user["full_name"] != full_name
+                    or verified_user["role"] != role
+                    or verified_user["active"] != active
+                ):
+                    raise RuntimeError("User update verification failed.")
                 conn.commit()
                 conn.close()
 
                 return redirect(url_for("users", status=status_filter))
 
             except sqlite3.IntegrityError:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
                 error = "That username already exists."
+            except PermissionError:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
+                conn.close()
+                return "Access denied", 403
+            except LookupError:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
+                conn.close()
+                return "User not found", 404
+            except UserLifecycleConflictError as caught_error:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
+                error = str(caught_error)
+                error_status = 409
+            except BaseException:
+                try:
+                    conn.rollback()
+                except BaseException:
+                    pass
+                error = (
+                    "The user could not be updated. No changes were made. "
+                    "Please retry."
+                )
+                error_status = 503
 
     conn.close()
 
@@ -12359,7 +12677,7 @@ def user_edit(user_id):
         user=user,
         error=error,
         status_filter=status_filter
-    )
+    ), error_status if error else 200
 
 #####################################################################
 # CLIENT MANAGEMENT
@@ -12627,6 +12945,11 @@ def auto_sign_on_user(user_id):
 
     try:
         conn.execute("BEGIN IMMEDIATE")
+        operational_user = get_active_authenticated_user(conn, user_id)
+        if operational_user["role"] not in SHIFT_AUTO_SIGN_ON_ROLES:
+            raise PermissionError(
+                "This role cannot automatically sign on to a shift."
+            )
         shift = conn.execute("""
             SELECT shift_id
             FROM shifts
