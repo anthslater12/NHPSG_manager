@@ -1199,6 +1199,24 @@ def _shift_is_cancelled(shift):
     return shift is not None and shift["status"] == SHIFT_CANCELLED_STATUS
 
 
+def can_edit_shared_shift_note(conn, shift, user_id):
+    if shift is None or shift["status"] != "Open":
+        return False
+
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
+        return True
+
+    return conn.execute("""
+        SELECT 1
+        FROM shift_staff
+        WHERE shift_id = ?
+          AND user_id = ?
+          AND active = 1
+        LIMIT 1
+    """, (shift["shift_id"], actor["user_id"])).fetchone() is not None
+
+
 def _cancelled_shift_response():
     return "Cancelled shifts are historical and cannot be changed.", 409
 
@@ -13226,11 +13244,17 @@ def shift_dashboard(shift_id):
         AND sn.shift_type = ?
         AND sn.client_id = ?
         ORDER BY sn.created_at DESC
+        LIMIT 1
     """, (
         shift["shift_date"],
         shift["shift_type"],
         shift["client_id"]
     )).fetchall()
+    shift_notes_editable = can_edit_shared_shift_note(
+        conn,
+        shift,
+        session["user_id"]
+    )
     
     care_tasks = conn.execute("""
         SELECT *
@@ -13303,6 +13327,8 @@ def shift_dashboard(shift_id):
         shift=shift,
         staff=staff,
         notes=notes,
+        shift_notes_editable=shift_notes_editable,
+        shift_notes_saved=request.args.get("notes_saved") == "1",
         food_fluid_authorized=food_fluid_authorized,
         recent_food_fluid_entries=recent_food_fluid_entries,
         staff_notices=staff_notice_collection["dashboard"],
@@ -15135,41 +15161,80 @@ def shift_add_note(shift_id):
     if shift is None:
         conn.close()
         return "Shift not found", 404
-    if _shift_is_cancelled(shift):
+
+    try:
+        editable = can_edit_shared_shift_note(
+            conn,
+            shift,
+            session["user_id"]
+        )
+    except PermissionError:
         conn.close()
-        return _cancelled_shift_response()
+        return "Access denied", 403
+
+    note = conn.execute("""
+        SELECT *
+        FROM shift_notes
+        WHERE client_id = ?
+          AND shift_date = ?
+          AND shift_type = ?
+        ORDER BY created_at DESC, note_id DESC
+        LIMIT 1
+    """, (
+        shift["client_id"],
+        shift["shift_date"],
+        shift["shift_type"]
+    )).fetchone()
 
     if request.method == "POST":
-        note_text = request.form["note_text"]
-        follow_up_required = 1 if "follow_up_required" in request.form else 0
+        if not editable:
+            conn.close()
+            return "Access denied", 403
 
-        cur = conn.execute("""
-            INSERT INTO shift_notes
-            (
-                client_id,
-                user_id,
-                shift_date,
-                shift_type,
+        note_text = request.form.get("note_text", "").strip()
+        if not note_text:
+            conn.close()
+            return "Staff notes are required.", 400
+
+        if note is None:
+            cur = conn.execute("""
+                INSERT INTO shift_notes
+                (
+                    client_id,
+                    user_id,
+                    shift_date,
+                    shift_type,
+                    note_text,
+                    follow_up_required
+                )
+                VALUES (?, ?, ?, ?, ?, 0)
+            """, (
+                shift["client_id"],
+                session["user_id"],
+                shift["shift_date"],
+                shift["shift_type"],
+                note_text
+            ))
+            shift_note_id = cur.lastrowid
+        else:
+            shift_note_id = note["note_id"]
+            conn.execute("""
+                UPDATE shift_notes
+                SET user_id = ?,
+                    note_text = ?,
+                    created_at = CURRENT_TIMESTAMP
+                WHERE note_id = ?
+            """, (
+                session["user_id"],
                 note_text,
-                follow_up_required
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            shift["client_id"],
-            session["user_id"],
-            shift["shift_date"],
-            shift["shift_type"],
-            note_text,
-            follow_up_required
-        ))
-
-        shift_note_id = cur.lastrowid
+                shift_note_id
+            ))
 
         log_activity(
             conn,
             activity_class="NOTE",
-            activity_type="shift_note_created",
-            summary="Shift note added",
+            activity_type="shift_note_updated",
+            summary="Updated staff notes for shift",
             user_id=session["user_id"],
             client_id=shift["client_id"],
             shift_id=shift_id,
@@ -15179,28 +15244,22 @@ def shift_add_note(shift_id):
             success=1
         )
 
-        if follow_up_required:
-            create_action(
-                conn,
-                title="Shift Note Follow-up",
-                description=note_text,
-                source_table="shift_notes",
-                source_id=shift_note_id,
-                shift_id=shift_id,
-                created_by_user_id=session["user_id"],
-                priority="Medium"
-            )
-
         conn.commit()
         conn.close()
 
-        return redirect(url_for("shift_dashboard", shift_id=shift_id))
+        return redirect(url_for(
+            "shift_dashboard",
+            shift_id=shift_id,
+            notes_saved=1
+        ))
 
     conn.close()
 
     return render_template(
         "shift_add_note.html",
-        shift=shift
+        shift=shift,
+        note=note,
+        editable=editable
     )
     
 #####################################################################
