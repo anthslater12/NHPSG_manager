@@ -166,7 +166,12 @@
                 + Food &amp; Fluid
             </a>
         {% endif %}
-        <a class="quick-button" href="/shift/{{ shift.shift_id }}/activity">+ Activity</a>
+        <a
+            class="quick-button"
+            href="{{ url_for('shift_activities', shift_id=shift.shift_id) }}"
+        >
+            + Activity
+        </a>
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
         <a class="quick-button" href="/incident/new">+ Incident</a>
     </div>

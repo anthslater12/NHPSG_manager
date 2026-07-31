@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 import app
+import add_shift_activities_table
 import add_staff_notices_tables as staff_notice_schema
 
 
@@ -152,7 +153,19 @@ class ShiftCancellationTests(unittest.TestCase):
                     invalidated_by_user_id INTEGER,
                     invalidation_reason TEXT
                 );
+
+                CREATE TABLE shift_notes (
+                    note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    shift_date TEXT NOT NULL,
+                    shift_type TEXT NOT NULL,
+                    note_text TEXT NOT NULL,
+                    follow_up_required INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
             """)
+            add_shift_activities_table.migrate(conn)
             for sql in staff_notice_schema.TABLE_SQL.values():
                 conn.execute(sql)
             for sql in staff_notice_schema.INDEX_SQL.values():
@@ -822,7 +835,6 @@ class ShiftCancellationTests(unittest.TestCase):
             f"/shift/{shift_id}/toileting-event/new",
             f"/shift/{shift_id}/start-checklist",
             f"/shift/{shift_id}/end-shift",
-            f"/shift/{shift_id}/note",
             f"/shift/{shift_id}/care-task/1/record",
             f"/shift/{shift_id}/care-task-entry/1/edit",
             f"/shift/{shift_id}/housekeeping-task/1/record",
@@ -835,6 +847,33 @@ class ShiftCancellationTests(unittest.TestCase):
             f"/shift/{shift_id}/food-fluid"
         )
         self.assertEqual(food_fluid_response.status_code, 403)
+        note_response = client.get(f"/shift/{shift_id}/note")
+        self.assertEqual(note_response.status_code, 200)
+        self.assertNotIn(b"<textarea", note_response.data)
+        self.assertEqual(
+            client.post(
+                f"/shift/{shift_id}/note",
+                data={"note_text": "Not allowed"}
+            ).status_code,
+            403
+        )
+        activity_response = client.get(
+            f"/shift/{shift_id}/activity"
+        )
+        self.assertEqual(activity_response.status_code, 200)
+        self.assertNotIn(b"<form method=\"post\">", activity_response.data)
+        self.assertEqual(
+            client.post(
+                f"/shift/{shift_id}/activity",
+                data={
+                    "start_time": "09:00",
+                    "end_time": "10:00",
+                    "a_selected": "1",
+                    "activity_description": "Not allowed",
+                }
+            ).status_code,
+            403
+        )
 
     def test_database_fixture_is_temporary(self):
         self.assertNotEqual(

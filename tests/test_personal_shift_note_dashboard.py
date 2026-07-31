@@ -39,6 +39,12 @@ class PersonalShiftNoteDashboardTests(unittest.TestCase):
                     client_name TEXT NOT NULL
                 );
 
+                CREATE TABLE shifts (
+                    shift_id INTEGER PRIMARY KEY,
+                    shift_date TEXT NOT NULL,
+                    shift_type TEXT NOT NULL
+                );
+
                 CREATE TABLE shift_notes (
                     note_id INTEGER PRIMARY KEY,
                     client_id INTEGER NOT NULL,
@@ -47,11 +53,22 @@ class PersonalShiftNoteDashboardTests(unittest.TestCase):
                     shift_type TEXT NOT NULL
                 );
 
+                CREATE TABLE shift_activities (
+                    shift_activity_id INTEGER PRIMARY KEY,
+                    shift_id INTEGER NOT NULL,
+                    recorded_by_user_id INTEGER NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    activity_description TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE acknowledgements (
                     acknowledgement_id INTEGER PRIMARY KEY,
                     source_table TEXT NOT NULL,
                     source_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
+                    acknowledgement_type TEXT DEFAULT 'Read',
                     active INTEGER NOT NULL
                 );
 
