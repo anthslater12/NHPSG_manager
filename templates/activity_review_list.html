@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Activity Management Review</h2>
+
+    <p>
+        <a href="{{ url_for('manager_review_hub') }}">
+            &larr; Back to Management Review
+        </a>
+    </p>
+
+    {% if entries %}
+        <table>
+            <tr>
+                <th>Date</th>
+                <th>Shift</th>
+                <th>Client</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>A</th>
+                <th>T</th>
+                <th>LS</th>
+                <th>Description</th>
+                <th>Staff</th>
+                <th>Created</th>
+                <th>Reviewed</th>
+                <th>View</th>
+            </tr>
+
+            {% for entry in entries %}
+                <tr id="shift-activity-{{ entry.shift_activity_id }}">
+                    <td>{{ entry.shift_date }}</td>
+                    <td>{{ entry.shift_type }}</td>
+                    <td>{{ entry.client_name }}</td>
+                    <td>{{ entry.start_time }}</td>
+                    <td>{{ entry.end_time }}</td>
+                    <td>{% if entry.a_selected %}Yes{% else %}No{% endif %}</td>
+                    <td>{% if entry.t_selected %}Yes{% else %}No{% endif %}</td>
+                    <td>{% if entry.ls_selected %}Yes{% else %}No{% endif %}</td>
+                    <td>{{ entry.activity_description }}</td>
+                    <td>{{ entry.recorded_by_name }}</td>
+                    <td>{{ entry.created_at }}</td>
+                    <td>
+                        {% if reviews_by_activity.get(entry.shift_activity_id) %}
+                            {% for review in reviews_by_activity[entry.shift_activity_id] %}
+                                {{ review.reviewed_by }}<br>
+                                <small>{{ review.acknowledged_at }}</small><br>
+                            {% endfor %}
+                        {% endif %}
+
+                        {% if entry.shift_activity_id not in reviewed_by_current_user %}
+                            <form
+                                method="post"
+                                action="{{ url_for(
+                                    'review_shift_activity',
+                                    activity_id=entry.shift_activity_id
+                                ) }}"
+                                class="inline-form"
+                            >
+                                <button type="submit" class="link-button">
+                                    {% if reviews_by_activity.get(entry.shift_activity_id) %}
+                                        Add Review
+                                    {% else %}
+                                        Review
+                                    {% endif %}
+                                </button>
+                            </form>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="{{ url_for(
+                            'activity_review_detail',
+                            activity_id=entry.shift_activity_id
+                        ) }}">
+                            View
+                        </a>
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No activities have been recorded.</p>
+    {% endif %}
+</div>
+
+{% endblock %}

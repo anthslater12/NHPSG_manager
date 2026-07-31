@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Activities for this Shift</h2>
+
+    <p>
+        <strong>{{ shift.shift_type }} Shift</strong><br>
+        {{ shift.shift_date }} &mdash; {{ shift.client_name }}<br>
+        <strong>Status:</strong> {{ shift.shift_status }}
+    </p>
+
+    {% if created %}
+        <p class="success">Activity saved.</p>
+    {% endif %}
+
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
+
+    {% if shift.editable %}
+        <h3>Add Activity</h3>
+
+        <form method="post">
+            <div class="form-row">
+                <div class="form-field">
+                    <label for="start_time">Start Time</label>
+                    <input
+                        type="time"
+                        id="start_time"
+                        name="start_time"
+                        value="{{ values.get('start_time', '') }}"
+                        required
+                    >
+                </div>
+
+                <div class="form-field">
+                    <label for="end_time">End Time</label>
+                    <input
+                        type="time"
+                        id="end_time"
+                        name="end_time"
+                        value="{{ values.get('end_time', '') }}"
+                        required
+                    >
+                </div>
+            </div>
+
+            <fieldset>
+                <legend>Activity Categories</legend>
+
+                <label>
+                    <input
+                        type="checkbox"
+                        name="a_selected"
+                        value="1"
+                        style="width:auto;"
+                        {% if values.get('a_selected') == '1' %}checked{% endif %}
+                    >
+                    A
+                </label>
+
+                <label>
+                    <input
+                        type="checkbox"
+                        name="t_selected"
+                        value="1"
+                        style="width:auto;"
+                        {% if values.get('t_selected') == '1' %}checked{% endif %}
+                    >
+                    T
+                </label>
+
+                <label>
+                    <input
+                        type="checkbox"
+                        name="ls_selected"
+                        value="1"
+                        style="width:auto;"
+                        {% if values.get('ls_selected') == '1' %}checked{% endif %}
+                    >
+                    LS
+                </label>
+            </fieldset>
+
+            <label for="activity_description">Activity Description</label>
+            <textarea
+                id="activity_description"
+                name="activity_description"
+                rows="5"
+                required
+            >{{ values.get('activity_description', '') }}</textarea>
+
+            <button type="submit">Save Activity</button>
+        </form>
+    {% else %}
+        <p>This shift is read-only. Activities cannot be added.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>Activity List</h3>
+
+    {% if entries %}
+        <table>
+            <tr>
+                <th>Start</th>
+                <th>End</th>
+                <th>A</th>
+                <th>T</th>
+                <th>LS</th>
+                <th>Description</th>
+                <th>Staff</th>
+                <th>Created</th>
+            </tr>
+
+            {% for entry in entries %}
+                <tr>
+                    <td>{{ entry.start_time }}</td>
+                    <td>{{ entry.end_time }}</td>
+                    <td>{% if entry.a_selected %}Yes{% else %}No{% endif %}</td>
+                    <td>{% if entry.t_selected %}Yes{% else %}No{% endif %}</td>
+                    <td>{% if entry.ls_selected %}Yes{% else %}No{% endif %}</td>
+                    <td>{{ entry.activity_description }}</td>
+                    <td>{{ entry.recorded_by_name }}</td>
+                    <td>{{ entry.created_at }}</td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No activities recorded for this shift yet.</p>
+    {% endif %}
+
+    <p>
+        <a href="{{ url_for('shift_dashboard', shift_id=shift.shift_id) }}">
+            Back to Shift
+        </a>
+    </p>
+</div>
+
+{% endblock %}

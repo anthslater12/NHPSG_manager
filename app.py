@@ -184,6 +184,12 @@ FOOD_FLUID_THROWN_OUTCOMES = (
     "Refused",
 )
 FOOD_FLUID_ASCII_WHITESPACE = " \t\n\r\v\f"
+SHIFT_ACTIVITY_CATEGORY_FIELDS = (
+    "a_selected",
+    "t_selected",
+    "ls_selected",
+)
+SHIFT_ACTIVITY_ASCII_WHITESPACE = " \t\n\r\v\f"
 
 #####################################################################
 # DATABASE & CORE HELPER FUNCTIONS
@@ -1197,6 +1203,167 @@ class UserLifecycleConflictError(RuntimeError):
 
 def _shift_is_cancelled(shift):
     return shift is not None and shift["status"] == SHIFT_CANCELLED_STATUS
+
+
+def can_edit_shared_shift_note(conn, shift, user_id):
+    if shift is None or shift["status"] != "Open":
+        return False
+
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
+        return True
+
+    return conn.execute("""
+        SELECT 1
+        FROM shift_staff
+        WHERE shift_id = ?
+          AND user_id = ?
+          AND active = 1
+        LIMIT 1
+    """, (shift["shift_id"], actor["user_id"])).fetchone() is not None
+
+
+def get_shift_activity_context(conn, shift_id, user_id):
+    """Return Activity context and whether the worker may append entries."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may record shift activities."
+        )
+
+    context = conn.execute("""
+        SELECT
+            s.shift_id,
+            s.client_id,
+            s.shift_date,
+            s.shift_type,
+            s.status AS shift_status,
+            c.client_name,
+            c.active AS client_active,
+            EXISTS (
+                SELECT 1
+                FROM shift_staff ss
+                WHERE ss.shift_id = s.shift_id
+                  AND ss.user_id = ?
+                  AND ss.active = 1
+            ) AS has_active_assignment
+        FROM shifts s
+        JOIN clients c ON c.client_id = s.client_id
+        WHERE s.shift_id = ?
+    """, (actor["user_id"], shift_id)).fetchone()
+
+    if context is None:
+        raise LookupError("Shift not found.")
+
+    context = dict(context)
+    context["recorded_by_user_id"] = actor["user_id"]
+    context["editable"] = bool(
+        context["shift_status"] == "Open"
+        and context["client_active"] == 1
+        and context["has_active_assignment"] == 1
+    )
+    return context
+
+
+def require_active_shift_activity_context(conn, shift_id, user_id):
+    """Return authoritative context for an Activity V1 append."""
+    context = get_shift_activity_context(conn, shift_id, user_id)
+    if not context["editable"]:
+        raise PermissionError(
+            "Active participation in this open shift is required."
+        )
+    return context
+
+
+def get_shift_activity_entries(conn, shift_id):
+    return conn.execute("""
+        SELECT
+            sa.shift_activity_id,
+            sa.shift_id,
+            sa.recorded_by_user_id,
+            sa.start_time,
+            sa.end_time,
+            sa.a_selected,
+            sa.t_selected,
+            sa.ls_selected,
+            sa.activity_description,
+            sa.created_at,
+            u.full_name AS recorded_by_name
+        FROM shift_activities sa
+        JOIN users u ON u.user_id = sa.recorded_by_user_id
+        WHERE sa.shift_id = ?
+        ORDER BY sa.created_at ASC, sa.shift_activity_id ASC
+    """, (shift_id,)).fetchall()
+
+
+def parse_shift_activity_form(form):
+    allowed_fields = {
+        "start_time",
+        "end_time",
+        "activity_description",
+        *SHIFT_ACTIVITY_CATEGORY_FIELDS,
+    }
+    if not set(form).issubset(allowed_fields):
+        raise ValueError("Activity form input is invalid.")
+
+    for field_name in (
+        "start_time",
+        "end_time",
+        "activity_description",
+    ):
+        if len(form.getlist(field_name)) != 1:
+            raise ValueError("Activity form input is invalid.")
+
+    values = {
+        "start_time": form["start_time"].strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+        "end_time": form["end_time"].strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+        "activity_description": form["activity_description"].strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+    }
+
+    for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS:
+        submitted = form.getlist(field_name)
+        if not submitted:
+            values[field_name] = 0
+        elif submitted == ["1"]:
+            values[field_name] = 1
+        else:
+            raise ValueError("Activity category input is invalid.")
+
+    parsed_times = {}
+    for field_name in ("start_time", "end_time"):
+        try:
+            parsed = datetime.strptime(values[field_name], "%H:%M")
+        except ValueError as error:
+            raise ValueError(
+                "Activity times must use HH:MM."
+            ) from error
+        if parsed.strftime("%H:%M") != values[field_name]:
+            raise ValueError("Activity times must use HH:MM.")
+        parsed_times[field_name] = parsed
+
+    if parsed_times["end_time"] <= parsed_times["start_time"]:
+        raise ValueError("Activity end time must be later than start time.")
+    if not any(values[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS):
+        raise ValueError("At least one Activity category is required.")
+    if not values["activity_description"]:
+        raise ValueError("Activity description is required.")
+
+    return values
+
+
+def get_activity_management_actor(conn, user_id):
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to review Activities."
+        )
+    return actor
 
 
 def _cancelled_shift_response():
@@ -11787,7 +11954,7 @@ def get_active_shift_staff():
 
     return active_staff
 
-def get_management_inbox():
+def get_management_inbox(current_user_id):
     conn = get_db()
 
     high_priority_actions = conn.execute("""
@@ -11818,11 +11985,37 @@ def get_management_inbox():
             FROM acknowledgements ack
             WHERE ack.source_table = 'shift_notes'
               AND ack.source_id = sn.note_id
+              AND ack.user_id = ?
               AND ack.active = 1
         )
         ORDER BY sn.shift_date DESC  -- CHANGED from note_date
         LIMIT 5
-    """).fetchall()
+    """, (current_user_id,)).fetchall()
+
+    activities_to_review_list = conn.execute("""
+        SELECT
+            sa.shift_activity_id,
+            sa.start_time,
+            sa.end_time,
+            sa.activity_description,
+            s.shift_date,
+            s.shift_type,
+            u.full_name
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN users u ON u.user_id = sa.recorded_by_user_id
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM acknowledgements ack
+            WHERE ack.source_table = 'shift_activities'
+              AND ack.source_id = sa.shift_activity_id
+              AND ack.user_id = ?
+              AND ack.acknowledgement_type = 'Review'
+              AND ack.active = 1
+        )
+        ORDER BY sa.created_at DESC, sa.shift_activity_id DESC
+        LIMIT 5
+    """, (current_user_id,)).fetchall()
 
     recent_incidents = conn.execute("""
         SELECT
@@ -11854,6 +12047,9 @@ def get_management_inbox():
     return {
         "high_priority_actions": [dict(r) for r in high_priority_actions],
         "notes_to_review_list": [dict(r) for r in notes_to_review_list],
+        "activities_to_review_list": [
+            dict(r) for r in activities_to_review_list
+        ],
         "recent_incidents": [dict(r) for r in recent_incidents],
         "recent_activity_list": [dict(r) for r in recent_activity_list]
     }
@@ -12150,7 +12346,7 @@ def reset_user_password(user_id):
 # DASHBOARDS
 #####################################################################
 
-def get_dashboard_stats():
+def get_dashboard_stats(current_user_id):
     conn = get_db()
 
     outstanding_action_count = conn.execute("""
@@ -12193,9 +12389,24 @@ def get_dashboard_stats():
             FROM acknowledgements ack
             WHERE ack.source_table = 'shift_notes'
               AND ack.source_id = sn.note_id
+              AND ack.user_id = ?
               AND ack.active = 1
         )
-    """).fetchone()["count"]
+    """, (current_user_id,)).fetchone()["count"]
+
+    activities_to_review = conn.execute("""
+        SELECT COUNT(*) AS count
+        FROM shift_activities sa
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM acknowledgements ack
+            WHERE ack.source_table = 'shift_activities'
+              AND ack.source_id = sa.shift_activity_id
+              AND ack.user_id = ?
+              AND ack.acknowledgement_type = 'Review'
+              AND ack.active = 1
+        )
+    """, (current_user_id,)).fetchone()["count"]
 
     open_incidents = conn.execute("""
         SELECT COUNT(*) AS count
@@ -12214,6 +12425,7 @@ def get_dashboard_stats():
         "outstanding_action_count": outstanding_action_count,
         "outstanding_actions": outstanding_actions,
         "notes_to_review": notes_to_review,
+        "activities_to_review": activities_to_review,
         "open_incidents": open_incidents,
         "recent_activity": recent_activity
     }
@@ -12246,8 +12458,8 @@ def dashboard():
                 "Staff Notices could not be loaded. Please retry.",
                 503
             )
-        stats = get_dashboard_stats()
-        inbox = get_management_inbox()
+        stats = get_dashboard_stats(current_user["user_id"])
+        inbox = get_management_inbox(current_user["user_id"])
         active_staff = get_active_shift_staff()
         manager_alerts = get_manager_alerts()
 
@@ -13226,11 +13438,17 @@ def shift_dashboard(shift_id):
         AND sn.shift_type = ?
         AND sn.client_id = ?
         ORDER BY sn.created_at DESC
+        LIMIT 1
     """, (
         shift["shift_date"],
         shift["shift_type"],
         shift["client_id"]
     )).fetchall()
+    shift_notes_editable = can_edit_shared_shift_note(
+        conn,
+        shift,
+        session["user_id"]
+    )
     
     care_tasks = conn.execute("""
         SELECT *
@@ -13303,6 +13521,8 @@ def shift_dashboard(shift_id):
         shift=shift,
         staff=staff,
         notes=notes,
+        shift_notes_editable=shift_notes_editable,
+        shift_notes_saved=request.args.get("notes_saved") == "1",
         food_fluid_authorized=food_fluid_authorized,
         recent_food_fluid_entries=recent_food_fluid_entries,
         staff_notices=staff_notice_collection["dashboard"],
@@ -15135,41 +15355,80 @@ def shift_add_note(shift_id):
     if shift is None:
         conn.close()
         return "Shift not found", 404
-    if _shift_is_cancelled(shift):
+
+    try:
+        editable = can_edit_shared_shift_note(
+            conn,
+            shift,
+            session["user_id"]
+        )
+    except PermissionError:
         conn.close()
-        return _cancelled_shift_response()
+        return "Access denied", 403
+
+    note = conn.execute("""
+        SELECT *
+        FROM shift_notes
+        WHERE client_id = ?
+          AND shift_date = ?
+          AND shift_type = ?
+        ORDER BY created_at DESC, note_id DESC
+        LIMIT 1
+    """, (
+        shift["client_id"],
+        shift["shift_date"],
+        shift["shift_type"]
+    )).fetchone()
 
     if request.method == "POST":
-        note_text = request.form["note_text"]
-        follow_up_required = 1 if "follow_up_required" in request.form else 0
+        if not editable:
+            conn.close()
+            return "Access denied", 403
 
-        cur = conn.execute("""
-            INSERT INTO shift_notes
-            (
-                client_id,
-                user_id,
-                shift_date,
-                shift_type,
+        note_text = request.form.get("note_text", "").strip()
+        if not note_text:
+            conn.close()
+            return "Staff notes are required.", 400
+
+        if note is None:
+            cur = conn.execute("""
+                INSERT INTO shift_notes
+                (
+                    client_id,
+                    user_id,
+                    shift_date,
+                    shift_type,
+                    note_text,
+                    follow_up_required
+                )
+                VALUES (?, ?, ?, ?, ?, 0)
+            """, (
+                shift["client_id"],
+                session["user_id"],
+                shift["shift_date"],
+                shift["shift_type"],
+                note_text
+            ))
+            shift_note_id = cur.lastrowid
+        else:
+            shift_note_id = note["note_id"]
+            conn.execute("""
+                UPDATE shift_notes
+                SET user_id = ?,
+                    note_text = ?,
+                    created_at = CURRENT_TIMESTAMP
+                WHERE note_id = ?
+            """, (
+                session["user_id"],
                 note_text,
-                follow_up_required
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            shift["client_id"],
-            session["user_id"],
-            shift["shift_date"],
-            shift["shift_type"],
-            note_text,
-            follow_up_required
-        ))
-
-        shift_note_id = cur.lastrowid
+                shift_note_id
+            ))
 
         log_activity(
             conn,
             activity_class="NOTE",
-            activity_type="shift_note_created",
-            summary="Shift note added",
+            activity_type="shift_note_updated",
+            summary="Updated staff notes for shift",
             user_id=session["user_id"],
             client_id=shift["client_id"],
             shift_id=shift_id,
@@ -15179,29 +15438,143 @@ def shift_add_note(shift_id):
             success=1
         )
 
-        if follow_up_required:
-            create_action(
-                conn,
-                title="Shift Note Follow-up",
-                description=note_text,
-                source_table="shift_notes",
-                source_id=shift_note_id,
-                shift_id=shift_id,
-                created_by_user_id=session["user_id"],
-                priority="Medium"
-            )
-
         conn.commit()
         conn.close()
 
-        return redirect(url_for("shift_dashboard", shift_id=shift_id))
+        return redirect(url_for(
+            "shift_dashboard",
+            shift_id=shift_id,
+            notes_saved=1
+        ))
 
     conn.close()
 
     return render_template(
         "shift_add_note.html",
-        shift=shift
+        shift=shift,
+        note=note,
+        editable=editable
     )
+
+
+@app.route("/shift/<int:shift_id>/activity", methods=["GET", "POST"])
+def shift_activities(shift_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    values = {}
+
+    try:
+        context = get_shift_activity_context(
+            conn,
+            shift_id,
+            session["user_id"]
+        )
+
+        if request.method == "POST":
+            if not context["editable"]:
+                raise PermissionError(
+                    "Active participation in this open shift is required."
+                )
+            values = request.form.to_dict()
+            parsed = parse_shift_activity_form(request.form)
+
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                context = require_active_shift_activity_context(
+                    conn,
+                    shift_id,
+                    session["user_id"]
+                )
+                cursor = conn.execute("""
+                    INSERT INTO shift_activities
+                    (
+                        shift_id,
+                        recorded_by_user_id,
+                        start_time,
+                        end_time,
+                        a_selected,
+                        t_selected,
+                        ls_selected,
+                        activity_description
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    context["shift_id"],
+                    context["recorded_by_user_id"],
+                    parsed["start_time"],
+                    parsed["end_time"],
+                    parsed["a_selected"],
+                    parsed["t_selected"],
+                    parsed["ls_selected"],
+                    parsed["activity_description"],
+                ))
+                activity_id = cursor.lastrowid
+                selected_categories = ", ".join(
+                    field.removesuffix("_selected").upper()
+                    for field in SHIFT_ACTIVITY_CATEGORY_FIELDS
+                    if parsed[field]
+                )
+                log_activity(
+                    conn,
+                    activity_class="ACTIVITY",
+                    activity_type="shift_activity_created",
+                    summary="Shift activity recorded",
+                    user_id=context["recorded_by_user_id"],
+                    client_id=context["client_id"],
+                    shift_id=context["shift_id"],
+                    related_table="shift_activities",
+                    related_id=activity_id,
+                    details=(
+                        f"Start: {parsed['start_time']}; "
+                        f"End: {parsed['end_time']}; "
+                        f"Categories: {selected_categories}; "
+                        f"Description: {parsed['activity_description']}"
+                    ),
+                    success=1
+                )
+                conn.commit()
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
+            return redirect(url_for(
+                "shift_activities",
+                shift_id=shift_id,
+                created=1
+            ))
+
+        entries = get_shift_activity_entries(conn, shift_id)
+        return render_template(
+            "shift_activities.html",
+            shift=context,
+            entries=entries,
+            values=values,
+            error=None,
+            created=request.args.get("created") == "1"
+        )
+    except LookupError:
+        return "Shift not found", 404
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        entries = get_shift_activity_entries(conn, shift_id)
+        return render_template(
+            "shift_activities.html",
+            shift=context,
+            entries=entries,
+            values=values,
+            error=str(error),
+            created=False
+        ), 400
+    finally:
+        conn.close()
     
 #####################################################################
 # INCIDENT REPORTS
@@ -15423,6 +15796,180 @@ def manager_review_hub():
     return render_template(
         "manager_review_hub.html"
     )
+
+
+@app.route("/manager-review/activities")
+def activity_review_list():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_activity_management_actor(
+            conn,
+            session["user_id"]
+        )
+        entries = conn.execute("""
+            SELECT
+                sa.*,
+                s.shift_date,
+                s.shift_type,
+                c.client_name,
+                u.full_name AS recorded_by_name
+            FROM shift_activities sa
+            JOIN shifts s ON s.shift_id = sa.shift_id
+            JOIN clients c ON c.client_id = s.client_id
+            JOIN users u ON u.user_id = sa.recorded_by_user_id
+            ORDER BY sa.created_at DESC, sa.shift_activity_id DESC
+        """).fetchall()
+        reviews = conn.execute("""
+            SELECT
+                ack.source_id AS shift_activity_id,
+                ack.acknowledged_at,
+                ack.user_id,
+                u.full_name AS reviewed_by
+            FROM acknowledgements ack
+            JOIN users u ON u.user_id = ack.user_id
+            WHERE ack.source_table = 'shift_activities'
+              AND ack.acknowledgement_type = 'Review'
+              AND ack.active = 1
+            ORDER BY ack.acknowledged_at, ack.acknowledgement_id
+        """).fetchall()
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    reviews_by_activity = {}
+    reviewed_by_current_user = set()
+    for review in reviews:
+        activity_id = review["shift_activity_id"]
+        reviews_by_activity.setdefault(activity_id, []).append(review)
+        if review["user_id"] == actor["user_id"]:
+            reviewed_by_current_user.add(review["shift_activity_id"])
+
+    return render_template(
+        "activity_review_list.html",
+        entries=entries,
+        reviews_by_activity=reviews_by_activity,
+        reviewed_by_current_user=reviewed_by_current_user
+    )
+
+
+@app.route("/manager-review/activities/<int:activity_id>")
+def activity_review_detail(activity_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_activity_management_actor(
+            conn,
+            session["user_id"]
+        )
+        entry = conn.execute("""
+            SELECT
+                sa.*,
+                s.shift_date,
+                s.shift_type,
+                s.client_id,
+                c.client_name,
+                u.full_name AS recorded_by_name
+            FROM shift_activities sa
+            JOIN shifts s ON s.shift_id = sa.shift_id
+            JOIN clients c ON c.client_id = s.client_id
+            JOIN users u ON u.user_id = sa.recorded_by_user_id
+            WHERE sa.shift_activity_id = ?
+        """, (activity_id,)).fetchone()
+        if entry is None:
+            return "Activity not found", 404
+
+        reviews = conn.execute("""
+            SELECT
+                ack.acknowledgement_id,
+                ack.acknowledged_at,
+                ack.acknowledgement_type,
+                ack.user_id,
+                u.full_name AS reviewed_by
+            FROM acknowledgements ack
+            JOIN users u ON u.user_id = ack.user_id
+            WHERE ack.source_table = 'shift_activities'
+              AND ack.source_id = ?
+              AND ack.acknowledgement_type = 'Review'
+              AND ack.active = 1
+            ORDER BY ack.acknowledged_at, ack.acknowledgement_id
+        """, (activity_id,)).fetchall()
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    return render_template(
+        "activity_review_detail.html",
+        entry=entry,
+        reviews=reviews,
+        current_user_reviewed=any(
+            review["user_id"] == actor["user_id"]
+            for review in reviews
+        )
+    )
+
+
+@app.route(
+    "/manager-review/activities/<int:activity_id>/review",
+    methods=["POST"]
+)
+def review_shift_activity(activity_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    if request.form:
+        return "Invalid review request", 400
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_activity_management_actor(
+            conn,
+            session["user_id"]
+        )
+        entry = conn.execute("""
+            SELECT
+                sa.shift_activity_id,
+                sa.shift_id,
+                s.client_id
+            FROM shift_activities sa
+            JOIN shifts s ON s.shift_id = sa.shift_id
+            WHERE sa.shift_activity_id = ?
+        """, (activity_id,)).fetchone()
+        if entry is None:
+            conn.rollback()
+            return "Activity not found", 404
+
+        create_acknowledgement(
+            conn,
+            source_table="shift_activities",
+            source_id=activity_id,
+            user_id=actor["user_id"],
+            acknowledgement_type="Review",
+            client_id=entry["client_id"],
+            shift_id=entry["shift_id"]
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "activity_review_detail",
+        activity_id=activity_id
+    ))
 
 
 FOOD_FLUID_REVIEW_FILTERS = frozenset((
