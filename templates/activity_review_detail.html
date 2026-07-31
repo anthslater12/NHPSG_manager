@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Activity Management Review</h2>
+
+    <p>
+        <a href="{{ url_for('activity_review_list') }}">
+            &larr; Return to Activity Review List
+        </a>
+    </p>
+
+    <table class="management-detail-table">
+        <tr><th>Date</th><td>{{ entry.shift_date }}</td></tr>
+        <tr><th>Shift</th><td>{{ entry.shift_type }}</td></tr>
+        <tr><th>Client</th><td>{{ entry.client_name }}</td></tr>
+        <tr><th>Start Time</th><td>{{ entry.start_time }}</td></tr>
+        <tr><th>End Time</th><td>{{ entry.end_time }}</td></tr>
+        <tr><th>A</th><td>{% if entry.a_selected %}Yes{% else %}No{% endif %}</td></tr>
+        <tr><th>T</th><td>{% if entry.t_selected %}Yes{% else %}No{% endif %}</td></tr>
+        <tr><th>LS</th><td>{% if entry.ls_selected %}Yes{% else %}No{% endif %}</td></tr>
+        <tr><th>Description</th><td>{{ entry.activity_description }}</td></tr>
+        <tr><th>Staff Member</th><td>{{ entry.recorded_by_name }}</td></tr>
+        <tr><th>Created</th><td>{{ entry.created_at }}</td></tr>
+    </table>
+
+    <h3>Reviews</h3>
+
+    {% if reviews %}
+        <ul>
+            {% for review in reviews %}
+                <li>
+                    {{ review.reviewed_by }}
+                    &mdash; {{ review.acknowledged_at }}
+                    &mdash; {{ review.acknowledgement_type }}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No management reviews recorded.</p>
+    {% endif %}
+
+    {% if current_user_reviewed %}
+        <p>You have reviewed this record.</p>
+    {% else %}
+        <form
+            method="post"
+            action="{{ url_for(
+                'review_shift_activity',
+                activity_id=entry.shift_activity_id
+            ) }}"
+            class="inline-form"
+        >
+            <button type="submit" class="link-button">
+                Mark as Reviewed
+            </button>
+        </form>
+    {% endif %}
+</div>
+
+{% endblock %}

@@ -185,6 +185,38 @@
     </div>
 
     <div class="card">
+        <h3>Activities Awaiting Review</h3>
+        <h1>{{ activities_to_review }}</h1>
+
+        {% if activities_to_review_list %}
+            <hr>
+            <ul class="dashboard-list">
+                {% for activity in activities_to_review_list %}
+                    <li>
+                        <a href="{{ url_for(
+                            'activity_review_detail',
+                            activity_id=activity.shift_activity_id
+                        ) }}">
+                            {{ activity.shift_date }}
+                            &mdash; {{ activity.shift_type }} Shift
+                            &mdash; {{ activity.full_name }}
+                            &mdash; {{ activity.start_time }}–{{ activity.end_time }}
+                        </a>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>All activities reviewed.</p>
+        {% endif %}
+
+        <p>
+            <a href="{{ url_for('activity_review_list') }}">
+                View All &rarr;
+            </a>
+        </p>
+    </div>
+
+    <div class="card">
         <h3>Open Incidents</h3>
         <h1>{{ open_incidents }}</h1>
 
