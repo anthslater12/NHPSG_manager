@@ -144,7 +144,7 @@ def inject_session_timeout_settings():
         "session_warning_seconds": SESSION_WARNING_SECONDS
     }
 
-DB_NAME = "nhpsg.db"
+DB_NAME = os.environ.get("NHPSG_DB_PATH", "nhpsg.db")
 
 VANCOUVER_TIMEZONE = ZoneInfo("America/Vancouver")
 
