@@ -521,6 +521,40 @@ def get_active_food_fluid_shift_context(conn, shift_id, user_id):
     return context
 
 
+def get_active_sleep_shift_context(conn, shift_id, user_id):
+    """Return authoritative context for a worker recording Sleep."""
+    user = get_active_authenticated_user(conn, user_id)
+    if user["role"] != "Support Worker":
+        raise PermissionError("Only an active Support Worker may record Sleep.")
+
+    context = conn.execute("""
+        SELECT s.shift_id, s.client_id, s.shift_date, s.shift_type,
+               s.status AS shift_status, c.client_name,
+               ss.shift_staff_id
+        FROM shifts s
+        JOIN clients c ON c.client_id = s.client_id AND c.active = 1
+        JOIN shift_staff ss ON ss.shift_id = s.shift_id
+                           AND ss.user_id = ? AND ss.active = 1
+        WHERE s.shift_id = ? AND s.status = 'Open'
+        LIMIT 1
+    """, (user["user_id"], shift_id)).fetchone()
+    if context is None:
+        raise PermissionError(
+            "Active participation in this open shift is required."
+        )
+    return context
+
+
+def get_sleep_events(conn, shift_id):
+    return conn.execute("""
+        SELECT se.*, u.full_name
+        FROM sleep_events se
+        JOIN users u ON u.user_id = se.recorded_by_user_id
+        WHERE se.shift_id = ?
+        ORDER BY se.event_datetime DESC, se.sleep_event_id DESC
+    """, (shift_id,)).fetchall()
+
+
 def get_food_fluid_shift_window(shift):
     """Return the half-open Vancouver interval for an authoritative shift."""
     try:
@@ -13423,6 +13457,15 @@ def shift_dashboard(shift_id):
     except PermissionError:
         pass
 
+    sleep_authorized = False
+    recent_sleep_events = []
+    try:
+        get_active_sleep_shift_context(conn, shift_id, session["user_id"])
+        sleep_authorized = True
+        recent_sleep_events = get_sleep_events(conn, shift_id)[:5]
+    except PermissionError:
+        pass
+
     staff = conn.execute("""
         SELECT ss.*, u.full_name, u.role
         FROM shift_staff ss
@@ -13531,6 +13574,8 @@ def shift_dashboard(shift_id):
         shift_notes_saved=request.args.get("notes_saved") == "1",
         food_fluid_authorized=food_fluid_authorized,
         recent_food_fluid_entries=recent_food_fluid_entries,
+        sleep_authorized=sleep_authorized,
+        recent_sleep_events=recent_sleep_events,
         staff_notices=staff_notice_collection["dashboard"],
         staff_notice_outstanding_count=(
             staff_notice_collection["outstanding_count"]
@@ -13884,6 +13929,93 @@ def toileting_event_new(shift_id):
 #####################################################################
 # FOOD & FLUID V1: WORKER WORKFLOWS
 #####################################################################
+
+@app.route("/shift/<int:shift_id>/sleep", methods=["GET", "POST"])
+def sleep_events(shift_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        context = get_active_sleep_shift_context(
+            conn, shift_id, session["user_id"]
+        )
+    except PermissionError:
+        conn.close()
+        return "Active participation in this open shift is required.", 403
+
+    error = None
+    values = {
+        "event_local": datetime.now(VANCOUVER_TIMEZONE).strftime(
+            "%Y-%m-%dT%H:%M"
+        )
+    }
+    if request.method == "POST":
+        event_type = request.form.get("event_type", "")
+        event_local = request.form.get("event_local", "")
+        values["event_local"] = event_local
+        if event_type not in ("fell_asleep", "woke_up"):
+            error = "Sleep event type is invalid."
+        else:
+            try:
+                local_naive = _parse_vancouver_local_input(event_local)
+                candidates = _valid_vancouver_utc_candidates(local_naive)
+                if len(candidates) != 1:
+                    raise ValueError("Sleep event date and time is invalid.")
+                event_utc = candidates[0]
+                if event_utc > datetime.now(timezone.utc) + timedelta(minutes=5):
+                    raise ValueError("Sleep event cannot be unreasonably in the future.")
+                cursor = conn.execute("""
+                    INSERT INTO sleep_events
+                    (client_id, shift_id, event_type, event_datetime,
+                     recorded_by_user_id)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    context["client_id"], shift_id, event_type,
+                    event_utc.isoformat().replace("+00:00", "Z"),
+                    session["user_id"]
+                ))
+                event_id = cursor.lastrowid
+                activity_type = (
+                    "sleep_fell_asleep"
+                    if event_type == "fell_asleep"
+                    else "sleep_woke_up"
+                )
+                summary = (
+                    "Client fell asleep"
+                    if event_type == "fell_asleep"
+                    else "Client woke up"
+                )
+                log_activity(
+                    conn,
+                    activity_class="SLEEP",
+                    activity_type=activity_type,
+                    summary=summary,
+                    user_id=session["user_id"],
+                    client_id=context["client_id"],
+                    shift_id=shift_id,
+                    related_table="sleep_events",
+                    related_id=event_id,
+                    success=1,
+                    storyline_visible=True
+                )
+                conn.commit()
+                return redirect(url_for("sleep_events", shift_id=shift_id, created=1))
+            except (ValueError, sqlite3.IntegrityError) as caught_error:
+                if conn.in_transaction:
+                    conn.rollback()
+                error = str(caught_error)
+
+    events = get_sleep_events(conn, shift_id)
+    conn.close()
+    return render_template(
+        "sleep_events.html",
+        shift=context,
+        events=events,
+        error=error,
+        values=values
+    )
+
 
 @app.route("/shift/<int:shift_id>/food-fluid")
 def food_fluid_shift_list(shift_id):

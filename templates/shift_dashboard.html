@@ -166,6 +166,11 @@
                 + Food &amp; Fluid
             </a>
         {% endif %}
+        {% if sleep_authorized %}
+            <a class="quick-button" href="{{ url_for('sleep_events', shift_id=shift.shift_id) }}">
+                + Sleep
+            </a>
+        {% endif %}
         <a
             class="quick-button"
             href="{{ url_for('shift_activities', shift_id=shift.shift_id) }}"
@@ -175,6 +180,27 @@
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
         <a class="quick-button" href="/incident/new">+ Incident</a>
     </div>
+</div>
+{% endif %}
+
+{% if sleep_authorized %}
+<div class="card">
+    <h3>Sleep</h3>
+    <p><a href="{{ url_for('sleep_events', shift_id=shift.shift_id) }}">Record Fell Asleep or Woke Up</a></p>
+    {% if recent_sleep_events %}
+        <table>
+            <tr><th>Event</th><th>Date and time</th><th>Recorded by</th></tr>
+            {% for event in recent_sleep_events %}
+                <tr>
+                    <td>{{ "Fell asleep" if event.event_type == "fell_asleep" else "Woke up" }}</td>
+                    <td>{{ event.event_datetime }}</td>
+                    <td>{{ event.full_name }}</td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No Sleep events recorded for this shift.</p>
+    {% endif %}
 </div>
 {% endif %}
 
