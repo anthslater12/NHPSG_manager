@@ -37,6 +37,24 @@ CREATE TABLE IF NOT EXISTS shift_notes (
 """)
 
 cur.execute("""
+CREATE TABLE IF NOT EXISTS activity_log (
+    activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_datetime TEXT,
+    activity_class TEXT,
+    activity_type TEXT,
+    user_id INTEGER,
+    client_id INTEGER,
+    shift_id INTEGER,
+    related_table TEXT,
+    related_id INTEGER,
+    summary TEXT,
+    details TEXT,
+    success INTEGER NOT NULL DEFAULT 1,
+    storyline_visible INTEGER NOT NULL DEFAULT 0
+)
+""")
+
+cur.execute("""
 INSERT OR IGNORE INTO users (username, password_hash, full_name, role)
 VALUES (?, ?, ?, ?)
 """, (

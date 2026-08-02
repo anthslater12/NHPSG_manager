@@ -1025,7 +1025,8 @@ def behaviour_record():
             log_activity(conn, "BEHAVIOUR", "behaviour_occurrence_created",
                 "Behaviour occurrence recorded", user_id=user["user_id"], client_id=client_id,
                 related_table="behaviour_occurrences", related_id=occurrence_id,
-                details=f"Occurrence UTC: {occurrence_utc}; Categories: {category_text}", success=1)
+                details=f"Occurrence UTC: {occurrence_utc}; Categories: {category_text}", success=1,
+                storyline_visible=True)
             conn.commit()
         except sqlite3.IntegrityError as error:
             conn.rollback()
@@ -1106,7 +1107,7 @@ def behaviour_occurrence_void(occurrence_id):
                 details=(
                     f"Occurrence UTC: {occurrence['occurred_at_utc']}; "
                     f"Categories: {categories}; Void reason: {void_reason}"
-                ), success=1
+                ), success=1, storyline_visible=True
             )
             conn.commit()
         except Exception:
@@ -1140,28 +1141,13 @@ def log_activity(
     related_table=None,
     related_id=None,
     details=None,
-    success=1
+    success=1,
+    storyline_visible=False
 ):
     
     local_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn.execute("""
-        INSERT INTO activity_log
-        (
-            activity_datetime,
-            activity_class,
-            activity_type,
-            user_id,
-            client_id,
-            shift_id,
-            related_table,
-            related_id,
-            summary,
-            details,
-            success
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
+    values = (
         local_now,
         activity_class,
         activity_type,
@@ -1172,8 +1158,28 @@ def log_activity(
         related_id,
         summary,
         details,
-        success
-    ))
+        success,
+    )
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(activity_log)").fetchall()
+    }
+    if "storyline_visible" in columns:
+        conn.execute("""
+            INSERT INTO activity_log
+            (activity_datetime, activity_class, activity_type, user_id,
+             client_id, shift_id, related_table, related_id, summary,
+             details, success, storyline_visible)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values + (1 if storyline_visible else 0,))
+    else:
+        conn.execute("""
+            INSERT INTO activity_log
+            (activity_datetime, activity_class, activity_type, user_id,
+             client_id, shift_id, related_table, related_id, summary,
+             details, success)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values)
 
 #####################################################################
 # STAFF NOTICES FOUNDATION HELPERS
@@ -13853,7 +13859,8 @@ def toileting_event_new(shift_id):
             related_table="toileting_events",
             related_id=toileting_event_id,
             details=general_comments,
-            success=1
+            success=1,
+            storyline_visible=True
         )
 
         conn.commit()
@@ -14073,6 +14080,7 @@ def food_fluid_entry_new(shift_id):
                 shift_id=shift_context["shift_id"],
                 related_table="food_fluid_entries",
                 related_id=entry_id,
+                storyline_visible=True,
                 details=(
                     f"Event UTC: {event_at_utc}; "
                     f"Interaction: {interaction_type}; "
@@ -14321,7 +14329,8 @@ def start_checklist(shift_id):
             shift_id=shift_id,
             related_table="shift_staff",
             related_id=shift_staff["shift_staff_id"],
-            success=1
+            success=1,
+            storyline_visible=True
         )
 
         conn.commit()
@@ -14440,7 +14449,8 @@ def end_shift(shift_id):
                     shift_id=shift_id,
                     related_table="shift_staff",
                     related_id=assignment["shift_staff_id"],
-                    success=1
+                    success=1,
+                    storyline_visible=True
                 )
             conn.commit()
             conn.close()
@@ -15435,7 +15445,8 @@ def shift_add_note(shift_id):
             related_table="shift_notes",
             related_id=shift_note_id,
             details=note_text,
-            success=1
+            success=1,
+            storyline_visible=True
         )
 
         conn.commit()
@@ -15526,6 +15537,7 @@ def shift_activities(shift_id):
                     shift_id=context["shift_id"],
                     related_table="shift_activities",
                     related_id=activity_id,
+                    storyline_visible=True,
                     details=(
                         f"Start: {parsed['start_time']}; "
                         f"End: {parsed['end_time']}; "
@@ -15603,13 +15615,18 @@ def incident_new():
         conn = get_db()
 
         active_shift = conn.execute("""
-            SELECT shift_id
+            SELECT shift_id, client_id
             FROM shift_staff
+            JOIN shifts USING (shift_id)
             WHERE user_id = ?
                 AND active = 1
         """, (session["user_id"],)).fetchone()
 
         shift_id = active_shift["shift_id"] if active_shift else None
+        client_id = active_shift["client_id"] if active_shift else None
+        if client_id is None:
+            conn.close()
+            return "An active client shift is required to record an incident.", 400
 
 
         cur = conn.execute("""
@@ -15632,7 +15649,7 @@ def incident_new():
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            1,
+            client_id,
             session["user_id"],
             incident_date,
             incident_time,
@@ -15656,12 +15673,13 @@ def incident_new():
             activity_type="incident_created",
             summary=f"Incident created: {incident_type}",
             user_id=session["user_id"],
-            client_id=1,
+            client_id=client_id,
             shift_id=shift_id,
             related_table="incident_reports",
             related_id=incident_id,
             details=description,
-            success=1
+            success=1,
+            storyline_visible=True
         )
 
         conn.commit()
@@ -16202,6 +16220,7 @@ def void_food_fluid_entry(entry_id):
                 shift_id=entry["shift_id"],
                 related_table="food_fluid_entries",
                 related_id=entry_id,
+                storyline_visible=True,
                 details=(
                     f"Event UTC: {entry['event_at_utc']}; "
                     f"Interaction: {entry['interaction_type']}; "
@@ -19229,6 +19248,7 @@ def shift_care_task_record(shift_id, care_task_id):
             shift_id=shift_id,
             related_table="shift_care_task_entries",
             related_id=entry_id,
+            storyline_visible=True,
             details=comment,
             success=1
         )
@@ -19358,6 +19378,7 @@ def shift_care_task_entry_edit(shift_id, entry_id):
             shift_id=shift_id,
             related_table="shift_care_task_entries",
             related_id=entry_id,
+            storyline_visible=True,
             details=comment,
             success=1
         )
@@ -20285,6 +20306,7 @@ def shift_housekeeping_task_record(
             shift_id=shift_id,
             related_table="shift_housekeeping_task_entries",
             related_id=entry_id,
+            storyline_visible=True,
             details=comment,
             success=1
         )
@@ -20439,6 +20461,7 @@ def shift_housekeeping_task_entry_edit(
             shift_id=shift_id,
             related_table="shift_housekeeping_task_entries",
             related_id=entry_id,
+            storyline_visible=True,
             details=comment,
             success=1
         )
