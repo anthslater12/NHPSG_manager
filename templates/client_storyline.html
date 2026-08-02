@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>{{ client.client_name }} — Storyline</h2>
+    <p>Read-only client activity history.</p>
+    <p>
+        {% for filter_name in filters %}
+            {% if filter_name == selected_filter %}
+                <strong>{{ filter_name }}</strong>
+            {% else %}
+                <a href="{{ url_for('client_storyline', client_id=client.client_id, filter=filter_name, page=1) }}">{{ filter_name }}</a>
+            {% endif %}
+            {% if not loop.last %} | {% endif %}
+        {% endfor %}
+    </p>
+</div>
+
+{% if grouped_events %}
+    {% for group in grouped_events %}
+        <div class="card">
+            <h3>{{ group.heading }}</h3>
+            {% for event in group.events %}
+                <div class="storyline-event">
+                    <div><span class="status-active">{{ event.label }}</span></div>
+                    <strong>{{ event.summary }}</strong>
+                    <div>{{ event.event_time }}{% if event.full_name %} · {{ event.full_name }}{% endif %}</div>
+                    {% if event.details %}<p>{{ event.details }}</p>{% endif %}
+                </div>
+            {% endfor %}
+        </div>
+    {% endfor %}
+{% elif total == 0 and selected_filter == "All" %}
+    <div class="card"><p>No Storyline events have been recorded for this client.</p></div>
+{% else %}
+    <div class="card"><p>No {{ selected_filter }} events match this filter.</p></div>
+{% endif %}
+
+{% if page_count > 1 %}
+<div class="card">
+    {% if page > 1 %}<a href="{{ url_for('client_storyline', client_id=client.client_id, filter=selected_filter, page=page-1) }}">Newer Events</a>{% endif %}
+    {% if page > 1 and page < page_count %} | {% endif %}
+    {% if page < page_count %}<a href="{{ url_for('client_storyline', client_id=client.client_id, filter=selected_filter, page=page+1) }}">Older Events</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

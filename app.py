@@ -555,6 +555,78 @@ def get_sleep_events(conn, shift_id):
     """, (shift_id,)).fetchall()
 
 
+STORYLINE_FILTERS = {
+    "All": None,
+    "Sleep": {"sleep_fell_asleep", "sleep_woke_up"},
+    "Food & Fluid": {"food_fluid_entry_created", "food_fluid_entry_voided"},
+    "Behaviour": {"behaviour_occurrence_created", "behaviour_occurrence_voided"},
+    "Toileting": {"toileting_event_created"},
+    "Activity": {"shift_activity_created"},
+    "Incident": {"incident_created"},
+    "Shift Notes": {"shift_note_updated"},
+    "Care": {"care_task_updated"},
+    "Housekeeping": {"housekeeping_task_updated"},
+    "Shift": {"start_shift_completed", "end_shift_completed"},
+}
+
+STORYLINE_LABELS = {
+    "sleep_fell_asleep": "Sleep",
+    "sleep_woke_up": "Sleep",
+    "food_fluid_entry_created": "Food & Fluid",
+    "food_fluid_entry_voided": "Food & Fluid",
+    "behaviour_occurrence_created": "Behaviour",
+    "behaviour_occurrence_voided": "Behaviour",
+    "toileting_event_created": "Toileting",
+    "shift_activity_created": "Activity",
+    "incident_created": "Incident",
+    "shift_note_updated": "Shift Note",
+    "start_shift_completed": "Shift",
+    "end_shift_completed": "Shift",
+    "care_task_updated": "Care",
+    "housekeeping_task_updated": "Housekeeping",
+}
+
+
+def _storyline_label(activity_type):
+    if activity_type in STORYLINE_LABELS:
+        return STORYLINE_LABELS[activity_type]
+    if activity_type.startswith("care_task_"):
+        return "Care"
+    if activity_type.startswith("housekeeping_task_"):
+        return "Housekeeping"
+    return "Client activity"
+
+
+def _storyline_heading(activity_datetime):
+    try:
+        event_date = datetime.strptime(
+            activity_datetime, "%Y-%m-%d %H:%M:%S"
+        ).date()
+    except (TypeError, ValueError):
+        return "Date unavailable"
+    today = date.today()
+    if event_date == today:
+        return "Today"
+    if event_date == today - timedelta(days=1):
+        return "Yesterday"
+    return f"{event_date.strftime('%A, %B')} {event_date.day}, {event_date.year}"
+
+
+def _storyline_access_allowed(conn, client_id, user_id):
+    user = get_active_authenticated_user(conn, user_id)
+    if user["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
+        return True
+    if user["role"] != "Support Worker":
+        return False
+    return conn.execute("""
+        SELECT 1
+        FROM shifts s
+        JOIN shift_staff ss ON ss.shift_id = s.shift_id
+        WHERE s.client_id = ? AND ss.user_id = ? AND ss.active = 1
+        LIMIT 1
+    """, (client_id, user_id)).fetchone() is not None
+
+
 def get_food_fluid_shift_window(shift):
     """Return the half-open Vancouver interval for an authoritative shift."""
     try:
@@ -14014,6 +14086,92 @@ def sleep_events(shift_id):
         events=events,
         error=error,
         values=values
+    )
+
+
+@app.route("/client/<int:client_id>/storyline")
+def client_storyline(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    client = conn.execute(
+        "SELECT client_id, client_name, active FROM clients WHERE client_id = ?",
+        (client_id,)
+    ).fetchone()
+    if client is None:
+        conn.close()
+        return "Client not found", 404
+    if not _storyline_access_allowed(conn, client_id, session["user_id"]):
+        conn.close()
+        return "Access denied", 403
+
+    selected_filter = request.args.get("filter", "All")
+    if selected_filter not in STORYLINE_FILTERS:
+        selected_filter = "All"
+    page = max(request.args.get("page", 1, type=int), 1)
+    page_size = 25
+    filter_types = STORYLINE_FILTERS[selected_filter]
+    where = [
+        "al.client_id = ?",
+        "al.storyline_visible = 1",
+        "al.success = 1",
+        "al.client_id IS NOT NULL",
+    ]
+    parameters = [client_id]
+    if filter_types is not None:
+        placeholders = ", ".join("?" for _ in filter_types)
+        ordered_types = sorted(filter_types)
+        where.append(f"al.activity_type IN ({placeholders})")
+        parameters.extend(ordered_types)
+        if selected_filter == "Care":
+            where[-1] = f"(al.activity_type IN ({placeholders}) OR al.activity_type LIKE ?)"
+            parameters.append("care_task_%")
+        elif selected_filter == "Housekeeping":
+            where[-1] = f"(al.activity_type IN ({placeholders}) OR al.activity_type LIKE ?)"
+            parameters.append("housekeeping_task_%")
+
+    where_sql = " AND ".join(where)
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM activity_log al WHERE {where_sql}",
+        parameters
+    ).fetchone()[0]
+    page_count = max((total + page_size - 1) // page_size, 1)
+    page = min(page, page_count)
+    events = conn.execute(f"""
+        SELECT al.activity_datetime, al.activity_type, al.summary,
+               al.details, u.full_name
+        FROM activity_log al
+        LEFT JOIN users u ON u.user_id = al.user_id
+        WHERE {where_sql}
+        ORDER BY al.activity_datetime DESC, al.activity_id DESC
+        LIMIT ? OFFSET ?
+    """, parameters + [page_size, (page - 1) * page_size]).fetchall()
+    conn.close()
+
+    grouped_events = []
+    for event in events:
+        event = dict(event)
+        event["label"] = _storyline_label(event["activity_type"])
+        event["heading"] = _storyline_heading(event["activity_datetime"])
+        event["event_date"], event["event_time"] = (
+            event["activity_datetime"].split(" ", 1)
+            if event["activity_datetime"] and " " in event["activity_datetime"]
+            else (event["activity_datetime"] or "", "")
+        )
+        if not grouped_events or grouped_events[-1]["heading"] != event["heading"]:
+            grouped_events.append({"heading": event["heading"], "events": []})
+        grouped_events[-1]["events"].append(event)
+
+    return render_template(
+        "client_storyline.html",
+        client=client,
+        grouped_events=grouped_events,
+        filters=STORYLINE_FILTERS,
+        selected_filter=selected_filter,
+        page=page,
+        page_count=page_count,
+        total=total,
     )
 
 
