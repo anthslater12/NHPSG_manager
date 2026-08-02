@@ -84,6 +84,17 @@ class FoodFluidCheckpointThreeTests(unittest.TestCase):
                 success INTEGER DEFAULT 1
             );
 
+            CREATE TABLE sleep_events (
+                sleep_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL,
+                shift_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL
+                    CHECK (event_type IN ('fell_asleep', 'woke_up')),
+                event_datetime TEXT NOT NULL,
+                recorded_by_user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE acknowledgements (
                 acknowledgement_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_table TEXT NOT NULL,
