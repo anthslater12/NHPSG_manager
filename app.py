@@ -612,6 +612,13 @@ def _storyline_heading(activity_datetime):
     return f"{event_date.strftime('%A, %B')} {event_date.day}, {event_date.year}"
 
 
+def _storyline_time(activity_datetime):
+    try:
+        return datetime.strptime(activity_datetime, "%Y-%m-%d %H:%M:%S").strftime("%H:%M")
+    except (TypeError, ValueError):
+        return "Time unavailable"
+
+
 def _storyline_access_allowed(conn, client_id, user_id):
     user = get_active_authenticated_user(conn, user_id)
     if user["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
@@ -1406,6 +1413,28 @@ def get_shift_activity_entries(conn, shift_id):
         WHERE sa.shift_id = ?
         ORDER BY sa.created_at ASC, sa.shift_activity_id ASC
     """, (shift_id,)).fetchall()
+
+
+def format_food_fluid_storyline_summary(interaction_type, item_description):
+    interaction = (interaction_type or "Food & Fluid").strip()
+    item = (item_description or "").strip()
+    return f"{interaction} — {item}" if item else interaction
+
+
+def format_food_fluid_storyline_details(outcome, additional_details=None, physically_thrown=0):
+    lines = [f"Outcome: {outcome or 'Not recorded'}"]
+    if additional_details and additional_details.strip():
+        lines.append(f"Additional details: {additional_details.strip()}")
+    if physically_thrown:
+        lines.append("Physically thrown")
+    return "\n".join(lines)
+
+
+def format_food_fluid_void_storyline_details(outcome, void_reason):
+    return "\n".join((
+        f"Original outcome: {outcome or 'Not recorded'}",
+        f"Void reason: {void_reason or 'Not recorded'}",
+    ))
 
 
 def parse_shift_activity_form(form):
@@ -14140,9 +14169,8 @@ def client_storyline(client_id):
     page = min(page, page_count)
     events = conn.execute(f"""
         SELECT al.activity_datetime, al.activity_type, al.summary,
-               al.details, u.full_name
+               al.details
         FROM activity_log al
-        LEFT JOIN users u ON u.user_id = al.user_id
         WHERE {where_sql}
         ORDER BY al.activity_datetime DESC, al.activity_id DESC
         LIMIT ? OFFSET ?
@@ -14153,12 +14181,23 @@ def client_storyline(client_id):
     for event in events:
         event = dict(event)
         event["label"] = _storyline_label(event["activity_type"])
+        event["storyline_details"] = None
+        if event["activity_type"] in {
+            "food_fluid_entry_created", "food_fluid_entry_voided"
+        } and event["details"]:
+            if event["details"].startswith(("Outcome:", "Original outcome:")):
+                event["storyline_details"] = event["details"]
+        event["storyline_detail_lines"] = (
+            event["storyline_details"].splitlines()
+            if event["storyline_details"] else []
+        )
         event["heading"] = _storyline_heading(event["activity_datetime"])
-        event["event_date"], event["event_time"] = (
+        event["event_date"], _ = (
             event["activity_datetime"].split(" ", 1)
             if event["activity_datetime"] and " " in event["activity_datetime"]
             else (event["activity_datetime"] or "", "")
         )
+        event["event_time"] = _storyline_time(event["activity_datetime"])
         if not grouped_events or grouped_events[-1]["heading"] != event["heading"]:
             grouped_events.append({"heading": event["heading"], "events": []})
         grouped_events[-1]["events"].append(event)
@@ -14364,17 +14403,17 @@ def food_fluid_entry_new(shift_id):
                 conn,
                 activity_class="FOOD_FLUID",
                 activity_type="food_fluid_entry_created",
-                summary="Food & Fluid entry recorded",
+                summary=format_food_fluid_storyline_summary(
+                    interaction_type, item_description
+                ),
                 user_id=shift_context["recorded_by_user_id"],
                 client_id=shift_context["client_id"],
                 shift_id=shift_context["shift_id"],
                 related_table="food_fluid_entries",
                 related_id=entry_id,
                 storyline_visible=True,
-                details=(
-                    f"Event UTC: {event_at_utc}; "
-                    f"Interaction: {interaction_type}; "
-                    f"Outcome: {outcome}"
+                details=format_food_fluid_storyline_details(
+                    outcome, additional_details, physically_thrown
                 ),
                 success=1
             )
@@ -16504,19 +16543,20 @@ def void_food_fluid_entry(entry_id):
                 conn,
                 activity_class="FOOD_FLUID",
                 activity_type="food_fluid_entry_voided",
-                summary="Food & Fluid entry voided",
+                summary=(
+                    "Voided "
+                    + format_food_fluid_storyline_summary(
+                        entry["interaction_type"], entry["item_description"]
+                    )
+                ),
                 user_id=actor["user_id"],
                 client_id=entry["client_id"],
                 shift_id=entry["shift_id"],
                 related_table="food_fluid_entries",
                 related_id=entry_id,
                 storyline_visible=True,
-                details=(
-                    f"Event UTC: {entry['event_at_utc']}; "
-                    f"Interaction: {entry['interaction_type']}; "
-                    f"Item: {entry['item_description']}; "
-                    f"Outcome: {entry['outcome']}; "
-                    f"Void reason: {void_reason}"
+                details=format_food_fluid_void_storyline_details(
+                    entry["outcome"], void_reason
                 ),
                 success=1
             )

@@ -44,13 +44,13 @@ class ClientStorylineTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             session.update(user_id=user_id, role=role, full_name="Test User")
 
-    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when="2026-08-02 10:00:00", user_id=1):
+    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when="2026-08-02 10:00:00", user_id=1, details=None):
         conn = sqlite3.connect(self.path)
         conn.execute("""
             INSERT INTO activity_log
-            (activity_datetime, activity_type, user_id, client_id, summary, success, storyline_visible)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (when, event_type, user_id, client_id, summary, success, visible))
+            (activity_datetime, activity_type, user_id, client_id, summary, details, success, storyline_visible)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (when, event_type, user_id, client_id, summary, details, success, visible))
         conn.commit()
         conn.close()
 
@@ -162,6 +162,67 @@ class ClientStorylineTests(unittest.TestCase):
         self.add_event("sleep_fell_asleep", "Sleep event")
         filtered_empty = self.client.get("/client/1/storyline?filter=Incident").data
         self.assertIn(b"No Incident events match this filter", filtered_empty)
+
+    def test_food_fluid_details_are_shown_but_other_details_are_hidden_and_escaped(self):
+        self.login()
+        self.add_event(
+            "food_fluid_entry_created", "Offered <Toast>",
+            details="Outcome: All consumed\nAdditional details: <b>Observed</b>"
+        )
+        self.add_event(
+            "incident_created", "Incident summary",
+            details="Internal incident detail"
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Outcome: All consumed", page)
+        self.assertIn(b"&lt;b&gt;Observed&lt;/b&gt;", page)
+        self.assertNotIn(b"Internal incident detail", page)
+
+    def test_storyline_time_omits_seconds_and_username_but_keeps_user_linkage(self):
+        self.login()
+        self.add_event(
+            "food_fluid_entry_created", "Offered - Juice",
+            when="2026-08-02 15:44:30", user_id=1
+        )
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE users SET full_name = 'ActorUsername' WHERE user_id = 1")
+        conn.commit()
+        conn.close()
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"15:44", page)
+        self.assertNotIn(b"15:44:30", page)
+        self.assertNotIn(b"ActorUsername", page)
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(
+            conn.execute("SELECT user_id FROM activity_log").fetchone()[0], 1
+        )
+        conn.close()
+
+    def test_food_fluid_details_render_on_separate_lines_and_blank_details_are_omitted(self):
+        self.login()
+        self.add_event(
+            "food_fluid_entry_created", "Offered - Juice",
+            details="Outcome: Partially consumed\nAdditional details: Consumed about 80%"
+        )
+        self.add_event(
+            "food_fluid_entry_created", "Drink - Water",
+            details="Outcome: Fully consumed"
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Outcome: Partially consumed</div>", page)
+        self.assertIn(b"Additional details: Consumed about 80%</div>", page)
+        self.assertIn(b"Outcome: Fully consumed</div>", page)
+        self.assertNotIn(b"Additional details:</div>", page)
+
+    def test_old_generic_food_fluid_details_render_without_raw_technical_data(self):
+        self.login()
+        self.add_event(
+            "food_fluid_entry_created", "Food & Fluid entry recorded",
+            details="Event UTC: 2024-01-01T10:00:00Z; Outcome: All consumed"
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Food &amp; Fluid entry recorded", page)
+        self.assertNotIn(b"Event UTC", page)
 
     def test_manager_can_view_and_storyline_view_does_not_write(self):
         self.login(2, "Program Manager")

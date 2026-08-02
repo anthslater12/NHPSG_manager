@@ -211,7 +211,7 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
             activity["related_id"],
             entry["food_fluid_entry_id"]
         )
-        self.assertEqual(activity["summary"], "Food & Fluid entry recorded")
+        self.assertEqual(activity["summary"], "Offered — Toast and water")
         self.assertNotIn("Toast and water", activity["details"])
 
     def test_valid_overnight_before_midnight(self):

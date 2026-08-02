@@ -221,7 +221,10 @@ class FoodFluidCheckpoint5Tests(unittest.TestCase):
         """).fetchone()
         conn.close()
         self.assertEqual(activity["activity_class"], "FOOD_FLUID")
-        self.assertEqual(activity["summary"], "Food & Fluid entry voided")
+        self.assertEqual(
+            activity["summary"],
+            "Voided Offered — <script>alert(1)</script>"
+        )
         self.assertEqual(activity["user_id"], 2)
         self.assertEqual(activity["client_id"], 1)
         self.assertEqual(activity["shift_id"], 10)

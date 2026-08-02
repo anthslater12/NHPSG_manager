@@ -25,7 +25,11 @@
                     <div><span class="status-active">{{ event.label }}</span></div>
                     <strong>{{ event.summary }}</strong>
                     <div>{{ event.event_time }}{% if event.full_name %} · {{ event.full_name }}{% endif %}</div>
-                    {% if event.details %}<p>{{ event.details }}</p>{% endif %}
+                    {% if event.storyline_detail_lines %}
+                        <div class="storyline-details" style="white-space: pre-wrap; overflow-wrap: anywhere;">
+                            {% for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}
+                        </div>
+                    {% endif %}
                 </div>
             {% endfor %}
         </div>
