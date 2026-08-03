@@ -1,7 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import app
@@ -26,6 +26,12 @@ class ClientStorylineTests(unittest.TestCase):
                 activity_class TEXT, activity_type TEXT, user_id INTEGER, client_id INTEGER,
                 shift_id INTEGER, related_table TEXT, related_id INTEGER, summary TEXT,
                 details TEXT, success INTEGER DEFAULT 1, storyline_visible INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE toileting_events (
+                toileting_event_id INTEGER PRIMARY KEY, client_id INTEGER,
+                location TEXT, bm_size TEXT, bm_consistency TEXT,
+                behaviour_before TEXT, behaviour_during TEXT,
+                behaviour_after TEXT, behaviour_comments TEXT
             );
             INSERT INTO users VALUES (1, 'Worker', 'Support Worker', 1), (2, 'Manager', 'Program Manager', 1), (3, 'Other', 'Support Worker', 1);
             INSERT INTO clients VALUES (1, 'Client One', 1), (2, 'Client Two', 1);
@@ -82,9 +88,10 @@ class ClientStorylineTests(unittest.TestCase):
 
     def test_labels_filters_unknown_events_and_date_heading(self):
         self.login()
-        self.add_event("sleep_woke_up", "Client woke up")
-        self.add_event("care_task_completed", "Bath - Completed")
-        self.add_event("unknown_visible", "Unknown summary")
+        today = datetime.now().date()
+        self.add_event("sleep_woke_up", "Client woke up", when=f"{today} 10:00:00")
+        self.add_event("care_task_completed", "Bath - Completed", when=f"{today} 10:01:00")
+        self.add_event("unknown_visible", "Unknown summary", when=f"{today - timedelta(days=2)} 10:02:00")
         page = self.client.get("/client/1/storyline").data
         self.assertIn(b"Sleep", page)
         self.assertIn(b"Care", page)
@@ -291,6 +298,35 @@ class ClientStorylineTests(unittest.TestCase):
             b"class=\"storyline-divider\" style=\"border: 0; border-top: 1px solid #d9d9d9; margin: 0.35rem 0 0.35rem;",
             page
         )
+
+    def test_toileting_details_show_nonblank_fields_and_escape_values(self):
+        self.login()
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO toileting_events
+            (toileting_event_id, client_id, location, bm_size, bm_consistency,
+             behaviour_before, behaviour_during, behaviour_after, behaviour_comments)
+            VALUES (7, 1, 'Bathroom', 'Large', 'Soft',
+                    '<Observed>', '', 'Calm', '')
+        """)
+        conn.execute("""
+            INSERT INTO activity_log
+            (activity_datetime, activity_type, user_id, client_id, related_id,
+             summary, details, success, storyline_visible)
+            VALUES ('2026-08-03 10:00:00', 'toileting_event_created', 1, 1, 7,
+                    'Toileting event recorded: BM',
+                    'Location: Bathroom\nSize: Large\nConsistency: Soft\nBehaviour: Before: <Observed>; After: Calm',
+                    1, 1)
+        """)
+        conn.commit()
+        conn.close()
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Location: Bathroom", page)
+        self.assertIn(b"Size: Large", page)
+        self.assertIn(b"Consistency: Soft", page)
+        self.assertIn(b"Behaviour: Before: &lt;Observed&gt;; After: Calm", page)
+        self.assertNotIn(b"During:", page)
+        self.assertNotIn(b"Comments:", page)
 
     def test_manager_can_view_and_storyline_view_does_not_write(self):
         self.login(2, "Program Manager")

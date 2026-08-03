@@ -619,6 +619,32 @@ def _storyline_time(activity_datetime):
         return "Time unavailable"
 
 
+def format_toileting_storyline_details(
+    location, bm_size, bm_consistency,
+    behaviour_before, behaviour_during, behaviour_after, behaviour_comments
+):
+    lines = []
+    for label, value in (
+        ("Location", location),
+        ("Size", bm_size),
+        ("Consistency", bm_consistency),
+    ):
+        if value and str(value).strip():
+            lines.append(f"{label}: {str(value).strip()}")
+    behaviour = "; ".join(
+        f"{label}: {value}"
+        for label, value in (
+            ("Before", behaviour_before),
+            ("During", behaviour_during),
+            ("After", behaviour_after),
+            ("Comments", behaviour_comments),
+        ) if value and str(value).strip()
+    )
+    if behaviour:
+        lines.append(f"Behaviour: {behaviour}")
+    return lines
+
+
 def _storyline_access_allowed(conn, client_id, user_id):
     user = get_active_authenticated_user(conn, user_id)
     if user["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
@@ -13994,6 +14020,12 @@ def toileting_event_new(shift_id):
 
         toileting_event_id = cur.lastrowid
 
+        toileting_details = format_toileting_storyline_details(
+            location, bm_size, bm_consistency,
+            behaviour_before, behaviour_during, behaviour_after,
+            behaviour_comments
+        )
+
         log_activity(
             conn,
             activity_class="TOILETING",
@@ -14004,7 +14036,7 @@ def toileting_event_new(shift_id):
             shift_id=shift_id,
             related_table="toileting_events",
             related_id=toileting_event_id,
-            details=general_comments,
+            details="\n".join(toileting_details) or None,
             success=1,
             storyline_visible=True
         )
@@ -14175,8 +14207,6 @@ def client_storyline(client_id):
         ORDER BY al.activity_datetime DESC, al.activity_id DESC
         LIMIT ? OFFSET ?
     """, parameters + [page_size, (page - 1) * page_size]).fetchall()
-    conn.close()
-
     grouped_events = []
     for event in events:
         event = dict(event)
@@ -14188,6 +14218,8 @@ def client_storyline(client_id):
             if event["details"].startswith(("Outcome:", "Original outcome:")):
                 event["storyline_details"] = event["details"]
         elif event["activity_type"] == "shift_activity_created" and event["details"]:
+            event["storyline_details"] = event["details"]
+        elif event["activity_type"] == "toileting_event_created" and event["details"]:
             event["storyline_details"] = event["details"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
@@ -14203,6 +14235,8 @@ def client_storyline(client_id):
         if not grouped_events or grouped_events[-1]["heading"] != event["heading"]:
             grouped_events.append({"heading": event["heading"], "events": []})
         grouped_events[-1]["events"].append(event)
+
+    conn.close()
 
     return render_template(
         "client_storyline.html",
