@@ -21,16 +21,17 @@
         <div class="card">
             <h3>{{ group.heading }}</h3>
             {% for event in group.events %}
-                <div class="storyline-event">
+                <div class="storyline-event" style="padding: 0.25rem 0 {% if event.activity_type == 'shift_activity_created' %}0{% else %}0.15rem{% endif %};">
                     <div><span class="status-active">{{ event.label }}</span></div>
                     <strong>{{ event.summary }}</strong>
                     <div>{{ event.event_time }}{% if event.full_name %} · {{ event.full_name }}{% endif %}</div>
                     {% if event.storyline_detail_lines %}
-                        <div class="storyline-details" style="white-space: pre-wrap; overflow-wrap: anywhere;">
-                            {% for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}
-                        </div>
+                        {% if event.activity_type == 'shift_activity_created' %}<div class="storyline-details storyline-activity-details" style="margin-top: 4px; margin-bottom: 0; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}</div>
+                        {% else %}<div class="storyline-details" style="margin-top: 0.25rem; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}
+                        </div>{% endif %}
                     {% endif %}
                 </div>
+                <hr class="storyline-divider{% if event.activity_type == 'shift_activity_created' %} storyline-activity-divider{% endif %}" style="border: 0; border-top: 1px solid #d9d9d9; margin: {% if event.activity_type == 'shift_activity_created' %}0.15rem{% else %}0.35rem{% endif %} 0 0.35rem;">
             {% endfor %}
         </div>
     {% endfor %}

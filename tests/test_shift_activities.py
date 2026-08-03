@@ -357,6 +357,8 @@ class ShiftActivitiesTests(unittest.TestCase):
             audits[0]["related_id"],
             activities[0]["shift_activity_id"]
         )
+        self.assertEqual(audits[0]["summary"], "Community walk")
+        self.assertEqual(audits[0]["details"], "A")
 
         with mock.patch.object(
             app,

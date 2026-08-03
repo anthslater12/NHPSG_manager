@@ -14187,6 +14187,8 @@ def client_storyline(client_id):
         } and event["details"]:
             if event["details"].startswith(("Outcome:", "Original outcome:")):
                 event["storyline_details"] = event["details"]
+        elif event["activity_type"] == "shift_activity_created" and event["details"]:
+            event["storyline_details"] = event["details"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []
@@ -15860,19 +15862,14 @@ def shift_activities(shift_id):
                     conn,
                     activity_class="ACTIVITY",
                     activity_type="shift_activity_created",
-                    summary="Shift activity recorded",
+                    summary=parsed["activity_description"],
                     user_id=context["recorded_by_user_id"],
                     client_id=context["client_id"],
                     shift_id=context["shift_id"],
                     related_table="shift_activities",
                     related_id=activity_id,
                     storyline_visible=True,
-                    details=(
-                        f"Start: {parsed['start_time']}; "
-                        f"End: {parsed['end_time']}; "
-                        f"Categories: {selected_categories}; "
-                        f"Description: {parsed['activity_description']}"
-                    ),
+                    details=selected_categories,
                     success=1
                 )
                 conn.commit()

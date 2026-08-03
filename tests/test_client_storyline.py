@@ -224,6 +224,74 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"Food &amp; Fluid entry recorded", page)
         self.assertNotIn(b"Event UTC", page)
 
+    def test_activity_summary_categories_and_escaped_long_description_render_safely(self):
+        self.login()
+        long_description = "Walk around neighbourhood " + ("x" * 300)
+        self.add_event(
+            "shift_activity_created", long_description,
+            details="A, T, LS"
+        )
+        self.add_event(
+            "shift_activity_created", "Trampoline",
+            details="A"
+        )
+        self.add_event(
+            "shift_activity_created", "<script>alert(1)</script>",
+            details="A, T"
+        )
+        self.add_event(
+            "shift_activity_created", "Blank details", details=""
+        )
+        self.add_event(
+            "incident_created", "Hidden raw details", details="Private detail"
+        )
+        self.add_event(
+            "shift_activity_created", "Failed Activity", details="LS", success=0
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(long_description.encode(), page)
+        self.assertIn(b"A, T, LS", page)
+        self.assertIn(b"Trampoline", page)
+        self.assertIn(b"A, T", page)
+        self.assertIn(b"&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        self.assertNotIn(b"<script>alert(1)</script>", page)
+        self.assertNotIn(b"Private detail", page)
+        self.assertNotIn(b"Failed Activity", page)
+        self.assertEqual(page.count(b"storyline-details"), 3)
+
+    def test_storyline_events_have_compact_wrappers_and_dividers(self):
+        self.login()
+        self.add_event("shift_activity_created", "Trampoline", details="A, T")
+        self.add_event("food_fluid_entry_created", "Offered - Juice", details="Outcome: Consumed")
+        self.add_event("sleep_fell_asleep", "Fell asleep")
+        page = self.client.get("/client/1/storyline").data
+        self.assertEqual(page.count(b'class="storyline-event"'), 3)
+        self.assertEqual(page.count(b"storyline-divider"), 3)
+        self.assertIn(b"Trampoline", page)
+        self.assertIn(b"A, T", page)
+        self.assertIn(b"Outcome: Consumed", page)
+        self.assertIn(b"Fell asleep", page)
+
+    def test_activity_details_use_compact_spacing_and_keep_divider(self):
+        self.login()
+        self.add_event("shift_activity_created", "Trampoline", details="A, T")
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"storyline-activity-details", page)
+        self.assertIn(b"margin-top: 4px; margin-bottom: 0", page)
+        self.assertIn(b"class=\"storyline-event\" style=\"padding: 0.25rem 0 0;\"", page)
+        self.assertIn(b"A, T", page)
+        self.assertIn(b"storyline-activity-divider\" style=\"border: 0; border-top: 1px solid #d9d9d9; margin: 0.15rem 0 0.35rem;", page)
+        self.assertNotIn(b"A, T</div>\n                        </div>", page)
+
+    def test_non_activity_divider_spacing_remains_unchanged(self):
+        self.login()
+        self.add_event("sleep_fell_asleep", "Fell asleep")
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(
+            b"class=\"storyline-divider\" style=\"border: 0; border-top: 1px solid #d9d9d9; margin: 0.35rem 0 0.35rem;",
+            page
+        )
+
     def test_manager_can_view_and_storyline_view_does_not_write(self):
         self.login(2, "Program Manager")
         before = sqlite3.connect(self.path).execute("SELECT count(*) FROM activity_log").fetchone()[0]
