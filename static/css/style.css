@@ -656,3 +656,31 @@ td,th{
 .row-inactive {
     background-color: #f8f9fa;
 }
+
+.storyline-behaviour-details {
+    margin-top: 0.25rem;
+}
+
+.storyline-behaviour-section-heading {
+    margin-top: 0.45rem;
+    font-weight: bold;
+}
+
+.storyline-behaviour-section-heading:first-child {
+    margin-top: 0;
+}
+
+.storyline-behaviour-section-item,
+.storyline-behaviour-outcome-item,
+.storyline-behaviour-outcome-label {
+    margin-left: 1.5rem;
+}
+
+.storyline-behaviour-outcome-label {
+    font-weight: 600;
+}
+
+.storyline-behaviour-nested-detail,
+.storyline-behaviour-nested-text {
+    margin-left: 3rem;
+}

@@ -210,6 +210,33 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertNotIn(b"Other Client Behaviour", page)
         self.assertNotIn(b"Void reason", page)
 
+    def test_abc_behaviour_details_use_nested_presentation_roles(self):
+        self.login()
+        details = (
+            "Before the Behaviour (A):\n"
+            "Asked to transition between activities\n"
+            "Other\nOther: Was pacing\n\n"
+            "Behaviour Observed (B):\nPhysical aggression\n\n"
+            "Staff Response (C):\nBlocked behaviour\n\n"
+            "Outcome:\nDuration until calm: 1 minute\n"
+            "How the client calmed down:\nClient stopped pacing\nAnd smiled\n"
+            "Additional notes:\n<test>"
+        )
+        self.add_event(
+            "behaviour_occurrence_created", "Behaviour occurrence recorded",
+            details=details
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"storyline-behaviour-section-heading", page)
+        self.assertIn(b"storyline-behaviour-section-item", page)
+        self.assertIn(b"storyline-behaviour-nested-detail", page)
+        self.assertIn(b"storyline-behaviour-outcome-item", page)
+        self.assertIn(b"storyline-behaviour-outcome-label", page)
+        self.assertIn(b"storyline-behaviour-nested-text", page)
+        self.assertIn(b"And smiled", page)
+        self.assertIn(b"&lt;test&gt;", page)
+        self.assertIn(b"storyline-divider", page)
+
     def test_incident_details_render_from_activity_log_only_and_escape_values(self):
         self.login()
         details = (

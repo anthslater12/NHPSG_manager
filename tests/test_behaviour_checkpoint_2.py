@@ -112,13 +112,21 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         """).fetchone()
         audit = conn.execute("""
             SELECT user_id, client_id, shift_id, related_table, related_id,
-                   activity_type, success
+                   activity_type, summary, details, success
             FROM activity_log
         """).fetchone()
         conn.close()
         self.assertEqual(row, ("ABC", 10, 1, 1, 1, 1, 0, "Took space", "ABC note"))
-        self.assertEqual(audit, (1, 1, 10, "behaviour_occurrences", 1,
-                                 "behaviour_occurrence_created", 1))
+        self.assertEqual(audit[:7], (1, 1, 10, "behaviour_occurrences", 1,
+                                     "behaviour_occurrence_created",
+                                     "Behaviour occurrence recorded"))
+        self.assertEqual(audit[8], 1)
+        self.assertIn("Before the Behaviour (A):\nAsked to transition between activities", audit[7])
+        self.assertIn("Behaviour Observed (B):\nPhysical aggression", audit[7])
+        self.assertIn("Staff Response (C):\nBlocked behaviour", audit[7])
+        self.assertIn("Duration until calm: 0 minutes", audit[7])
+        self.assertIn("How the client calmed down:\nTook space", audit[7])
+        self.assertIn("Additional notes:\nABC note", audit[7])
 
     def test_authentication_active_clients_and_week_validation(self):
         self.assertEqual(self.client.get("/behaviour/record").status_code, 302)

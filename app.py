@@ -767,6 +767,75 @@ def format_behaviour_storyline_details(category_text, notes=None):
     return details
 
 
+def format_abc_behaviour_storyline_details(values):
+    """Build the worker-safe Activity Log narrative for an ABC record."""
+    sections = []
+    for heading, fields, other_field, details_field in (
+        ("Before the Behaviour (A):", ABC_ANTECEDENT_FIELDS,
+         "antecedent_other", "antecedent_other_details"),
+        ("Behaviour Observed (B):", ABC_BEHAVIOUR_FIELDS,
+         "behaviour_other", "behaviour_other_details"),
+        ("Staff Response (C):", ABC_RESPONSE_FIELDS,
+         "response_other", "response_other_details"),
+    ):
+        lines = [heading]
+        lines.extend(ABC_FIELD_LABELS[field] for field in fields if values.get(field))
+        if values.get(other_field) and str(values.get(details_field) or "").strip():
+            lines.append("Other: " + str(values[details_field]).strip())
+        sections.append("\n".join(lines))
+    duration = values["duration_until_calm_minutes"]
+    unit = "minute" if duration == 1 else "minutes"
+    outcome = ["Outcome:", f"Duration until calm: {duration} {unit}"]
+    calming = str(values.get("calming_description") or "").strip()
+    notes = str(values.get("additional_notes") or "").strip()
+    if calming:
+        outcome.extend(("How the client calmed down:", calming))
+    if notes:
+        outcome.extend(("Additional notes:", notes))
+    sections.append("\n".join(outcome))
+    return "\n\n".join(sections)
+
+
+def parse_abc_behaviour_storyline_details(details):
+    """Return presentation roles for the known ABC Activity Log format."""
+    if not details or not details.startswith("Before the Behaviour (A):\n"):
+        return None
+    lines = details.splitlines()
+    headings = {
+        "Before the Behaviour (A):",
+        "Behaviour Observed (B):",
+        "Staff Response (C):",
+        "Outcome:",
+    }
+    subordinate_labels = {
+        "How the client calmed down:",
+        "Additional notes:",
+    }
+    if not all(heading in lines for heading in headings):
+        return None
+    parsed = []
+    nested_text = False
+    for line in lines:
+        if line in headings:
+            parsed.append({"text": line, "role": "section-heading"})
+            nested_text = False
+        elif line in subordinate_labels:
+            parsed.append({"text": line, "role": "outcome-label"})
+            nested_text = True
+        elif line.startswith("Other:"):
+            parsed.append({"text": line, "role": "nested-detail"})
+            nested_text = True
+        elif line.startswith("Duration until calm:"):
+            parsed.append({"text": line, "role": "outcome-item"})
+            nested_text = False
+        elif line:
+            parsed.append({
+                "text": line,
+                "role": "nested-text" if nested_text else "section-item",
+            })
+    return parsed
+
+
 def _storyline_access_allowed(conn, client_id, user_id):
     user = get_active_authenticated_user(conn, user_id)
     if user["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
@@ -1367,11 +1436,15 @@ def behaviour_record(shift_id=None):
                       notes, user["user_id"], recorded_utc, token))
             occurrence_id = cur.lastrowid
             category_text = ", ".join(BEHAVIOUR_CATEGORY_LABELS[field] for field in BEHAVIOUR_CATEGORY_FIELDS if flags[field])
+            activity_details = (
+                format_abc_behaviour_storyline_details(abc_values)
+                if is_abc else format_behaviour_storyline_details(category_text, notes)
+            )
             log_activity(conn, "BEHAVIOUR", "behaviour_occurrence_created",
                 "Behaviour occurrence recorded", user_id=user["user_id"], client_id=client_id,
                 shift_id=shift_id,
                 related_table="behaviour_occurrences", related_id=occurrence_id,
-                details=format_behaviour_storyline_details(category_text, notes), success=1,
+                details=activity_details, success=1,
                 storyline_visible=True)
             conn.commit()
         except sqlite3.IntegrityError as error:
@@ -14438,6 +14511,7 @@ def client_storyline(client_id):
         event = dict(event)
         event["label"] = _storyline_label(event["activity_type"])
         event["storyline_details"] = None
+        event["storyline_behaviour_lines"] = None
         if event["activity_type"] in {
             "food_fluid_entry_created", "food_fluid_entry_voided"
         } and event["details"]:
@@ -14453,6 +14527,9 @@ def client_storyline(client_id):
             event["storyline_details"] = event["details"]
         elif event["activity_type"] == "behaviour_occurrence_created" and event["details"]:
             event["storyline_details"] = event["details"]
+            event["storyline_behaviour_lines"] = parse_abc_behaviour_storyline_details(
+                event["details"]
+            )
         elif event["activity_type"] == "behaviour_occurrence_voided" and event["details"]:
             event["storyline_details"] = event["details"]
         event["storyline_detail_lines"] = (

@@ -26,7 +26,8 @@
                     <strong>{{ event.summary }}</strong>
                     <div>{{ event.event_time }}{% if event.full_name %} · {{ event.full_name }}{% endif %}</div>
                     {% if event.storyline_detail_lines %}
-                        {% if event.activity_type == 'shift_activity_created' %}<div class="storyline-details storyline-activity-details" style="margin-top: 4px; margin-bottom: 0; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}</div>
+                        {% if event.activity_type == 'behaviour_occurrence_created' and event.storyline_behaviour_lines %}<div class="storyline-details storyline-behaviour-details" style="margin-top: 0.25rem; white-space: pre-wrap; overflow-wrap: anywhere;">{% for detail_line in event.storyline_behaviour_lines %}<div class="storyline-behaviour-{{ detail_line.role }}">{{ detail_line.text }}</div>{% endfor %}</div>
+                        {% elif event.activity_type == 'shift_activity_created' %}<div class="storyline-details storyline-activity-details" style="margin-top: 4px; margin-bottom: 0; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}</div>
                         {% else %}<div class="storyline-details" style="margin-top: 0.25rem; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}
                         </div>{% endif %}
                     {% endif %}
