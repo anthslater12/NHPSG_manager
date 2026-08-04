@@ -4,10 +4,21 @@
 {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
 <form method="post">
 <input type="hidden" name="submission_token" value="{{ submission_token }}">
+<input type="hidden" name="record_format" value="ABC">
 {% if shift_context %}<p>Client: {{ clients|selectattr('client_id', 'equalto', selected_client_id)|map(attribute='client_name')|first }}</p>{% else %}<label>Client</label><select name="client_id" required><option value="">Select client</option>{% for client in clients %}<option value="{{ client.client_id }}" {% if client.client_id == selected_client_id %}selected{% endif %}>{{ client.client_name }}</option>{% endfor %}</select>{% endif %}
 <label>Occurrence date and time (Vancouver)</label><input type="datetime-local" name="occurrence_local" value="{{ values.get('occurrence_local', now_local) }}" required>
-<h3>Categories</h3><div class="checkbox-group">{% for field in category_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ category_labels[field] }}</span></label>{% endfor %}</div>
-<label>Notes</label><textarea name="notes" maxlength="2000">{{ values.get('notes', '') }}</textarea>
+
+<h3>Before the Behaviour (A)</h3><p>What happened before the behaviour?</p><div class="checkbox-group">{% for field in abc_antecedent_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ abc_field_labels[field] }}</span></label>{% endfor %}</div>
+<label>Other details</label><textarea name="antecedent_other_details">{{ values.get('antecedent_other_details', '') }}</textarea>
+
+<h3>Behaviour Observed (B)</h3><p>What behaviours were observed?</p><div class="checkbox-group">{% for field in abc_behaviour_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ abc_field_labels[field] }}</span></label>{% endfor %}</div>
+<label>Other details</label><textarea name="behaviour_other_details">{{ values.get('behaviour_other_details', '') }}</textarea>
+
+<h3>Staff Response (C)</h3><p>How did staff respond immediately?</p><div class="checkbox-group">{% for field in abc_response_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ abc_field_labels[field] }}</span></label>{% endfor %}</div>
+<label>Other details</label><textarea name="response_other_details">{{ values.get('response_other_details', '') }}</textarea>
+
+<h3>Outcome</h3><label>Duration until calm (minutes)</label><input type="number" name="duration_until_calm_minutes" min="0" step="1" value="{{ values.get('duration_until_calm_minutes', '') }}" required>
+<label>How did the client calm down?</label><textarea name="calming_description">{{ values.get('calming_description', '') }}</textarea>
+<label>Additional notes</label><textarea name="additional_notes">{{ values.get('additional_notes', '') }}</textarea>
 <button type="submit">Save once</button></form>
-{% if recent_occurrences %}<h3>Recent occurrences</h3><table><tr><th>Time</th><th>Categories</th><th>Notes</th><th>Recorder</th></tr>{% for item in recent_occurrences %}<tr><td>{{ item.local_time }}</td><td>{{ item.categories|join(', ') }}</td><td>{{ item.notes or '—' }}</td><td>{{ item.recorder_name }}</td></tr>{% endfor %}</table>{% endif %}
 </div>{% endblock %}

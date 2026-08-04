@@ -102,6 +102,8 @@ class BehaviourCheckpointOneTests(unittest.TestCase):
             "injury_to_self", "property_damage", "notes",
             "recorded_by_user_id", "recorded_at_utc", "submission_token",
             "status", "voided_by_user_id", "voided_at_utc", "void_reason",
+            "shift_id", "record_format", *behaviour_migration.ABC_BOOLEAN_COLUMNS,
+            *behaviour_migration.ABC_TEXT_COLUMNS, "duration_until_calm_minutes",
         })
         self.assertEqual(columns["status"]["dflt_value"], "'Recorded'")
         for category in app.BEHAVIOUR_CATEGORY_FIELDS:

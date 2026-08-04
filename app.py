@@ -173,6 +173,50 @@ BEHAVIOUR_CATEGORY_LABELS = {
 BEHAVIOUR_NOTES_MAX_LENGTH = 2000
 BEHAVIOUR_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
+ABC_ANTECEDENT_FIELDS = (
+    "antecedent_transition_activities", "antecedent_denied_access",
+    "antecedent_delayed_access", "antecedent_given_instruction",
+    "antecedent_end_activity", "antecedent_preferred_activity_alone",
+    "antecedent_transition_locations", "antecedent_other",
+)
+ABC_BEHAVIOUR_FIELDS = (
+    "behaviour_crying_yelling_screaming", "behaviour_resisting_prompt",
+    "behaviour_grabbing_object", "behaviour_throwing_objects",
+    "behaviour_physical_aggression", "behaviour_verbal_aggression",
+    "behaviour_other",
+)
+ABC_RESPONSE_FIELDS = (
+    "response_ignored_walked_away", "response_followed_instruction",
+    "response_adult_attention", "response_removed_preferred_activity",
+    "response_gave_preferred_activity", "response_blocked_behaviour",
+    "response_redirected_activity", "response_other",
+)
+ABC_FIELD_LABELS = {
+    "antecedent_transition_activities": "Asked to transition between activities",
+    "antecedent_denied_access": "Denied access to item/activity",
+    "antecedent_delayed_access": "Delayed access to item/activity",
+    "antecedent_given_instruction": "Given instruction to do something",
+    "antecedent_end_activity": "Given instruction to end activity",
+    "antecedent_preferred_activity_alone": "Engaged in preferred activity (alone)",
+    "antecedent_transition_locations": "Asked to transition between locations",
+    "antecedent_other": "Other",
+    "behaviour_crying_yelling_screaming": "Crying / yelling / screaming",
+    "behaviour_resisting_prompt": "Resisting prompt",
+    "behaviour_grabbing_object": "Grabbing object from another person",
+    "behaviour_throwing_objects": "Throwing objects",
+    "behaviour_physical_aggression": "Physical aggression",
+    "behaviour_verbal_aggression": "Verbal aggression",
+    "behaviour_other": "Other",
+    "response_ignored_walked_away": "Ignored behaviour / walked away",
+    "response_followed_instruction": "Followed through with demand or instruction",
+    "response_adult_attention": "Adult gave attention",
+    "response_removed_preferred_activity": "Removed preferred activity",
+    "response_gave_preferred_activity": "Gave preferred activity",
+    "response_blocked_behaviour": "Blocked behaviour",
+    "response_redirected_activity": "Redirected to new activity",
+    "response_other": "Other",
+}
+
 FOOD_FLUID_INTERACTION_TYPES = ("Offered", "Requested")
 FOOD_FLUID_OUTCOMES = (
     "All consumed",
@@ -369,6 +413,54 @@ def validate_behaviour_category_flags(category_flags):
         raise ValueError("At least one behaviour category is required.")
 
     return normalised
+
+
+def validate_abc_section(form, fields, other_field, details_field, section_name):
+    selected = {}
+    for field in fields:
+        values = form.getlist(field)
+        if len(values) > 1 or (values and values[0] != "1"):
+            raise ValueError("Behaviour form input is invalid.")
+        selected[field] = int(bool(values))
+    if not any(selected.values()):
+        raise ValueError(f"Select at least one option for {section_name}.")
+    details = form.get(details_field, "").strip()
+    if selected[other_field] and not details:
+        raise ValueError(f"Other details are required for {section_name}.")
+    if not selected[other_field] and details:
+        raise ValueError(f"Other details are only allowed when Other is selected for {section_name}.")
+    return selected, details or None
+
+
+def validate_abc_submission(form):
+    if form.get("record_format") != "ABC":
+        raise ValueError("Behaviour form input is invalid.")
+    antecedent, antecedent_other = validate_abc_section(
+        form, ABC_ANTECEDENT_FIELDS, "antecedent_other",
+        "antecedent_other_details", "Before the Behaviour (A)"
+    )
+    observed, observed_other = validate_abc_section(
+        form, ABC_BEHAVIOUR_FIELDS, "behaviour_other",
+        "behaviour_other_details", "Behaviour Observed (B)"
+    )
+    response, response_other = validate_abc_section(
+        form, ABC_RESPONSE_FIELDS, "response_other",
+        "response_other_details", "Staff Response (C)"
+    )
+    duration_value = form.get("duration_until_calm_minutes", "").strip()
+    if not duration_value:
+        raise ValueError("Duration until calm is required.")
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", duration_value):
+        raise ValueError("Duration until calm must be a whole number of zero or greater.")
+    return {
+        **antecedent, **observed, **response,
+        "antecedent_other_details": antecedent_other,
+        "behaviour_other_details": observed_other,
+        "response_other_details": response_other,
+        "duration_until_calm_minutes": int(duration_value),
+        "calming_description": form.get("calming_description", "").strip() or None,
+        "additional_notes": form.get("additional_notes", "").strip() or None,
+    }
 
 
 def get_active_authenticated_user(conn, user_id):
@@ -1091,6 +1183,10 @@ def _render_behaviour_record(
         selected_client_id=selected_client_id, recent_occurrences=_behaviour_recent_occurrences(conn, selected_client_id),
         submission_token=secrets.token_urlsafe(32), error=error,
         category_fields=BEHAVIOUR_CATEGORY_FIELDS, category_labels=BEHAVIOUR_CATEGORY_LABELS,
+        abc_antecedent_fields=ABC_ANTECEDENT_FIELDS,
+        abc_behaviour_fields=ABC_BEHAVIOUR_FIELDS,
+        abc_response_fields=ABC_RESPONSE_FIELDS,
+        abc_field_labels=ABC_FIELD_LABELS,
         now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"),
         values=values, shift_context=shift_context)
 
@@ -1173,10 +1269,24 @@ def behaviour_record(shift_id=None):
             "client_id", "occurrence_local", "repeated_hour_choice", "notes",
             "submission_token", *BEHAVIOUR_CATEGORY_FIELDS
         }
+        abc_fields = {
+            "record_format", "duration_until_calm_minutes", "calming_description",
+            "additional_notes", "antecedent_other_details", "behaviour_other_details",
+            "response_other_details", *ABC_ANTECEDENT_FIELDS,
+            *ABC_BEHAVIOUR_FIELDS, *ABC_RESPONSE_FIELDS
+        }
+        is_abc = "record_format" in request.form
+        if is_abc:
+            approved_fields = {
+                "client_id", "occurrence_local", "repeated_hour_choice",
+                "submission_token", *abc_fields
+            }
         submitted_fields = set(request.form.keys())
         if not submitted_fields.issubset(approved_fields):
             raise ValueError("Behaviour form input is invalid.")
-        required_fields = ["occurrence_local", "notes", "submission_token"]
+        required_fields = ["occurrence_local", "submission_token"]
+        if not is_abc:
+            required_fields.insert(1, "notes")
         if shift is None:
             required_fields.insert(0, "client_id")
         for field_name in required_fields:
@@ -1194,6 +1304,7 @@ def behaviour_record(shift_id=None):
         else:
             client_id = int(submitted_client or "")
         validate_active_behaviour_client(conn, client_id)
+        abc_values = validate_abc_submission(request.form) if is_abc else None
         flags = {}
         for field in BEHAVIOUR_CATEGORY_FIELDS:
             values_for_field = request.form.getlist(field)
@@ -1203,7 +1314,7 @@ def behaviour_record(shift_id=None):
                 flags[field] = 1
             else:
                 raise ValueError("Behaviour category input is invalid.")
-        flags = validate_behaviour_category_flags(flags)
+        flags = validate_behaviour_category_flags(flags) if not is_abc else {field: 0 for field in BEHAVIOUR_CATEGORY_FIELDS}
         local_input = request.form.get("occurrence_local", "")
         ambiguity_choice = ambiguity_values[0] if ambiguity_values else ""
         if is_vancouver_occurrence_input_ambiguous(local_input):
@@ -1223,14 +1334,37 @@ def behaviour_record(shift_id=None):
         recorded_utc = serialize_behaviour_utc(datetime.now(timezone.utc).replace(microsecond=0))
         conn.execute("BEGIN IMMEDIATE")
         try:
-            cur = conn.execute("""
-                INSERT INTO behaviour_occurrences
-                (client_id, occurred_at_utc, aggression_towards_others,
-                 injury_to_others, self_harm, injury_to_self, property_damage,
-                 notes, recorded_by_user_id, recorded_at_utc, submission_token)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (client_id, occurrence_utc, *(flags[field] for field in BEHAVIOUR_CATEGORY_FIELDS),
-                  notes, user["user_id"], recorded_utc, token))
+            if is_abc:
+                columns = ["client_id", "shift_id", "occurred_at_utc", "record_format"]
+                columns += list(BEHAVIOUR_CATEGORY_FIELDS) + list(ABC_ANTECEDENT_FIELDS)
+                columns += list(ABC_BEHAVIOUR_FIELDS) + list(ABC_RESPONSE_FIELDS)
+                columns += ["antecedent_other_details", "behaviour_other_details",
+                            "response_other_details", "duration_until_calm_minutes",
+                            "calming_description", "additional_notes",
+                            "recorded_by_user_id", "recorded_at_utc", "submission_token"]
+                values_to_store = [client_id, shift_id, occurrence_utc, "ABC"]
+                values_to_store += [flags[field] for field in BEHAVIOUR_CATEGORY_FIELDS]
+                values_to_store += [abc_values[field] for field in ABC_ANTECEDENT_FIELDS]
+                values_to_store += [abc_values[field] for field in ABC_BEHAVIOUR_FIELDS]
+                values_to_store += [abc_values[field] for field in ABC_RESPONSE_FIELDS]
+                values_to_store += [abc_values[field] for field in (
+                    "antecedent_other_details", "behaviour_other_details",
+                    "response_other_details", "duration_until_calm_minutes",
+                    "calming_description", "additional_notes")]
+                values_to_store += [user["user_id"], recorded_utc, token]
+                cur = conn.execute(
+                    f"INSERT INTO behaviour_occurrences ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    values_to_store
+                )
+            else:
+                cur = conn.execute("""
+                    INSERT INTO behaviour_occurrences
+                    (client_id, shift_id, occurred_at_utc, aggression_towards_others,
+                     injury_to_others, self_harm, injury_to_self, property_damage,
+                     notes, recorded_by_user_id, recorded_at_utc, submission_token)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (client_id, shift_id, occurrence_utc, *(flags[field] for field in BEHAVIOUR_CATEGORY_FIELDS),
+                      notes, user["user_id"], recorded_utc, token))
             occurrence_id = cur.lastrowid
             category_text = ", ".join(BEHAVIOUR_CATEGORY_LABELS[field] for field in BEHAVIOUR_CATEGORY_FIELDS if flags[field])
             log_activity(conn, "BEHAVIOUR", "behaviour_occurrence_created",

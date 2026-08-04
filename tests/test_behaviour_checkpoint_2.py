@@ -65,6 +65,61 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
                   conn.execute("SELECT COUNT(*) FROM activity_log").fetchone()[0])
         conn.close(); return result
 
+    def abc_payload(self, token="Q" * 43, **extra):
+        value = {
+            "occurrence_local": (datetime.now(app.VANCOUVER_TIMEZONE) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M"),
+            "submission_token": token, "record_format": "ABC",
+            "antecedent_transition_activities": "1",
+            "behaviour_physical_aggression": "1",
+            "response_blocked_behaviour": "1",
+            "duration_until_calm_minutes": "0",
+            "calming_description": "Took space",
+            "additional_notes": "ABC note",
+        }
+        value.update(extra)
+        return value
+
+    def test_abc_form_requires_complete_episode_and_preserves_values(self):
+        self.login()
+        page = self.client.get("/shift/10/behaviour")
+        self.assertIn(b"Before the Behaviour (A)", page.data)
+        self.assertIn(b"Behaviour Observed (B)", page.data)
+        self.assertIn(b"Staff Response (C)", page.data)
+        invalid = self.abc_payload(token="R" * 43)
+        invalid.pop("response_blocked_behaviour")
+        response = self.client.post("/shift/10/behaviour", data=invalid)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Staff Response (C)", response.data)
+        self.assertIn(b"antecedent_transition_activities", response.data)
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_abc_save_stores_sections_duration_and_linkage(self):
+        self.login()
+        response = self.client.post(
+            "/shift/10/behaviour",
+            data=self.abc_payload(token="U" * 43)
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/shift/10")
+        conn = sqlite3.connect(self.path)
+        row = conn.execute("""
+            SELECT record_format, shift_id, client_id,
+                   antecedent_transition_activities,
+                   behaviour_physical_aggression, response_blocked_behaviour,
+                   duration_until_calm_minutes, calming_description,
+                   additional_notes
+            FROM behaviour_occurrences
+        """).fetchone()
+        audit = conn.execute("""
+            SELECT user_id, client_id, shift_id, related_table, related_id,
+                   activity_type, success
+            FROM activity_log
+        """).fetchone()
+        conn.close()
+        self.assertEqual(row, ("ABC", 10, 1, 1, 1, 1, 0, "Took space", "ABC note"))
+        self.assertEqual(audit, (1, 1, 10, "behaviour_occurrences", 1,
+                                 "behaviour_occurrence_created", 1))
+
     def test_authentication_active_clients_and_week_validation(self):
         self.assertEqual(self.client.get("/behaviour/record").status_code, 302)
         self.login()
