@@ -14560,6 +14560,7 @@ def sleep_events(shift_id):
                 event_utc = candidates[0]
                 if event_utc > datetime.now(timezone.utc) + timedelta(minutes=5):
                     raise ValueError("Sleep event cannot be unreasonably in the future.")
+                event_datetime = event_utc.isoformat().replace("+00:00", "Z")
                 cursor = conn.execute("""
                     INSERT INTO sleep_events
                     (client_id, shift_id, event_type, event_datetime,
@@ -14567,7 +14568,7 @@ def sleep_events(shift_id):
                     VALUES (?, ?, ?, ?, ?)
                 """, (
                     context["client_id"], shift_id, event_type,
-                    event_utc.isoformat().replace("+00:00", "Z"),
+                    event_datetime,
                     session["user_id"]
                 ))
                 event_id = cursor.lastrowid
@@ -14592,6 +14593,7 @@ def sleep_events(shift_id):
                     related_table="sleep_events",
                     related_id=event_id,
                     success=1,
+                    event_datetime=event_datetime,
                     storyline_visible=True
                 )
                 conn.commit()

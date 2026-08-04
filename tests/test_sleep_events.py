@@ -34,7 +34,8 @@ class SleepEventsTests(unittest.TestCase):
                 activity_class TEXT, activity_type TEXT, user_id INTEGER, client_id INTEGER,
                 shift_id INTEGER, related_table TEXT, related_id INTEGER, summary TEXT,
                 details TEXT, success INTEGER NOT NULL DEFAULT 1,
-                storyline_visible INTEGER NOT NULL DEFAULT 0
+                storyline_visible INTEGER NOT NULL DEFAULT 0,
+                event_datetime TEXT NULL
             );
             INSERT INTO users VALUES (1, 'Assigned', 'Support Worker', 1), (2, 'Unassigned', 'Support Worker', 1), (3, 'Manager', 'Admin', 1);
             INSERT INTO clients VALUES (1, 'One', 1), (2, 'Two', 1);
@@ -84,14 +85,14 @@ class SleepEventsTests(unittest.TestCase):
         response = self.post("fell_asleep")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type, client_id, shift_id, recorded_by_user_id FROM sleep_events"), [("fell_asleep", 2, 10, 1)])
-        self.assertEqual(self.rows("SELECT activity_type, summary, client_id, shift_id, user_id, related_table, related_id, storyline_visible FROM activity_log"), [("sleep_fell_asleep", "Client fell asleep", 2, 10, 1, "sleep_events", 1, 1)])
+        self.assertEqual(self.rows("SELECT activity_type, summary, client_id, shift_id, user_id, related_table, related_id, event_datetime, storyline_visible FROM activity_log"), [("sleep_fell_asleep", "Client fell asleep", 2, 10, 1, "sleep_events", 1, "2026-08-02T15:00:00Z", 1)])
 
     def test_assigned_worker_records_woke_up_without_prior_event(self):
         self.login(1)
         response = self.post("woke_up")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type FROM sleep_events"), [("woke_up",)])
-        self.assertEqual(self.rows("SELECT activity_type, storyline_visible FROM activity_log"), [("sleep_woke_up", 1)])
+        self.assertEqual(self.rows("SELECT activity_type, event_datetime, storyline_visible FROM activity_log"), [("sleep_woke_up", "2026-08-02T15:00:00Z", 1)])
 
     def test_duplicate_events_are_append_only(self):
         self.login(1)
