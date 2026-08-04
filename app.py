@@ -14501,6 +14501,9 @@ def toileting_event_new(shift_id):
             related_id=toileting_event_id,
             details="\n".join(toileting_details) or None,
             success=1,
+            event_datetime=convert_vancouver_occurrence_input_to_utc(
+                event_datetime
+            ),
             storyline_visible=True
         )
 
@@ -16396,7 +16399,16 @@ def shift_activities(shift_id):
                     related_id=activity_id,
                     storyline_visible=True,
                     details=selected_categories,
-                    success=1
+                    success=1,
+                    event_datetime=serialize_behaviour_utc(
+                        datetime.combine(
+                            date.fromisoformat(context["shift_date"]),
+                            datetime.strptime(
+                                parsed["start_time"], "%H:%M"
+                            ).time(),
+                            VANCOUVER_TIMEZONE
+                        )
+                    )
                 )
                 conn.commit()
             except Exception:
@@ -16520,6 +16532,10 @@ def incident_new():
 
         incident_id = cur.lastrowid
 
+        incident_event_datetime = convert_vancouver_occurrence_input_to_utc(
+            f"{incident_date}T{incident_time}"
+        )
+
         log_activity(
             conn,
             activity_class="INCIDENT",
@@ -16536,6 +16552,7 @@ def incident_new():
                 medical_treatment
             ),
             success=1,
+            event_datetime=incident_event_datetime,
             storyline_visible=True
         )
 
