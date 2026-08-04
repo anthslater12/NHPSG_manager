@@ -177,13 +177,35 @@ class ClientStorylineTests(unittest.TestCase):
             details="Outcome: All consumed\nAdditional details: <b>Observed</b>"
         )
         self.add_event(
-            "incident_created", "Incident summary",
-            details="Internal incident detail"
+            "behaviour_occurrence_created", "Behaviour summary",
+            details="Internal behaviour detail"
         )
         page = self.client.get("/client/1/storyline").data
         self.assertIn(b"Outcome: All consumed", page)
         self.assertIn(b"&lt;b&gt;Observed&lt;/b&gt;", page)
-        self.assertNotIn(b"Internal incident detail", page)
+        self.assertNotIn(b"Internal behaviour detail", page)
+
+    def test_incident_details_render_from_activity_log_only_and_escape_values(self):
+        self.login()
+        details = (
+            "Location: Home\nSeverity: High\nInjury: Yes\n"
+            "Injury details: <arm>\nActions taken: " + ("Call " * 80) +
+            "\nDescription: <script>incident</script>\n"
+            "Follow-up required: No\nPolice notified: Yes\nMedical treatment: No"
+        )
+        self.add_event("incident_created", "Incident created: Fall", details=details)
+        self.add_event("incident_created", "Old generic incident", details="Event UTC: old")
+        self.add_event("incident_created", "Hidden incident", details="hidden", visible=0)
+        self.add_event("incident_created", "Failed incident", details="failed", success=0)
+        self.add_event("incident_created", "Other client incident", details="other", client_id=2)
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Location: Home", page)
+        self.assertIn(b"&lt;arm&gt;", page)
+        self.assertIn(b"&lt;script&gt;incident&lt;/script&gt;", page)
+        self.assertIn(b"Event UTC: old", page)
+        self.assertNotIn(b"Hidden incident", page)
+        self.assertNotIn(b"Failed incident", page)
+        self.assertNotIn(b"Other client incident", page)
 
     def test_storyline_time_omits_seconds_and_username_but_keeps_user_linkage(self):
         self.login()
@@ -250,7 +272,7 @@ class ClientStorylineTests(unittest.TestCase):
             "shift_activity_created", "Blank details", details=""
         )
         self.add_event(
-            "incident_created", "Hidden raw details", details="Private detail"
+            "behaviour_occurrence_created", "Hidden raw details", details="Private detail"
         )
         self.add_event(
             "shift_activity_created", "Failed Activity", details="LS", success=0

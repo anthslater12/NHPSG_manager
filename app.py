@@ -645,6 +645,28 @@ def format_toileting_storyline_details(
     return lines
 
 
+def format_incident_storyline_details(
+    location, severity, injuries, injury_details, actions_taken,
+    description, follow_up_required, police_notified, medical_treatment
+):
+    lines = [
+        f"Location: {location}",
+        f"Severity: {severity or 'Normal'}",
+        f"Injury: {'Yes' if injuries else 'No'}",
+    ]
+    if injury_details and str(injury_details).strip():
+        lines.append(f"Injury details: {injury_details}")
+    if actions_taken and str(actions_taken).strip():
+        lines.append(f"Actions taken: {actions_taken}")
+    lines.extend((
+        f"Description: {description}",
+        f"Follow-up required: {'Yes' if follow_up_required else 'No'}",
+        f"Police notified: {'Yes' if police_notified else 'No'}",
+        f"Medical treatment: {'Yes' if medical_treatment else 'No'}",
+    ))
+    return "\n".join(lines)
+
+
 def _storyline_access_allowed(conn, client_id, user_id):
     user = get_active_authenticated_user(conn, user_id)
     if user["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
@@ -14232,6 +14254,8 @@ def client_storyline(client_id):
             event["storyline_details"] = event["details"]
         elif event["activity_type"] == "toileting_event_created" and event["details"]:
             event["storyline_details"] = event["details"]
+        elif event["activity_type"] == "incident_created" and event["details"]:
+            event["storyline_details"] = event["details"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []
@@ -15982,6 +16006,7 @@ def incident_new():
         police_notified = 1 if "police_notified" in request.form else 0
         medical_treatment = 1 if "medical_treatment" in request.form else 0
         follow_up_required = 1 if "follow_up_required" in request.form else 0
+        severity = "Normal"
 
         conn = get_db()
 
@@ -16048,7 +16073,11 @@ def incident_new():
             shift_id=shift_id,
             related_table="incident_reports",
             related_id=incident_id,
-            details=description,
+            details=format_incident_storyline_details(
+                location, severity, injuries, injury_details, actions_taken,
+                description, follow_up_required, police_notified,
+                medical_treatment
+            ),
             success=1,
             storyline_visible=True
         )
