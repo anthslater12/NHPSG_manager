@@ -2,6 +2,7 @@
 {% block content %}
 <div class="card"><h2>Record Behaviour</h2>
 {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
+{% if duplicate_warning %}<div class="warning-message" role="alert"><h3>Possible duplicate Behaviour episode</h3><p>A Behaviour episode was already recorded for this shift at {{ duplicate_warning.local_time }} by {{ duplicate_warning.recorder_name }}.</p><p>Please confirm that this is a different episode before continuing.</p><p><a class="button secondary" href="{{ url_for('shift_dashboard', shift_id=request.view_args.get('shift_id')) }}">Go back</a> <button type="submit" name="confirm_distinct_episode" value="1">Yes, record a different episode</button></p></div>{% endif %}
 <form method="post">
 <input type="hidden" name="submission_token" value="{{ submission_token }}">
 <input type="hidden" name="record_format" value="ABC">
@@ -20,7 +21,7 @@
 <h3>Outcome</h3><label>Duration until calm (minutes)</label><input type="number" name="duration_until_calm_minutes" min="0" step="1" value="{{ values.get('duration_until_calm_minutes', '') }}" required>
 <label>How did the client calm down?</label><textarea name="calming_description">{{ values.get('calming_description', '') }}</textarea>
 <label>Additional notes</label><textarea name="additional_notes">{{ values.get('additional_notes', '') }}</textarea>
-<button type="submit">Save once</button></form>
+{% if not duplicate_warning %}<button type="submit">Save once</button>{% endif %}</form>
 <details class="behaviour-support-information">
 <summary>Behaviour Support Information</summary>
 <div class="behaviour-support-content">

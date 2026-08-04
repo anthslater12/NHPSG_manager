@@ -128,6 +128,60 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         self.assertIn("How the client calmed down:\nTook space", audit[7])
         self.assertIn("Additional notes:\nABC note", audit[7])
 
+    def test_shift_duplicate_warning_preserves_form_and_requires_confirmation(self):
+        self.login()
+        first = self.abc_payload(token="D" * 43)
+        first["occurrence_local"] = "2026-08-03T06:17"
+        self.assertEqual(
+            self.client.post("/shift/10/behaviour", data=first).status_code,
+            302
+        )
+        second = self.abc_payload(token="E" * 43)
+        second.update({
+            "occurrence_local": "2026-08-03T07:18",
+            "antecedent_other": "1",
+            "behaviour_other": "1",
+            "response_other": "1",
+            "antecedent_other_details": "Before text",
+            "behaviour_other_details": "Behaviour text",
+            "response_other_details": "Response text",
+            "duration_until_calm_minutes": "12",
+            "calming_description": "Used space",
+            "additional_notes": "More notes",
+        })
+        warning = self.client.post("/shift/10/behaviour", data=second)
+        self.assertEqual(warning.status_code, 200, warning.data.decode())
+        self.assertIn(b"Possible duplicate Behaviour episode", warning.data)
+        self.assertIn(b"2026-08-03 06:17 AM", warning.data)
+        self.assertIn(b"Worker", warning.data)
+        self.assertNotIn(b"2026-08-03T13:17:00Z", warning.data)
+        self.assertNotIn(b"behaviour_occurrence_id", warning.data)
+        for value in ("Before text", "Behaviour text", "Response text", "12", "Used space", "More notes", "E" * 43):
+            self.assertIn(value.encode(), warning.data)
+        self.assertIn(b'href="/shift/10"', warning.data)
+        self.assertEqual(self.counts(), (1, 1))
+        confirmed = self.client.post(
+            "/shift/10/behaviour", data={**second, "confirm_distinct_episode": "1"}
+        )
+        self.assertEqual(confirmed.status_code, 302)
+        self.assertEqual(self.counts(), (2, 2))
+
+    def test_shift_duplicate_warning_ignores_voided_episode(self):
+        self.login()
+        first = self.abc_payload(token="V" * 43)
+        self.assertEqual(self.client.post("/shift/10/behaviour", data=first).status_code, 302)
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            UPDATE behaviour_occurrences
+            SET status = 'Voided', voided_by_user_id = 1,
+                voided_at_utc = '2026-08-04T00:00:00Z', void_reason = 'test'
+        """)
+        conn.commit(); conn.close()
+        second = self.abc_payload(token="W" * 43)
+        response = self.client.post("/shift/10/behaviour", data=second)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.counts(), (2, 2))
+
     def test_authentication_active_clients_and_week_validation(self):
         self.assertEqual(self.client.get("/behaviour/record").status_code, 302)
         self.login()

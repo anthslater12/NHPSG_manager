@@ -1334,7 +1334,8 @@ def _behaviour_recent_occurrences(conn, client_id):
 
 
 def _render_behaviour_record(
-    conn, selected_client_id=None, error=None, values=None, shift_context=False
+    conn, selected_client_id=None, error=None, values=None, shift_context=False,
+    submission_token=None, duplicate_warning=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -1345,7 +1346,8 @@ def _render_behaviour_record(
     values = values or {}
     return render_template("behaviour_record.html", clients=clients,
         selected_client_id=selected_client_id, recent_occurrences=_behaviour_recent_occurrences(conn, selected_client_id),
-        submission_token=secrets.token_urlsafe(32), error=error,
+        submission_token=submission_token or secrets.token_urlsafe(32), error=error,
+        duplicate_warning=duplicate_warning,
         category_fields=BEHAVIOUR_CATEGORY_FIELDS, category_labels=BEHAVIOUR_CATEGORY_LABELS,
         abc_antecedent_fields=ABC_ANTECEDENT_FIELDS,
         abc_behaviour_fields=ABC_BEHAVIOUR_FIELDS,
@@ -1437,6 +1439,8 @@ def behaviour_record(shift_id=None):
             "client_id", "occurrence_local", "repeated_hour_choice", "notes",
             "submission_token", *BEHAVIOUR_CATEGORY_FIELDS
         }
+        if shift is not None:
+            approved_fields.add("confirm_distinct_episode")
         abc_fields = {
             "record_format", "duration_until_calm_minutes", "calming_description",
             "additional_notes", "antecedent_other_details", "behaviour_other_details",
@@ -1449,6 +1453,8 @@ def behaviour_record(shift_id=None):
                 "client_id", "occurrence_local", "repeated_hour_choice",
                 "submission_token", *abc_fields
             }
+            if shift is not None:
+                approved_fields.add("confirm_distinct_episode")
         submitted_fields = set(request.form.keys())
         if not submitted_fields.issubset(approved_fields):
             raise ValueError("Behaviour form input is invalid.")
@@ -1499,9 +1505,42 @@ def behaviour_record(shift_id=None):
         token = request.form.get("submission_token", "")
         if not BEHAVIOUR_TOKEN_PATTERN.fullmatch(token):
             raise ValueError("Behaviour submission token is invalid.")
+        confirmation_values = request.form.getlist("confirm_distinct_episode")
+        if len(confirmation_values) > 1 or (
+            confirmation_values and confirmation_values[0] != "1"
+        ):
+            raise ValueError("Behaviour confirmation is invalid.")
+        confirmed_distinct_episode = confirmation_values == ["1"]
         recorded_utc = serialize_behaviour_utc(datetime.now(timezone.utc).replace(microsecond=0))
         conn.execute("BEGIN IMMEDIATE")
         try:
+            prior_episode = None
+            if shift_id is not None:
+                prior_episode = conn.execute("""
+                    SELECT bo.occurred_at_utc, u.full_name AS recorder_name
+                    FROM behaviour_occurrences bo
+                    JOIN users u ON u.user_id = bo.recorded_by_user_id
+                    WHERE bo.shift_id = ? AND bo.client_id = ?
+                      AND bo.status != 'Voided'
+                    ORDER BY bo.occurred_at_utc DESC,
+                             bo.behaviour_occurrence_id DESC
+                    LIMIT 1
+                """, (shift_id, client_id)).fetchone()
+            if prior_episode is not None and not confirmed_distinct_episode:
+                conn.rollback()
+                duplicate_warning = {
+                    "local_time": behaviour_utc_to_vancouver(
+                        prior_episode["occurred_at_utc"]
+                    ).strftime("%Y-%m-%d %I:%M %p"),
+                    "recorder_name": prior_episode["recorder_name"]
+                }
+                response = _render_behaviour_record(
+                    conn, client_id, values=values,
+                    shift_context=True, submission_token=token,
+                    duplicate_warning=duplicate_warning
+                )
+                conn.close()
+                return response
             if is_abc:
                 columns = ["client_id", "shift_id", "occurred_at_utc", "record_format"]
                 columns += list(BEHAVIOUR_CATEGORY_FIELDS) + list(ABC_ANTECEDENT_FIELDS)
@@ -1570,7 +1609,8 @@ def behaviour_record(shift_id=None):
         )
         response = _render_behaviour_record(
             conn, selected_client, str(error), values,
-            shift_context=shift is not None
+            shift_context=shift is not None,
+            submission_token=values.get("submission_token")
         )
         conn.close()
         return response, 400
