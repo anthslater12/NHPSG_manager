@@ -721,14 +721,24 @@ def _storyline_label(activity_type):
     return "Client activity"
 
 
-def _storyline_heading(activity_datetime):
+def _storyline_local_datetime(event_datetime, activity_datetime):
     try:
-        event_date = datetime.strptime(
-            activity_datetime, "%Y-%m-%d %H:%M:%S"
-        ).date()
+        if event_datetime:
+            return behaviour_utc_to_vancouver(event_datetime)
     except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.strptime(activity_datetime, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def _storyline_heading(local_datetime):
+    try:
+        event_date = local_datetime.date()
+    except (AttributeError, TypeError, ValueError):
         return "Date unavailable"
-    today = date.today()
+    today = datetime.now(VANCOUVER_TIMEZONE).date()
     if event_date == today:
         return "Today"
     if event_date == today - timedelta(days=1):
@@ -736,10 +746,10 @@ def _storyline_heading(activity_datetime):
     return f"{event_date.strftime('%A, %B')} {event_date.day}, {event_date.year}"
 
 
-def _storyline_time(activity_datetime):
+def _storyline_time(local_datetime):
     try:
-        return datetime.strptime(activity_datetime, "%Y-%m-%d %H:%M:%S").strftime("%H:%M")
-    except (TypeError, ValueError):
+        return local_datetime.strftime("%H:%M")
+    except (AttributeError, TypeError, ValueError):
         return "Time unavailable"
 
 
@@ -1708,7 +1718,8 @@ def log_activity(
     related_id=None,
     details=None,
     success=1,
-    storyline_visible=False
+    storyline_visible=False,
+    event_datetime=None
 ):
     
     local_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1726,11 +1737,24 @@ def log_activity(
         details,
         success,
     )
+    if event_datetime is not None:
+        event_datetime = serialize_behaviour_utc(
+            parse_behaviour_utc(event_datetime)
+            if isinstance(event_datetime, str) else event_datetime
+        )
     columns = {
         row[1]
         for row in conn.execute("PRAGMA table_info(activity_log)").fetchall()
     }
-    if "storyline_visible" in columns:
+    if "event_datetime" in columns and "storyline_visible" in columns:
+        conn.execute("""
+            INSERT INTO activity_log
+            (activity_datetime, activity_class, activity_type, user_id,
+             client_id, shift_id, related_table, related_id, summary,
+             details, success, storyline_visible, event_datetime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values + (1 if storyline_visible else 0, event_datetime))
+    elif "storyline_visible" in columns:
         conn.execute("""
             INSERT INTO activity_log
             (activity_datetime, activity_class, activity_type, user_id,
@@ -14637,12 +14661,24 @@ def client_storyline(client_id):
     ).fetchone()[0]
     page_count = max((total + page_size - 1) // page_size, 1)
     page = min(page, page_count)
+    activity_log_columns = {
+        row[1] for row in conn.execute('PRAGMA table_info("activity_log")')
+    }
+    effective_timestamp_sql = (
+        "COALESCE(al.event_datetime, al.activity_datetime)"
+        if "event_datetime" in activity_log_columns
+        else "al.activity_datetime"
+    )
+    event_datetime_select = (
+        "al.event_datetime" if "event_datetime" in activity_log_columns
+        else "NULL AS event_datetime"
+    )
     events = conn.execute(f"""
-        SELECT al.activity_datetime, al.activity_type, al.summary,
-               al.details
+        SELECT al.activity_datetime, {event_datetime_select},
+               al.activity_type, al.summary, al.details
         FROM activity_log al
         WHERE {where_sql}
-        ORDER BY al.activity_datetime DESC, al.activity_id DESC
+        ORDER BY {effective_timestamp_sql} DESC, al.activity_id DESC
         LIMIT ? OFFSET ?
     """, parameters + [page_size, (page - 1) * page_size]).fetchall()
     grouped_events = []
@@ -14675,13 +14711,15 @@ def client_storyline(client_id):
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []
         )
-        event["heading"] = _storyline_heading(event["activity_datetime"])
-        event["event_date"], _ = (
-            event["activity_datetime"].split(" ", 1)
-            if event["activity_datetime"] and " " in event["activity_datetime"]
-            else (event["activity_datetime"] or "", "")
+        event["local_datetime"] = _storyline_local_datetime(
+            event["event_datetime"], event["activity_datetime"]
         )
-        event["event_time"] = _storyline_time(event["activity_datetime"])
+        event["heading"] = _storyline_heading(event["local_datetime"])
+        event["event_date"] = (
+            event["local_datetime"].date().isoformat()
+            if event["local_datetime"] else ""
+        )
+        event["event_time"] = _storyline_time(event["local_datetime"])
         if not grouped_events or grouped_events[-1]["heading"] != event["heading"]:
             grouped_events.append({"heading": event["heading"], "events": []})
         grouped_events[-1]["events"].append(event)

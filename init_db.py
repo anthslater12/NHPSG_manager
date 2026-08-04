@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS activity_log (
     summary TEXT,
     details TEXT,
     success INTEGER NOT NULL DEFAULT 1,
-    storyline_visible INTEGER NOT NULL DEFAULT 0
+    storyline_visible INTEGER NOT NULL DEFAULT 0,
+    event_datetime TEXT NULL
 )
 """)
 

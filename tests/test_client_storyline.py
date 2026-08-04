@@ -25,7 +25,8 @@ class ClientStorylineTests(unittest.TestCase):
                 activity_id INTEGER PRIMARY KEY AUTOINCREMENT, activity_datetime TEXT,
                 activity_class TEXT, activity_type TEXT, user_id INTEGER, client_id INTEGER,
                 shift_id INTEGER, related_table TEXT, related_id INTEGER, summary TEXT,
-                details TEXT, success INTEGER DEFAULT 1, storyline_visible INTEGER NOT NULL DEFAULT 0
+                details TEXT, success INTEGER DEFAULT 1, storyline_visible INTEGER NOT NULL DEFAULT 0,
+                event_datetime TEXT NULL
             );
             CREATE TABLE toileting_events (
                 toileting_event_id INTEGER PRIMARY KEY, client_id INTEGER,
@@ -50,13 +51,13 @@ class ClientStorylineTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             session.update(user_id=user_id, role=role, full_name="Test User")
 
-    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when="2026-08-02 10:00:00", user_id=1, details=None):
+    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when="2026-08-02 10:00:00", user_id=1, details=None, event_datetime=None):
         conn = sqlite3.connect(self.path)
         conn.execute("""
             INSERT INTO activity_log
-            (activity_datetime, activity_type, user_id, client_id, summary, details, success, storyline_visible)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (when, event_type, user_id, client_id, summary, details, success, visible))
+            (activity_datetime, activity_type, user_id, client_id, summary, details, success, storyline_visible, event_datetime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (when, event_type, user_id, client_id, summary, details, success, visible, event_datetime))
         conn.commit()
         conn.close()
 
@@ -315,6 +316,39 @@ class ClientStorylineTests(unittest.TestCase):
             conn.execute("SELECT user_id FROM activity_log").fetchone()[0], 1
         )
         conn.close()
+
+    def test_storyline_uses_event_time_for_display_order_and_vancouver_date(self):
+        self.login()
+        self.add_event(
+            "sleep_woke_up", "Wake event", when="2026-08-03 14:20:00",
+            event_datetime="2026-08-03T13:00:00Z"
+        )
+        self.add_event(
+            "incident_created", "Legacy event", when="2026-08-03 13:30:00"
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"06:00", page)
+        self.assertIn(b"Yesterday", page)
+        self.assertLess(page.find(b"Wake event"), page.find(b"Legacy event"))
+        self.assertNotIn(b"2026-08-03T13:00:00Z", page)
+
+    def test_storyline_same_event_time_uses_activity_id_tie_breaker_and_malformed_falls_back(self):
+        self.login()
+        self.add_event(
+            "shift_activity_created", "First", when="2026-08-02 10:00:00",
+            event_datetime="2026-08-02T17:00:00Z"
+        )
+        self.add_event(
+            "shift_activity_created", "Second", when="2026-08-02 11:00:00",
+            event_datetime="2026-08-02T17:00:00Z"
+        )
+        self.add_event(
+            "shift_activity_created", "Malformed", when="2026-08-02 12:00:00",
+            event_datetime="not-a-timestamp"
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertLess(page.find(b"Second"), page.find(b"First"))
+        self.assertIn(b"Malformed", page)
 
     def test_food_fluid_details_render_on_separate_lines_and_blank_details_are_omitted(self):
         self.login()

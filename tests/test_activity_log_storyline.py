@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import add_activity_log_storyline_visibility as storyline_migration
+import add_activity_log_event_datetime as event_datetime_migration
 import app
 
 
@@ -20,7 +21,8 @@ ACTIVITY_LOG_COLUMNS = """
     summary TEXT,
     details TEXT,
     success INTEGER NOT NULL DEFAULT 1,
-    storyline_visible INTEGER NOT NULL DEFAULT 0
+    storyline_visible INTEGER NOT NULL DEFAULT 0,
+    event_datetime TEXT NULL
 """
 
 
@@ -95,10 +97,13 @@ class ActivityLogStorylineTests(unittest.TestCase):
         conn.close()
 
     def test_schema_is_not_null_and_defaults_false(self):
-        column = sqlite3.connect(self.path).execute(
+        columns = sqlite3.connect(self.path).execute(
             "PRAGMA table_info(activity_log)"
-        ).fetchall()[-1]
+        ).fetchall()
+        column = next(row for row in columns if row[1] == "storyline_visible")
         self.assertEqual(column[1:], ("storyline_visible", "INTEGER", 1, "0", 0))
+        event_column = next(row for row in columns if row[1] == "event_datetime")
+        self.assertEqual(event_column[1:], ("event_datetime", "TEXT", 0, None, 0))
 
     def test_legacy_schema_migration_defaults_existing_rows_false(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -109,6 +114,21 @@ class ActivityLogStorylineTests(unittest.TestCase):
             conn.commit()
             self.assertTrue(storyline_migration.migrate(conn))
             self.assertEqual(conn.execute("SELECT storyline_visible FROM activity_log").fetchone()[0], 0)
+            conn.close()
+
+    def test_event_datetime_migration_is_idempotent_and_preserves_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "legacy.db"
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE activity_log (activity_id INTEGER PRIMARY KEY, activity_datetime TEXT, summary TEXT)")
+            conn.execute("INSERT INTO activity_log VALUES (1, '2026-08-04 10:00:00', 'Legacy')")
+            conn.commit()
+            self.assertTrue(event_datetime_migration.migrate(conn))
+            self.assertFalse(event_datetime_migration.migrate(conn))
+            self.assertEqual(
+                conn.execute("SELECT activity_datetime, summary, event_datetime FROM activity_log").fetchone(),
+                ("2026-08-04 10:00:00", "Legacy", None)
+            )
             conn.close()
 
     def test_log_activity_defaults_hidden_and_explicit_operational_event_visible(self):
@@ -123,6 +143,19 @@ class ActivityLogStorylineTests(unittest.TestCase):
         rows = conn.execute("SELECT activity_type, storyline_visible FROM activity_log ORDER BY activity_id").fetchall()
         conn.close()
         self.assertEqual(rows, [("configuration_changed", 0), ("incident_created", 1), ("food_fluid_entry_viewed", 0)])
+
+    def test_log_activity_preserves_write_time_and_stores_canonical_event_time(self):
+        conn = sqlite3.connect(self.path)
+        app.log_activity(
+            conn, "SLEEP", "sleep_woke_up", "Client woke up", user_id=7,
+            client_id=2, event_datetime="2026-08-03T13:00:00Z"
+        )
+        row = conn.execute(
+            "SELECT activity_datetime, event_datetime FROM activity_log"
+        ).fetchone()
+        conn.close()
+        self.assertRegex(row[0], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        self.assertEqual(row[1], "2026-08-03T13:00:00Z")
 
     def test_incident_uses_active_shift_client_and_preserves_linkage(self):
         with self.client.session_transaction() as session:
