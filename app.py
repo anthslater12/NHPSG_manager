@@ -13329,19 +13329,30 @@ def auto_sign_on_user(user_id):
             raise PermissionError(
                 "This role cannot automatically sign on to a shift."
             )
+        active_clients = conn.execute("""
+            SELECT client_id
+            FROM clients
+            WHERE active = 1
+            ORDER BY client_id
+        """).fetchall()
+        if len(active_clients) != 1:
+            raise RuntimeError(
+                "Automatic sign-on requires exactly one active client."
+            )
+        client_id = active_clients[0]["client_id"]
         shift = conn.execute("""
             SELECT shift_id
             FROM shifts
-            WHERE client_id = 1
+            WHERE client_id = ?
               AND shift_date = ?
               AND shift_type = ?
               AND status = 'Open'
-        """, (shift_date, shift_type)).fetchone()
+        """, (client_id, shift_date, shift_type)).fetchone()
 
         if shift is None:
             if _find_cancelled_matching_shift(
                 conn,
-                1,
+                client_id,
                 shift_date,
                 shift_type
             ) is not None:
@@ -13352,8 +13363,8 @@ def auto_sign_on_user(user_id):
             cur = conn.execute("""
                 INSERT INTO shifts
                 (client_id, shift_date, shift_type, status)
-                VALUES (1, ?, ?, 'Open')
-            """, (shift_date, shift_type))
+                VALUES (?, ?, ?, 'Open')
+            """, (client_id, shift_date, shift_type))
 
             shift_id = cur.lastrowid
         else:
@@ -13393,7 +13404,7 @@ def auto_sign_on_user(user_id):
                 activity_type="auto_sign_on",
                 summary=f"User automatically signed onto {shift_type} shift",
                 user_id=user_id,
-                client_id=1,
+                client_id=client_id,
                 shift_id=shift_id,
                 related_table="shift_staff",
                 related_id=shift_staff_id,

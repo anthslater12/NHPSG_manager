@@ -1790,6 +1790,64 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_auto_sign_on_uses_the_sole_non_one_active_client_everywhere(self):
+        conn = self.open_database()
+        try:
+            conn.execute("UPDATE clients SET active = 0 WHERE client_id = 1")
+            conn.execute(
+                "INSERT INTO clients (client_id, client_name, active) VALUES (7, 'Other Client', 1)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        reconciliation = mock.Mock()
+        with mock.patch.object(app, "reconcile_staff_notice_shift_sign_on", reconciliation), \
+             mock.patch.object(app, "get_current_shift_date", return_value=datetime(2026, 8, 3).date()), \
+             mock.patch.object(app, "get_current_shift_type", return_value="Day"):
+            shift_id, checklist_completed = app.auto_sign_on_user(2)
+
+        self.assertEqual(checklist_completed, 0)
+        conn = self.open_database()
+        try:
+            shift = conn.execute(
+                "SELECT client_id FROM shifts WHERE shift_id = ?", (shift_id,)
+            ).fetchone()
+            assignment = conn.execute(
+                "SELECT shift_id FROM shift_staff WHERE shift_id = ? AND user_id = 2",
+                (shift_id,)
+            ).fetchone()
+            audit = conn.execute(
+                "SELECT client_id, shift_id FROM activity_log WHERE activity_type = 'auto_sign_on'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(shift["client_id"], 7)
+        self.assertEqual(assignment["shift_id"], shift_id)
+        self.assertEqual(audit["client_id"], 7)
+        self.assertEqual(audit["shift_id"], shift_id)
+        reconciliation.assert_called_once()
+        self.assertEqual(reconciliation.call_args.args[1], shift_id)
+
+    def test_auto_sign_on_rejects_zero_or_multiple_active_clients_without_writes(self):
+        for active_client_ids in ((), (1, 7)):
+            with self.subTest(active_client_ids=active_client_ids):
+                conn = self.open_database()
+                try:
+                    conn.execute("UPDATE clients SET active = 0")
+                    for client_id in active_client_ids:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO clients (client_id, client_name, active) VALUES (?, ?, 1)",
+                            (client_id, f"Client {client_id}")
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                before = self.database_snapshot()
+                with self.assertRaises(app.StaffNoticeShiftSignOnError):
+                    app.auto_sign_on_user(2)
+                self.assertEqual(self.database_snapshot(), before)
+
     def test_auto_sign_on_failure_rolls_back_and_dashboard_is_retryable(self):
         before = self.database_snapshot()
         client = app.app.test_client()
