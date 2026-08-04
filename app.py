@@ -1182,6 +1182,39 @@ def _behaviour_categories_for_row(row):
             if row[field]]
 
 
+def _behaviour_week_abc_sections(row):
+    if row.get("record_format") != "ABC":
+        return []
+    sections = []
+    for heading, fields, other_field, details_field in (
+        ("Before the Behaviour (A)", ABC_ANTECEDENT_FIELDS,
+         "antecedent_other", "antecedent_other_details"),
+        ("Behaviour Observed (B)", ABC_BEHAVIOUR_FIELDS,
+         "behaviour_other", "behaviour_other_details"),
+        ("Staff Response (C)", ABC_RESPONSE_FIELDS,
+         "response_other", "response_other_details"),
+    ):
+        items = [ABC_FIELD_LABELS[field] for field in fields if row.get(field)]
+        if row.get(other_field) and str(row.get(details_field) or "").strip():
+            items.append("Other")
+            other_details = str(row[details_field]).strip()
+        else:
+            other_details = None
+        sections.append({"heading": heading, "items": items, "other_details": other_details})
+    duration = row.get("duration_until_calm_minutes")
+    outcome = [{
+        "label": "Duration until calm:",
+        "value": f"{duration} {'minute' if duration == 1 else 'minutes'}"
+    }]
+    for label, field in (("How the client calmed down:", "calming_description"),
+                         ("Additional notes:", "additional_notes")):
+        value = str(row.get(field) or "").strip()
+        if value:
+            outcome.append({"label": label, "value": value})
+    sections.append({"heading": "Outcome", "items": [], "other_details": None, "outcome": outcome})
+    return sections
+
+
 def _behaviour_week_occurrences(conn, monday):
     start_utc, end_utc = get_behaviour_operational_week_range(monday)
     rows = conn.execute("""
@@ -1202,6 +1235,29 @@ def _behaviour_week_occurrences(conn, monday):
         item["operational_day"] = get_behaviour_operational_day(local)
         item["band"] = get_behaviour_operational_band(local)
         item["categories"] = _behaviour_categories_for_row(row)
+        item["abc_sections"] = _behaviour_week_abc_sections(item)
+        item["summary"] = ", ".join(
+            item["categories"]
+        ) if item["record_format"] != "ABC" else ", ".join(
+            label for label in (
+                ABC_FIELD_LABELS[field]
+                for field in ABC_BEHAVIOUR_FIELDS if item.get(field)
+            )
+        )
+        if not item["summary"]:
+            item["summary"] = "Behaviour occurrence recorded"
+        item["status_label"] = "Voided" if item["status"] == "Voided" else "Active"
+        item["shift_type"] = None
+        if item.get("shift_id"):
+            shift_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='shifts'"
+            ).fetchone()
+            if shift_table:
+                shift = conn.execute(
+                    "SELECT shift_type FROM shifts WHERE shift_id = ?",
+                    (item["shift_id"],)
+                ).fetchone()
+                item["shift_type"] = shift["shift_type"] if shift else None
         occurrences.append(item)
     return occurrences
 
@@ -1216,7 +1272,15 @@ def _behaviour_week_context(conn, monday):
             matching = [item for item in occurrences if item["operational_day"] == operational_day and item["band"] == band]
             counts = {field: sum(item[field] for item in matching if item["status"] != "Voided") for field in BEHAVIOUR_CATEGORY_FIELDS}
             bands.append({"name": band, "counts": counts, "occurrences": matching})
-        days.append({"date": operational_day, "bands": bands})
+        days.append({
+            "date": operational_day,
+            "bands": bands,
+            "episodes": sorted(
+                [item for item in occurrences
+                 if item["operational_day"] == operational_day],
+                key=lambda item: (item["occurred_at_utc"], item["behaviour_occurrence_id"])
+            ),
+        })
     return days
 
 
@@ -1268,10 +1332,14 @@ def behaviour_weekly(monday):
     try:
         user = get_active_authenticated_user(conn, session["user_id"])
         week_start = _parse_behaviour_monday(monday)
+        current_monday = get_behaviour_operational_week_start(
+            datetime.now(VANCOUVER_TIMEZONE)
+        )
         return render_template("behaviour_weekly.html", monday=week_start,
             days=_behaviour_week_context(conn, week_start),
             previous_monday=week_start - timedelta(days=7),
             next_monday=week_start + timedelta(days=7),
+            current_monday=current_monday,
             category_labels=BEHAVIOUR_CATEGORY_LABELS,
             can_void=user["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES)
     except PermissionError:
@@ -16487,8 +16555,13 @@ def manager_review_hub():
     ]:
         return "Access denied", 403
 
+    current_behaviour_week_monday = get_behaviour_operational_week_start(
+        datetime.now(VANCOUVER_TIMEZONE)
+    ).isoformat()
+
     return render_template(
-        "manager_review_hub.html"
+        "manager_review_hub.html",
+        current_behaviour_week_monday=current_behaviour_week_monday
     )
 
 

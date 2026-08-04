@@ -1,5 +1,64 @@
 {% extends "base.html" %}
-{% block content %}<div class="card"><h2>Weekly Behaviour Tracker: {{ monday }}</h2>
-<p><a href="{{ url_for('behaviour_weekly', monday=previous_monday.isoformat()) }}">Previous week</a> | <a href="{{ url_for('behaviour_weekly', monday=next_monday.isoformat()) }}">Next week</a> | <a href="{{ url_for('behaviour_record') }}">Record Behaviour</a></p>
-{% for day in days %}<h3>{{ day.date.strftime('%A %Y-%m-%d') }}</h3>{% for band in day.bands %}<h4>{{ band.name }}</h4><table><tr>{% for field, label in category_labels.items() %}<th>{{ label }}</th>{% endfor %}</tr><tr>{% for field in category_labels %}<td>{{ band.counts[field] }}</td>{% endfor %}</tr></table>{% if band.occurrences %}<ul>{% for item in band.occurrences %}<li>{{ item.local_time }} — {{ item.client_name }} — {{ item.categories|join(', ') }}{% if item.notes %}: {{ item.notes }}{% endif %} — {{ item.recorder_name }}{% if item.status == 'Voided' %} (Voided by {{ item.voided_by_name }} at {{ item.voided_at_utc }}: {{ item.void_reason }}){% elif can_void %}<form method="post" action="{{ url_for('behaviour_occurrence_void', occurrence_id=item.behaviour_occurrence_id) }}" class="inline-form"><label>Void reason <input name="void_reason" required></label><button type="submit">Void record</button></form>{% endif %}</li>{% endfor %}</ul>{% endif %}{% endfor %}{% endfor %}
-</div>{% endblock %}
+{% block content %}
+<div class="card behaviour-weekly-header">
+    <h2>Behaviour Weekly Review</h2>
+    <p>Week of {{ monday.strftime('%B %d, %Y') }}</p>
+    <nav class="behaviour-weekly-navigation" aria-label="Behaviour week navigation">
+        <a class="button" href="{{ url_for('behaviour_weekly', monday=previous_monday.isoformat()) }}">Previous Week</a>
+        <a class="button" href="{{ url_for('behaviour_weekly', monday=current_monday.isoformat()) }}">Current Week</a>
+        <a class="button" href="{{ url_for('behaviour_weekly', monday=next_monday.isoformat()) }}">Next Week</a>
+    </nav>
+</div>
+
+{% for day in days %}
+<section class="behaviour-review-day">
+    <h3>{{ day.date.strftime('%A') }}</h3>
+    <p class="behaviour-review-count">{{ day.episodes|length }} Behaviour Episode{% if day.episodes|length != 1 %}s{% endif %}</p>
+    {% if day.episodes %}
+        {% for item in day.episodes %}
+        <article class="behaviour-review-card{% if item.status == 'Voided' %} behaviour-review-card-voided{% endif %}">
+            <header class="behaviour-review-card-header">
+                <div>
+                    <time>{{ item.local_time }}</time>
+                    <h4>Behaviour Episode</h4>
+                </div>
+                <div class="behaviour-review-meta">
+                    <div><strong>Recorded by:</strong> {{ item.recorder_name }}</div>
+                    {% if item.shift_type %}<div><strong>Shift:</strong> {{ item.shift_type }}</div>{% endif %}
+                    <div><strong>Status:</strong> <span class="behaviour-review-status">{{ item.status_label }}</span></div>
+                </div>
+            </header>
+            <p class="behaviour-review-summary">{{ item.summary }}</p>
+            {% if item.record_format == 'ABC' %}
+                <div class="behaviour-review-details">
+                {% for section in item.abc_sections %}
+                    <section class="behaviour-review-section">
+                        <h5>{{ section["heading"] }}</h5>
+                        {% if section["outcome"] %}
+                            {% for outcome in section["outcome"] %}
+                            <div class="behaviour-review-outcome"><strong>{{ outcome.label }}</strong><div>{{ outcome.value }}</div></div>
+                            {% endfor %}
+                        {% else %}
+                            {% for value in section["items"] %}<div class="behaviour-review-item">{{ value }}</div>{% endfor %}
+                            {% if section["other_details"] %}<div class="behaviour-review-item">Other</div><div class="behaviour-review-nested">{{ section["other_details"] }}</div>{% endif %}
+                        {% endif %}
+                    </section>
+                {% endfor %}
+                </div>
+            {% else %}
+                <div class="behaviour-review-details">
+                    <section class="behaviour-review-section"><h5>Categories</h5>{% for value in item.categories %}<div class="behaviour-review-item">{{ value }}</div>{% endfor %}</section>
+                    {% if item.notes %}<section class="behaviour-review-section"><h5>Notes</h5><div class="behaviour-review-nested">{{ item.notes }}</div></section>{% endif %}
+                </div>
+            {% endif %}
+            {% if item.status == 'Voided' %}
+                <p class="behaviour-review-void-info">Voided by {{ item.voided_by_name }} at {{ item.voided_at_utc }}</p>
+            {% elif can_void %}
+                <form method="post" action="{{ url_for('behaviour_occurrence_void', occurrence_id=item.behaviour_occurrence_id) }}" class="inline-form behaviour-review-void-form"><label>Void reason <input name="void_reason" required></label><button type="submit">Void record</button></form>
+            {% endif %}
+        </article>
+        {% endfor %}
+    {% else %}<p class="behaviour-review-empty">No Behaviour episodes recorded.</p>{% endif %}
+</section>
+{% endfor %}
+{% endblock %}

@@ -684,3 +684,96 @@ td,th{
 .storyline-behaviour-nested-text {
     margin-left: 3rem;
 }
+
+.behaviour-weekly-navigation {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.behaviour-review-day {
+    margin: 1rem 0;
+}
+
+.behaviour-review-count {
+    color: #555;
+}
+
+.behaviour-review-card {
+    border: 1px solid #d9d9d9;
+    border-radius: 6px;
+    padding: 1rem;
+    margin: 0.75rem 0;
+    overflow-wrap: anywhere;
+}
+
+.behaviour-review-card-voided {
+    background: #f7f7f7;
+    border-color: #b8b8b8;
+}
+
+.behaviour-review-card-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.behaviour-review-card-header time {
+    font-size: 1.15rem;
+    font-weight: bold;
+}
+
+.behaviour-review-card-header h4 {
+    margin: 0.2rem 0;
+}
+
+.behaviour-review-meta {
+    min-width: 12rem;
+}
+
+.behaviour-review-status {
+    font-weight: bold;
+}
+
+.behaviour-review-summary {
+    font-weight: bold;
+    margin: 0.5rem 0 0;
+}
+
+.behaviour-review-section {
+    margin-top: 0.9rem;
+}
+
+.behaviour-review-section:first-child {
+    margin-top: 0.5rem;
+}
+
+.behaviour-review-section h5 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.behaviour-review-item,
+.behaviour-review-outcome {
+    margin-left: 1.5rem;
+    margin-top: 0.2rem;
+}
+
+.behaviour-review-nested {
+    margin-left: 3rem;
+    white-space: pre-wrap;
+}
+
+.behaviour-review-void-info {
+    color: #555;
+    margin-bottom: 0;
+}
+
+@media (max-width: 600px) {
+    .behaviour-review-card-header,
+    .behaviour-review-meta {
+        display: block;
+        min-width: 0;
+    }
+}

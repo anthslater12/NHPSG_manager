@@ -202,8 +202,9 @@ class BehaviourCheckpointThreeTests(unittest.TestCase):
         self.assertEqual(self.void(occurrence_id).status_code, 302)
         page = self.client.get("/behaviour/week/2024-01-08")
         self.assertIn(b"Voided by Admin", page.data)
-        self.assertIn(b"Incorrect duplicate", page.data)
-        self.assertIn(b"<td>0</td><td>0</td><td>0</td><td>0</td><td>0</td>", page.data)
+        self.assertNotIn(b"Incorrect duplicate", page.data)
+        self.assertIn(b"behaviour-review-card-voided", page.data)
+        self.assertIn(b"original notes", page.data)
 
     def test_corrected_occurrence_is_a_new_record(self):
         original_id = self.insert_occurrence(token="original")
