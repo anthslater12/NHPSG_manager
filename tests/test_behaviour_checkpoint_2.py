@@ -29,7 +29,7 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
           user_id INTEGER, active INTEGER);
         CREATE TABLE activity_log (activity_id INTEGER PRIMARY KEY, activity_datetime TEXT,
           activity_class TEXT NOT NULL, activity_type TEXT NOT NULL, user_id INTEGER, client_id INTEGER,
-          shift_id INTEGER, related_table TEXT, related_id INTEGER, summary TEXT NOT NULL, details TEXT, success INTEGER);
+          shift_id INTEGER, related_table TEXT, related_id INTEGER, summary TEXT NOT NULL, details TEXT, storyline_visible INTEGER NOT NULL DEFAULT 0, success INTEGER, event_datetime TEXT);
         INSERT INTO users VALUES (1,'worker','x','Worker','Support Worker',1);
         INSERT INTO users VALUES (2,'inactive','x','Inactive','Support Worker',0);
         INSERT INTO users VALUES (3,'other','x','Other','Support Worker',1);
@@ -103,7 +103,7 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         self.assertEqual(response.location, "/shift/10")
         conn = sqlite3.connect(self.path)
         row = conn.execute("""
-            SELECT record_format, shift_id, client_id,
+            SELECT record_format, shift_id, client_id, occurred_at_utc,
                    antecedent_transition_activities,
                    behaviour_physical_aggression, response_blocked_behaviour,
                    duration_until_calm_minutes, calming_description,
@@ -112,15 +112,17 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         """).fetchone()
         audit = conn.execute("""
             SELECT user_id, client_id, shift_id, related_table, related_id,
-                   activity_type, summary, details, success
+                   activity_type, summary, details, success, event_datetime
             FROM activity_log
         """).fetchone()
         conn.close()
-        self.assertEqual(row, ("ABC", 10, 1, 1, 1, 1, 0, "Took space", "ABC note"))
+        self.assertEqual(row[0:3], ("ABC", 10, 1))
+        self.assertEqual(row[4:], (1, 1, 1, 0, "Took space", "ABC note"))
         self.assertEqual(audit[:7], (1, 1, 10, "behaviour_occurrences", 1,
                                      "behaviour_occurrence_created",
                                      "Behaviour occurrence recorded"))
         self.assertEqual(audit[8], 1)
+        self.assertEqual(audit[9], row[3])
         self.assertIn("Before the Behaviour (A):\nAsked to transition between activities", audit[7])
         self.assertIn("Behaviour Observed (B):\nPhysical aggression", audit[7])
         self.assertIn("Staff Response (C):\nBlocked behaviour", audit[7])

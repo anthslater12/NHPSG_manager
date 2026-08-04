@@ -82,7 +82,9 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
                 summary TEXT NOT NULL,
                 details TEXT,
                 created_at TEXT,
-                success INTEGER DEFAULT 1
+                success INTEGER DEFAULT 1,
+                storyline_visible INTEGER NOT NULL DEFAULT 0,
+                event_datetime TEXT
             );
 
             INSERT INTO users
@@ -211,6 +213,7 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
             activity["related_id"],
             entry["food_fluid_entry_id"]
         )
+        self.assertEqual(activity["event_datetime"], entry["event_at_utc"])
         self.assertEqual(activity["summary"], "Offered — Toast and water")
         self.assertNotIn("Toast and water", activity["details"])
 

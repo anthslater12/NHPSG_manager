@@ -1593,6 +1593,7 @@ def behaviour_record(shift_id=None):
                 shift_id=shift_id,
                 related_table="behaviour_occurrences", related_id=occurrence_id,
                 details=activity_details, success=1,
+                event_datetime=occurrence_utc,
                 storyline_visible=True)
             conn.commit()
         except sqlite3.IntegrityError as error:
@@ -14941,7 +14942,8 @@ def food_fluid_entry_new(shift_id):
                 details=format_food_fluid_storyline_details(
                     outcome, additional_details, physically_thrown
                 ),
-                success=1
+                success=1,
+                event_datetime=event_at_utc
             )
             conn.commit()
         except Exception:
