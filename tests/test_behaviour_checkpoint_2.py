@@ -140,6 +140,26 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         with self.client.session_transaction() as session: session["user_id"] = 2
         self.assertEqual(self.client.get("/behaviour/record").status_code, 403)
 
+    def test_behaviour_support_information_panel_is_static_and_collapsed(self):
+        self.login()
+        page = self.client.get("/behaviour/record").data.decode()
+        self.assertIn('<details class="behaviour-support-information">', page)
+        self.assertIn("<summary>Behaviour Support Information</summary>", page)
+        self.assertIn("What are Setting Events?", page)
+        self.assertIn("Physiological / Biological Setting Events", page)
+        self.assertIn("Physical / Environmental Setting Events", page)
+        self.assertIn("Social / Interpersonal Setting Events", page)
+        self.assertIn("Fast Triggers — Antecedents", page)
+        self.assertIn("ABC Recording Reminder", page)
+        self.assertIn("Hunger or thirst.", page)
+        self.assertNotIn("Hunger and first", page)
+        self.assertNotIn("<details open", page)
+        with open(os.path.join(ROOT, "templates", "behaviour_record.html"), encoding="utf-8") as template_file:
+            self.assertNotIn("<script", template_file.read())
+        self.assertLess(page.index("Save once"), page.index("Behaviour Support Information"))
+        self.assertIn('name="duration_until_calm_minutes"', page)
+        self.assertIn('name="antecedent_other_details"', page)
+
     def test_shift_behaviour_route_requires_assignment_and_open_shift(self):
         self.assertEqual(self.client.get("/shift/10/behaviour").status_code, 302)
         self.login()

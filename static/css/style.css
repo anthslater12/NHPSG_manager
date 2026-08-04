@@ -770,6 +770,32 @@ td,th{
     margin-bottom: 0;
 }
 
+.behaviour-support-information {
+    margin-top: 1rem;
+    border-top: 1px solid #d9d9d9;
+    padding-top: 0.75rem;
+    overflow-wrap: anywhere;
+}
+
+.behaviour-support-information summary {
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.behaviour-support-content {
+    padding-top: 0.5rem;
+}
+
+.behaviour-support-content h3 {
+    margin: 0.85rem 0 0.3rem;
+    font-size: 1rem;
+}
+
+.behaviour-support-content ul {
+    margin-top: 0.25rem;
+    padding-left: 1.25rem;
+}
+
 @media (max-width: 600px) {
     .behaviour-review-card-header,
     .behaviour-review-meta {
