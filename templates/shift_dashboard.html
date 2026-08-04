@@ -194,7 +194,7 @@
             {% for event in recent_sleep_events %}
                 <tr>
                     <td>{{ "Fell asleep" if event.event_type == "fell_asleep" else "Woke up" }}</td>
-                    <td>{{ event.event_datetime }}</td>
+                    <td>{{ event.event_local_display }}</td>
                     <td>{{ event.full_name }}</td>
                 </tr>
             {% endfor %}

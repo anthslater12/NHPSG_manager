@@ -124,6 +124,17 @@ class SleepEventsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertLess(response.data.find(b"Woke up"), response.data.find(b"Fell asleep"))
 
+    def test_sleep_history_displays_vancouver_local_time_without_utc_iso(self):
+        self.login(1)
+        self.post("woke_up", event_local="2026-08-03T06:00")
+        response = self.client.get("/shift/10/sleep")
+        self.assertIn(b"2026-08-03 06:00 AM", response.data)
+        self.assertNotIn(b"2026-08-03T13:00:00Z", response.data)
+        self.assertEqual(
+            self.rows("SELECT event_datetime FROM sleep_events"),
+            [("2026-08-03T13:00:00Z",)]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

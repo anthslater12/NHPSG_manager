@@ -665,13 +665,18 @@ def get_active_sleep_shift_context(conn, shift_id, user_id):
 
 
 def get_sleep_events(conn, shift_id):
-    return conn.execute("""
+    events = [dict(event) for event in conn.execute("""
         SELECT se.*, u.full_name
         FROM sleep_events se
         JOIN users u ON u.user_id = se.recorded_by_user_id
         WHERE se.shift_id = ?
         ORDER BY se.event_datetime DESC, se.sleep_event_id DESC
-    """, (shift_id,)).fetchall()
+    """, (shift_id,)).fetchall()]
+    for event in events:
+        event["event_local_display"] = behaviour_utc_to_vancouver(
+            event["event_datetime"]
+        ).strftime("%Y-%m-%d %I:%M %p")
+    return events
 
 
 STORYLINE_FILTERS = {
