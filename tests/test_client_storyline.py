@@ -207,6 +207,43 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertNotIn(b"Failed incident", page)
         self.assertNotIn(b"Other client incident", page)
 
+    def test_shift_note_details_render_from_activity_log_with_safe_history(self):
+        self.login()
+        first_note = "First line\nSecond <line>\n" + ("Long text " * 80)
+        second_note = "Replacement note"
+        self.add_event("shift_note_updated", "Updated staff notes for shift", details=first_note)
+        self.add_event("shift_note_updated", "Updated staff notes for shift", details=second_note)
+        self.add_event(
+            "shift_note_updated", "Generic note", details="",
+            visible=1
+        )
+        self.add_event(
+            "shift_note_updated", "Hidden note", details="hidden",
+            visible=0
+        )
+        self.add_event(
+            "shift_note_updated", "Failed note", details="failed",
+            success=0
+        )
+        self.add_event(
+            "shift_note_updated", "Other client note", details="other",
+            client_id=2
+        )
+        self.add_event(
+            "shift_note_updated", "Note with follow-up", details="Worker note content"
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"First line", page)
+        self.assertIn(b"Second &lt;line&gt;", page)
+        self.assertIn(b"Long text", page)
+        self.assertIn(b"Replacement note", page)
+        self.assertIn(b"Generic note", page)
+        self.assertIn(b"Note with follow-up", page)
+        self.assertNotIn(b"Hidden note", page)
+        self.assertNotIn(b"Failed note", page)
+        self.assertNotIn(b"Other client note", page)
+        self.assertNotIn(b"Follow-up required", page)
+
     def test_storyline_time_omits_seconds_and_username_but_keeps_user_linkage(self):
         self.login()
         self.add_event(

@@ -14256,6 +14256,8 @@ def client_storyline(client_id):
             event["storyline_details"] = event["details"]
         elif event["activity_type"] == "incident_created" and event["details"]:
             event["storyline_details"] = event["details"]
+        elif event["activity_type"] == "shift_note_updated" and event["details"]:
+            event["storyline_details"] = event["details"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []

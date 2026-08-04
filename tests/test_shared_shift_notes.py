@@ -191,18 +191,24 @@ class SharedShiftNotesTests(unittest.TestCase):
         )
 
         logs = self.database_rows("""
-            SELECT activity_type, summary, user_id, shift_id, success
+            SELECT activity_type, summary, user_id, shift_id, success, details
             FROM activity_log
             ORDER BY activity_id
         """)
         self.assertEqual(len(logs), 3)
-        self.assertTrue(all(
-            row["activity_type"] == "shift_note_updated"
-            and row["summary"] == "Updated staff notes for shift"
-            and row["shift_id"] == 1
-            and row["success"] == 1
-            for row in logs
-        ))
+        self.assertEqual(
+            [(row["activity_type"], row["summary"], row["user_id"],
+              row["shift_id"], row["success"], row["details"])
+             for row in logs],
+            [
+                ("shift_note_updated", "Updated staff notes for shift", 1, 1, 1,
+                 "First shared update"),
+                ("shift_note_updated", "Updated staff notes for shift", 1, 1, 1,
+                 "Worker one revised it"),
+                ("shift_note_updated", "Updated staff notes for shift", 2, 1, 1,
+                 "Worker two updated the shared note"),
+            ]
+        )
 
     def test_unassigned_and_inactive_workers_are_denied(self):
         for user_id in (3, 4):
