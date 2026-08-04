@@ -145,6 +145,32 @@ def inject_session_timeout_settings():
         "session_warning_seconds": SESSION_WARNING_SECONDS
     }
 
+
+@app.context_processor
+def inject_management_storyline_navigation():
+    management_roles = {"Admin", "Program Manager", "Director"}
+    if session.get("role") not in management_roles:
+        return {"management_storyline_url": None}
+    conn = None
+    try:
+        conn = get_db()
+        active_clients = conn.execute(
+            "SELECT client_id FROM clients WHERE active = 1 ORDER BY client_id"
+        ).fetchall()
+        if len(active_clients) != 1:
+            return {"management_storyline_url": None}
+        return {
+            "management_storyline_url": url_for(
+                "client_storyline",
+                client_id=active_clients[0]["client_id"]
+            )
+        }
+    except (sqlite3.Error, RuntimeError):
+        return {"management_storyline_url": None}
+    finally:
+        if conn is not None:
+            conn.close()
+
 DB_NAME = os.environ.get("NHPSG_DB_PATH", "nhpsg.db")
 
 VANCOUVER_TIMEZONE = ZoneInfo("America/Vancouver")

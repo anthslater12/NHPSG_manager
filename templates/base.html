@@ -59,6 +59,12 @@
             Management Review
         </a>
 
+        {% if management_storyline_url %}
+            <a href="{{ management_storyline_url }}">
+                Storyline
+            </a>
+        {% endif %}
+
         <a href="{{ url_for('users') }}">
             Users
         </a>
