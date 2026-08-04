@@ -24,6 +24,9 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT,
           full_name TEXT, role TEXT, active INTEGER);
         CREATE TABLE clients (client_id INTEGER PRIMARY KEY, client_name TEXT, active INTEGER);
+        CREATE TABLE shifts (shift_id INTEGER PRIMARY KEY, client_id INTEGER, status TEXT);
+        CREATE TABLE shift_staff (shift_staff_id INTEGER PRIMARY KEY, shift_id INTEGER,
+          user_id INTEGER, active INTEGER);
         CREATE TABLE activity_log (activity_id INTEGER PRIMARY KEY, activity_datetime TEXT,
           activity_class TEXT NOT NULL, activity_type TEXT NOT NULL, user_id INTEGER, client_id INTEGER,
           shift_id INTEGER, related_table TEXT, related_id INTEGER, summary TEXT NOT NULL, details TEXT, success INTEGER);
@@ -32,6 +35,8 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         INSERT INTO users VALUES (3,'other','x','Other','Support Worker',1);
         INSERT INTO clients VALUES (1,'Active Client',1);
         INSERT INTO clients VALUES (2,'Inactive Client',0);
+        INSERT INTO shifts VALUES (10,1,'Open'), (11,1,'Closed'), (12,1,'Cancelled'), (20,2,'Open');
+        INSERT INTO shift_staff VALUES (1,10,1,1), (2,20,1,1);
         """)
         migration.migrate(conn); conn.close()
         self.client = app.app.test_client()
@@ -71,6 +76,44 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         with self.client.session_transaction() as session: session["user_id"] = 2
         self.assertEqual(self.client.get("/behaviour/record").status_code, 403)
 
+    def test_shift_behaviour_route_requires_assignment_and_open_shift(self):
+        self.assertEqual(self.client.get("/shift/10/behaviour").status_code, 302)
+        self.login()
+        self.assertEqual(self.client.get("/shift/11/behaviour").status_code, 403)
+        self.assertEqual(self.client.get("/shift/12/behaviour").status_code, 403)
+        self.assertEqual(self.client.get("/shift/20/behaviour").status_code, 403)
+        self.login(3)
+        self.assertEqual(self.client.get("/shift/10/behaviour").status_code, 403)
+
+    def test_shift_behaviour_uses_authoritative_client_and_audits_shift(self):
+        self.login()
+        page = self.client.get("/shift/10/behaviour")
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn(b'<select name="client_id"', page.data)
+        response = self.client.post("/shift/10/behaviour", data=self.payload(
+            token="S" * 43, client_id="2", notes="tampered"
+        ))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.counts(), (0, 0))
+        valid = self.payload(token="T" * 43, notes="shift-scoped note")
+        valid.pop("client_id")
+        response = self.client.post("/shift/10/behaviour", data=valid)
+        self.assertEqual(response.status_code, 302)
+        conn = sqlite3.connect(self.path)
+        row = conn.execute("""
+            SELECT client_id, shift_id, user_id, related_table, related_id,
+                   success, activity_type
+            FROM activity_log
+        """).fetchone()
+        occurrence = conn.execute(
+            "SELECT client_id FROM behaviour_occurrences"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row[0:4], (1, 10, 1, "behaviour_occurrences"))
+        self.assertEqual(row[4], 1)
+        self.assertEqual(row[5:7], (1, "behaviour_occurrence_created"))
+        self.assertEqual(occurrence[0], 1)
+
     def test_record_multi_category_idempotency_and_audit(self):
         self.login()
         data = self.payload(property_damage="1")
@@ -83,7 +126,10 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         self.assertEqual(row[0], "private note")
         self.assertEqual(row[1:3], (1, "Recorded"))
         self.assertRegex(row[3], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
-        self.assertNotIn("private note", log)
+        self.assertEqual(
+            log,
+            "Categories:\nSelf-Harm\nProperty Damage\n\nNotes:\nprivate note"
+        )
 
     def test_validation_and_other_user_token_collision(self):
         self.login()
@@ -214,11 +260,13 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         conn.close()
         self.assertEqual(audit[:6], ("BEHAVIOUR", "behaviour_occurrence_created", 1, 1,
                                      "behaviour_occurrences", occurrence[0]))
-        self.assertIn(occurrence[1], audit[7])
-        self.assertIn("Aggression towards others", audit[7])
-        self.assertIn("Self-Harm", audit[7])
-        self.assertIn("Property Damage", audit[7])
-        self.assertNotIn("sensitive behaviour note", " ".join(str(value) for value in audit))
+        self.assertEqual(audit[7], (
+            "Categories:\nAggression towards others\nSelf-Harm\nProperty Damage\n\n"
+            "Notes:\nsensitive behaviour note"
+        ))
+        self.assertNotIn(occurrence[1], audit[7])
+        self.assertNotIn("recorded", audit[7].lower())
+        self.assertNotIn("1", audit[7])
         self.assertNotIn("Void", " ".join(str(value) for value in audit))
         self.assertEqual(self.counts(), (1, 1))
 

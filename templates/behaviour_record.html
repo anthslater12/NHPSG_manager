@@ -4,7 +4,7 @@
 {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
 <form method="post">
 <input type="hidden" name="submission_token" value="{{ submission_token }}">
-<label>Client</label><select name="client_id" required><option value="">Select client</option>{% for client in clients %}<option value="{{ client.client_id }}" {% if client.client_id == selected_client_id %}selected{% endif %}>{{ client.client_name }}</option>{% endfor %}</select>
+{% if shift_context %}<p>Client: {{ clients|selectattr('client_id', 'equalto', selected_client_id)|map(attribute='client_name')|first }}</p>{% else %}<label>Client</label><select name="client_id" required><option value="">Select client</option>{% for client in clients %}<option value="{{ client.client_id }}" {% if client.client_id == selected_client_id %}selected{% endif %}>{{ client.client_name }}</option>{% endfor %}</select>{% endif %}
 <label>Occurrence date and time (Vancouver)</label><input type="datetime-local" name="occurrence_local" value="{{ values.get('occurrence_local', now_local) }}" required>
 <label>Repeated fall-back hour</label><select name="repeated_hour_choice"><option value="">Not applicable</option><option value="first">First occurrence</option><option value="second">Second occurrence</option></select>
 <h3>Categories</h3>{% for field in category_fields %}<label><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}> {{ category_labels[field] }}</label><br>{% endfor %}

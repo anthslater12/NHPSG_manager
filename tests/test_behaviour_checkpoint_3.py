@@ -133,9 +133,8 @@ class BehaviourCheckpointThreeTests(unittest.TestCase):
                                      "behaviour_occurrences", occurrence_id,
                                      "Behaviour occurrence voided"))
         self.assertEqual(audit[8], 1)
-        self.assertIn("Occurrence UTC: 2024-01-08T15:30:00Z", audit[7])
-        self.assertIn("Aggression towards others, Self-Harm, Property Damage", audit[7])
-        self.assertIn("Void reason: Entered twice", audit[7])
+        self.assertEqual(audit[7], "Status: Voided")
+        self.assertNotIn("Entered twice", audit[7])
         self.assertNotIn("private original note", audit[7])
 
     def test_reason_input_and_repeated_void_are_rejected_without_extra_audit(self):

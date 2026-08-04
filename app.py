@@ -667,6 +667,13 @@ def format_incident_storyline_details(
     return "\n".join(lines)
 
 
+def format_behaviour_storyline_details(category_text, notes=None):
+    details = "Categories:\n" + category_text.replace(", ", "\n")
+    if notes and notes.strip():
+        details += "\n\nNotes:\n" + notes
+    return details
+
+
 def _storyline_access_allowed(conn, client_id, user_id):
     user = get_active_authenticated_user(conn, user_id)
     if user["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
@@ -1069,7 +1076,9 @@ def _behaviour_recent_occurrences(conn, client_id):
     return result
 
 
-def _render_behaviour_record(conn, selected_client_id=None, error=None, values=None):
+def _render_behaviour_record(
+    conn, selected_client_id=None, error=None, values=None, shift_context=False
+):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
         try:
@@ -1081,7 +1090,8 @@ def _render_behaviour_record(conn, selected_client_id=None, error=None, values=N
         selected_client_id=selected_client_id, recent_occurrences=_behaviour_recent_occurrences(conn, selected_client_id),
         submission_token=secrets.token_urlsafe(32), error=error,
         category_fields=BEHAVIOUR_CATEGORY_FIELDS, category_labels=BEHAVIOUR_CATEGORY_LABELS,
-        now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"), values=values)
+        now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"),
+        values=values, shift_context=shift_context)
 
 
 @app.route("/behaviour/week/<monday>")
@@ -1107,7 +1117,8 @@ def behaviour_weekly(monday):
 
 
 @app.route("/behaviour/record", methods=["GET", "POST"])
-def behaviour_record():
+@app.route("/shift/<int:shift_id>/behaviour", methods=["GET", "POST"])
+def behaviour_record(shift_id=None):
     if "user_id" not in session:
         return redirect(url_for("login"))
     conn = get_db()
@@ -1117,9 +1128,41 @@ def behaviour_record():
         conn.close()
         return "Access denied", 403
 
+    shift = None
+    if shift_id is not None:
+        if user["role"] != "Support Worker":
+            conn.close()
+            return "Access denied", 403
+        shift = conn.execute("""
+            SELECT shift_id, client_id, status
+            FROM shifts
+            WHERE shift_id = ?
+        """, (shift_id,)).fetchone()
+        if shift is None:
+            conn.close()
+            return "Shift not found", 404
+        if shift["status"] != "Open":
+            conn.close()
+            return "Behaviour can only be recorded during an open shift.", 403
+        try:
+            validate_active_behaviour_client(conn, shift["client_id"])
+        except ValueError:
+            conn.close()
+            return "An active client is required.", 403
+        assigned = conn.execute("""
+            SELECT 1
+            FROM shift_staff
+            WHERE shift_id = ? AND user_id = ? AND active = 1
+        """, (shift_id, user["user_id"])).fetchone()
+        if assigned is None:
+            conn.close()
+            return "Access denied", 403
+
     if request.method == "GET":
-        selected = request.args.get("client_id", type=int)
-        response = _render_behaviour_record(conn, selected)
+        selected = shift["client_id"] if shift is not None else request.args.get("client_id", type=int)
+        response = _render_behaviour_record(
+            conn, selected, shift_context=shift is not None
+        )
         conn.close()
         return response
 
@@ -1132,17 +1175,23 @@ def behaviour_record():
         submitted_fields = set(request.form.keys())
         if not submitted_fields.issubset(approved_fields):
             raise ValueError("Behaviour form input is invalid.")
-        for field_name in (
-            "client_id", "occurrence_local", "notes",
-            "submission_token"
-        ):
+        required_fields = ["occurrence_local", "notes", "submission_token"]
+        if shift is None:
+            required_fields.insert(0, "client_id")
+        for field_name in required_fields:
             if len(request.form.getlist(field_name)) != 1:
                 raise ValueError("Behaviour form input is invalid.")
         ambiguity_values = request.form.getlist("repeated_hour_choice")
         if len(ambiguity_values) > 1:
             raise ValueError("Behaviour form input is invalid.")
         values = request.form.to_dict()
-        client_id = int(request.form.get("client_id", ""))
+        submitted_client = request.form.get("client_id")
+        if shift is not None:
+            if submitted_client not in (None, "", str(shift["client_id"]),):
+                raise ValueError("The shift client cannot be changed.")
+            client_id = shift["client_id"]
+        else:
+            client_id = int(submitted_client or "")
         validate_active_behaviour_client(conn, client_id)
         flags = {}
         for field in BEHAVIOUR_CATEGORY_FIELDS:
@@ -1185,8 +1234,9 @@ def behaviour_record():
             category_text = ", ".join(BEHAVIOUR_CATEGORY_LABELS[field] for field in BEHAVIOUR_CATEGORY_FIELDS if flags[field])
             log_activity(conn, "BEHAVIOUR", "behaviour_occurrence_created",
                 "Behaviour occurrence recorded", user_id=user["user_id"], client_id=client_id,
+                shift_id=shift_id,
                 related_table="behaviour_occurrences", related_id=occurrence_id,
-                details=f"Occurrence UTC: {occurrence_utc}; Categories: {category_text}", success=1,
+                details=format_behaviour_storyline_details(category_text, notes), success=1,
                 storyline_visible=True)
             conn.commit()
         except sqlite3.IntegrityError as error:
@@ -1203,7 +1253,14 @@ def behaviour_record():
         conn.close()
         return redirect(url_for("behaviour_weekly", monday=week.isoformat()))
     except (ValueError, PermissionError) as error:
-        response = _render_behaviour_record(conn, request.form.get("client_id", type=int), str(error), values)
+        selected_client = (
+            shift["client_id"] if shift is not None
+            else request.form.get("client_id", type=int)
+        )
+        response = _render_behaviour_record(
+            conn, selected_client, str(error), values,
+            shift_context=shift is not None
+        )
         conn.close()
         return response, 400
     except Exception:
@@ -1265,10 +1322,7 @@ def behaviour_occurrence_void(occurrence_id):
                 client_id=occurrence["client_id"],
                 related_table="behaviour_occurrences",
                 related_id=occurrence_id,
-                details=(
-                    f"Occurrence UTC: {occurrence['occurred_at_utc']}; "
-                    f"Categories: {categories}; Void reason: {void_reason}"
-                ), success=1, storyline_visible=True
+                details="Status: Voided", success=1, storyline_visible=True
             )
             conn.commit()
         except Exception:
@@ -14257,6 +14311,10 @@ def client_storyline(client_id):
         elif event["activity_type"] == "incident_created" and event["details"]:
             event["storyline_details"] = event["details"]
         elif event["activity_type"] == "shift_note_updated" and event["details"]:
+            event["storyline_details"] = event["details"]
+        elif event["activity_type"] == "behaviour_occurrence_created" and event["details"]:
+            event["storyline_details"] = event["details"]
+        elif event["activity_type"] == "behaviour_occurrence_voided" and event["details"]:
             event["storyline_details"] = event["details"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()

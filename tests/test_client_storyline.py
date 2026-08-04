@@ -177,13 +177,38 @@ class ClientStorylineTests(unittest.TestCase):
             details="Outcome: All consumed\nAdditional details: <b>Observed</b>"
         )
         self.add_event(
-            "behaviour_occurrence_created", "Behaviour summary",
+            "user_login", "Administrative summary",
             details="Internal behaviour detail"
         )
         page = self.client.get("/client/1/storyline").data
         self.assertIn(b"Outcome: All consumed", page)
         self.assertIn(b"&lt;b&gt;Observed&lt;/b&gt;", page)
         self.assertNotIn(b"Internal behaviour detail", page)
+
+    def test_behaviour_details_render_and_void_details_are_safe(self):
+        self.login()
+        created = (
+            "Categories:\nAggression towards others\nSelf-Harm\n\n"
+            "Notes:\nObserved <script>\nSecond line\n" + ("Long note " * 80)
+        )
+        self.add_event("behaviour_occurrence_created", "Behaviour occurrence recorded", details=created)
+        self.add_event("behaviour_occurrence_voided", "Behaviour occurrence voided", details="Status: Voided")
+        self.add_event("behaviour_occurrence_created", "Legacy Behaviour", details="")
+        self.add_event("behaviour_occurrence_created", "Hidden Behaviour", details="hidden", visible=0)
+        self.add_event("behaviour_occurrence_voided", "Failed Behaviour", details="Status: Voided", success=0)
+        self.add_event("behaviour_occurrence_created", "Other Client Behaviour", details="other", client_id=2)
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Categories:", page)
+        self.assertIn(b"Aggression towards others", page)
+        self.assertIn(b"Self-Harm", page)
+        self.assertIn(b"&lt;script&gt;", page)
+        self.assertIn(b"Second line", page)
+        self.assertIn(b"Status: Voided", page)
+        self.assertIn(b"Legacy Behaviour", page)
+        self.assertNotIn(b"Hidden Behaviour", page)
+        self.assertNotIn(b"Failed Behaviour", page)
+        self.assertNotIn(b"Other Client Behaviour", page)
+        self.assertNotIn(b"Void reason", page)
 
     def test_incident_details_render_from_activity_log_only_and_escape_values(self):
         self.login()
@@ -309,7 +334,7 @@ class ClientStorylineTests(unittest.TestCase):
             "shift_activity_created", "Blank details", details=""
         )
         self.add_event(
-            "behaviour_occurrence_created", "Hidden raw details", details="Private detail"
+            "user_login", "Hidden raw details", details="Private detail"
         )
         self.add_event(
             "shift_activity_created", "Failed Activity", details="LS", success=0
