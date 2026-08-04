@@ -72,6 +72,7 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"Active Client", page.data)
         self.assertNotIn(b"Inactive Client", page.data)
+        self.assertNotIn(b"Repeated fall-back hour", page.data)
         self.assertEqual(self.client.get("/behaviour/week/2026-01-06").status_code, 404)
         with self.client.session_transaction() as session: session["user_id"] = 2
         self.assertEqual(self.client.get("/behaviour/record").status_code, 403)
@@ -97,8 +98,15 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         self.assertEqual(self.counts(), (0, 0))
         valid = self.payload(token="T" * 43, notes="shift-scoped note")
         valid.pop("client_id")
+        valid.pop("repeated_hour_choice")
         response = self.client.post("/shift/10/behaviour", data=valid)
         self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/shift/10")
+        with self.client.session_transaction() as session:
+            self.assertEqual(
+                session.get("_flashes"),
+                [("message", "Behaviour occurrence recorded.")]
+            )
         conn = sqlite3.connect(self.path)
         row = conn.execute("""
             SELECT client_id, shift_id, user_id, related_table, related_id,
@@ -114,6 +122,24 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         self.assertEqual(row[5:7], (1, "behaviour_occurrence_created"))
         self.assertEqual(occurrence[0], 1)
 
+    def test_shift_behaviour_flash_is_rendered_once_by_base_template(self):
+        self.login()
+        response = self.client.post(
+            "/shift/10/behaviour",
+            data=self.payload(token="V" * 43)
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/shift/10")
+
+        rendered_response = self.client.get("/login")
+        rendered = rendered_response.get_data(as_text=True)
+
+        self.assertIn("Behaviour occurrence recorded.", rendered)
+        self.assertEqual(
+            rendered.count("Behaviour occurrence recorded."),
+            1
+        )
+
     def test_record_multi_category_idempotency_and_audit(self):
         self.login()
         data = self.payload(property_damage="1")
@@ -121,6 +147,8 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         second = self.client.post("/behaviour/record", data=data)
         self.assertEqual(first.status_code, 302)
         self.assertEqual(second.status_code, 302)
+        self.assertTrue(first.location.startswith("/behaviour/week/"))
+        self.assertTrue(second.location.startswith("/behaviour/week/"))
         self.assertEqual(self.counts(), (1, 1))
         conn = sqlite3.connect(self.path); row = conn.execute("SELECT notes, recorded_by_user_id, status, occurred_at_utc FROM behaviour_occurrences").fetchone(); log = conn.execute("SELECT details FROM activity_log").fetchone()[0]; conn.close()
         self.assertEqual(row[0], "private note")

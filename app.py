@@ -9,7 +9,8 @@ from flask import (
     request,
     redirect,
     session,
-    url_for
+    url_for,
+    flash
 )
 from collections.abc import Mapping
 import sqlite3
@@ -1249,6 +1250,10 @@ def behaviour_record(shift_id=None):
                 conn.close()
                 return redirect(url_for("behaviour_weekly", monday=week.isoformat()))
             raise ValueError("Behaviour submission token is invalid.")
+        if shift_id is not None:
+            flash("Behaviour occurrence recorded.")
+            conn.close()
+            return redirect(url_for("shift_dashboard", shift_id=shift_id))
         week = get_behaviour_operational_week_start(behaviour_utc_to_vancouver(occurrence_utc))
         conn.close()
         return redirect(url_for("behaviour_weekly", monday=week.isoformat()))

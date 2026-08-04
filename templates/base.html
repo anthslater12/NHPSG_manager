@@ -99,6 +99,12 @@
 
 <div class="container">
 
+{% with messages = get_flashed_messages() %}
+    {% for message in messages %}
+        <p class="success">{{ message }}</p>
+    {% endfor %}
+{% endwith %}
+
 {% block content %}
 
 {% endblock %}
