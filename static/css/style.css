@@ -289,19 +289,105 @@ td,th{
     background: #00315a;
 }
 
+.shift-dashboard-quick-entry {
+    position: sticky;
+    top: 10px;
+    z-index: 2;
+    background: white;
+}
+
+@media (max-width: 600px) {
+    .shift-dashboard-quick-entry {
+        position: static;
+    }
+}
+
 .shift-dashboard-top-row {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 20px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 22px;
     margin-bottom: 20px;
+    align-items: stretch;
 }
 
 .shift-dashboard-top-row .card {
     margin-bottom: 0;
 }
 
+.shift-dashboard-summary-card {
+    padding: 16px 18px;
+    margin: 0;
+}
+
+.shift-dashboard-summary-card h2,
+.shift-dashboard-summary-card h3 {
+    margin-top: 0;
+    margin-bottom: 8px;
+}
+
+.shift-dashboard-summary-card p {
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
+
+.shift-dashboard-notice-list {
+    margin: 10px 0 12px 20px;
+    padding: 0;
+}
+
+.shift-dashboard-notice-item {
+    margin: 0 0 8px 0;
+    padding: 0;
+    line-height: 1.35;
+}
+
+.shift-dashboard-notice-title {
+    font-weight: bold;
+}
+
+.shift-dashboard-notice-meta {
+    display: inline;
+}
+
+.shift-dashboard-quick-entry .quick-grid {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(105px, 1fr));
+    gap: 12px;
+}
+
+.shift-dashboard-quick-entry .quick-button {
+    min-width: 0;
+    padding: 16px 10px;
+    text-align: center;
+}
+
+@media (max-width: 1200px) {
+    .shift-dashboard-quick-entry .quick-grid {
+        grid-template-columns: repeat(4, minmax(140px, 1fr));
+    }
+
+    .shift-dashboard-notice-meta {
+        display: block;
+        margin-top: 2px;
+    }
+}
+
 @media (max-width: 700px) {
     .shift-dashboard-top-row {
+        grid-template-columns: 1fr;
+    }
+
+    .shift-dashboard-summary-card {
+        padding: 14px 16px;
+    }
+
+    .shift-dashboard-quick-entry .quick-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 420px) {
+    .shift-dashboard-quick-entry .quick-grid {
         grid-template-columns: 1fr;
     }
 }

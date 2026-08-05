@@ -5,7 +5,7 @@
 {% set shift_cancelled = shift.status == "Cancelled" %}
 
 <div class="shift-dashboard-top-row">
-<div class="card">
+<div class="card shift-dashboard-summary-card shift-dashboard-notices-card">
     <h2>{{ shift.shift_type }} Shift</h2>
 
     <p><strong>Date:</strong> {{ shift.shift_date }}</p>
@@ -18,7 +18,7 @@
     {% endif %}
 </div>
 
-<div class="card">
+<div class="card shift-dashboard-summary-card">
     <h3>Staff Notices</h3>
 
     <p>
@@ -27,15 +27,16 @@
     </p>
 
     {% if staff_notices %}
-        <ul class="dashboard-list">
+        <ul class="dashboard-list shift-dashboard-notice-list">
             {% for notice in staff_notices %}
-                <li>
+                <li class="shift-dashboard-notice-item">
                     <a href="{{ url_for(
                         'staff_notice_detail',
                         delivery_id=notice.delivery_id
                     ) }}">
-                        <strong>{{ notice.title }}</strong>
+                        <strong class="shift-dashboard-notice-title">{{ notice.title }}</strong>
                     </a>
+                    <span class="shift-dashboard-notice-meta">
                     — {{ notice.priority }}
                     <br>
                     {% if notice.context %}
@@ -50,6 +51,7 @@
                         <strong>Due:</strong>
                         {{ notice.due_at_display }}
                     {% endif %}
+                    </span>
                 </li>
             {% endfor %}
         </ul>
@@ -137,7 +139,7 @@
 </div>
 
 {% if not shift_cancelled %}
-<div class="card">
+<div class="card shift-dashboard-quick-entry">
     <h3>Quick Entry</h3>
 
     <div class="quick-grid">
