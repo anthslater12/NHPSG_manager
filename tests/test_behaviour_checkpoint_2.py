@@ -154,6 +154,26 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         warning = self.client.post("/shift/10/behaviour", data=second)
         self.assertEqual(warning.status_code, 200, warning.data.decode())
         self.assertIn(b"Possible duplicate Behaviour episode", warning.data)
+        rendered_warning = warning.get_data(as_text=True)
+        self.assertEqual(rendered_warning.count("<form"), 1)
+        self.assertEqual(rendered_warning.count("</form>"), 1)
+        form_start = rendered_warning.index("<form")
+        form_end = rendered_warning.index("</form>")
+        warning_start = rendered_warning.index("Possible duplicate Behaviour episode")
+        button_start = rendered_warning.index(
+            'name="confirm_distinct_episode" value="1"'
+        )
+        self.assertGreaterEqual(warning_start, form_start)
+        self.assertLess(button_start, form_end)
+        self.assertIn(
+            '<input type="hidden" name="submission_token" value="'
+            + ("E" * 43) + '">',
+            rendered_warning,
+        )
+        self.assertIn(
+            '<input type="hidden" name="record_format" value="ABC">',
+            rendered_warning,
+        )
         self.assertIn(b"2026-08-03 06:17 AM", warning.data)
         self.assertIn(b"Worker", warning.data)
         self.assertNotIn(b"2026-08-03T13:17:00Z", warning.data)
@@ -166,6 +186,12 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
             "/shift/10/behaviour", data={**second, "confirm_distinct_episode": "1"}
         )
         self.assertEqual(confirmed.status_code, 302)
+        self.assertEqual(confirmed.location, "/shift/10")
+        self.assertEqual(self.counts(), (2, 2))
+        repeated = self.client.post(
+            "/shift/10/behaviour", data={**second, "confirm_distinct_episode": "1"}
+        )
+        self.assertEqual(repeated.status_code, 302)
         self.assertEqual(self.counts(), (2, 2))
 
     def test_shift_duplicate_warning_ignores_voided_episode(self):
