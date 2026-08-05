@@ -21,6 +21,7 @@ import os
 import time
 import re
 import secrets
+import add_leave_requests_table
 
 app = Flask(__name__)
 app.secret_key = "change-this-later"
@@ -265,6 +266,20 @@ SCHEDULE_SHIFT_TYPES = ("Day", "Afternoon", "Overnight")
 SCHEDULE_VIEW_ROLES = {"Admin", "Director", "Program Manager", "Support Worker"}
 SCHEDULE_MANAGEMENT_ROLES = {"Admin", "Director", "Program Manager"}
 
+LEAVE_TYPES = (
+    "Vacation",
+    "Personal Illness",
+    "Family Responsibility",
+    "Bereavement",
+    "Medical Appointment",
+    "Leave Without Pay",
+    "Other",
+)
+LEAVE_STATUSES = ("PENDING", "APPROVED", "DECLINED", "CANCELLED")
+LEAVE_DAY_PARTS = ("FULL_DAY", "PARTIAL_DAY")
+LEAVE_COMMENT_MAX_LENGTH = 2000
+LEAVE_OTHER_REASON_MAX_LENGTH = 500
+
 #####################################################################
 # DATABASE & CORE HELPER FUNCTIONS
 #####################################################################
@@ -293,6 +308,7 @@ def get_db():
             raise RuntimeError(error_message)
 
         conn.row_factory = sqlite3.Row
+        add_leave_requests_table.migrate(conn)
         return conn
 
     except Exception as error:
@@ -13519,6 +13535,29 @@ def get_manager_alerts():
             "shift_staff_id": row["shift_staff_id"]
         })
 
+    pending_leave_count = conn.execute("""
+        SELECT COUNT(*)
+        FROM leave_requests
+        WHERE status = 'PENDING'
+    """).fetchone()[0]
+
+    if pending_leave_count:
+        request_word = "request" if pending_leave_count == 1 else "requests"
+        alerts.append({
+            "level": "warning",
+            "title": "Pending Leave Requests",
+            "message": (
+                f"{pending_leave_count} pending leave {request_word} "
+                + ("requires" if pending_leave_count == 1 else "require")
+                + " review."
+            ),
+            "action_url": url_for(
+                "leave_request_review_list",
+                status="PENDING"
+            ),
+            "action_label": "Review Pending Leave Requests"
+        })
+
     conn.close()
 
     return alerts
@@ -22398,6 +22437,592 @@ def checklist_item_new(template_id):
     conn.close()
 
     return render_template("checklist_item_new.html", template=template)
+
+#####################################################################
+# WORKER RESOURCES / LEAVE REQUESTS
+#####################################################################
+
+def _leave_authenticated_actor(conn, user_id):
+    get_active_authenticated_user(conn, user_id)
+    return conn.execute("""
+        SELECT user_id, full_name, role, active
+        FROM users
+        WHERE user_id = ? AND active = 1
+    """, (user_id,)).fetchone()
+
+
+def _leave_management_actor(conn, user_id):
+    actor = _leave_authenticated_actor(conn, user_id)
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        raise PermissionError("Current user is not allowed to review leave requests.")
+    return actor
+
+
+def _leave_utc_now():
+    return format_staff_notice_utc_datetime(get_application_now_utc())
+
+
+def _leave_display_timestamp(value):
+    try:
+        return parse_staff_notice_utc_datetime(value).astimezone(
+            VANCOUVER_TIMEZONE
+        ).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return value or ""
+
+
+def _leave_request_values(form):
+    leave_type = form.get("leave_type", "").strip()
+    other_reason = form.get("other_reason", "").strip()
+    start_date = form.get("start_date", "").strip()
+    end_date = form.get("end_date", "").strip()
+    day_part = form.get("day_part", "").strip()
+    start_time = form.get("start_time", "").strip()
+    end_time = form.get("end_time", "").strip()
+    employee_comments = form.get("employee_comments", "").strip()
+
+    if leave_type not in LEAVE_TYPES:
+        raise ValueError("Select a valid leave type.")
+    if leave_type == "Other" and not other_reason:
+        raise ValueError("An explanation is required for Other leave.")
+    if len(other_reason) > LEAVE_OTHER_REASON_MAX_LENGTH:
+        raise ValueError("The Other explanation is too long.")
+    if len(employee_comments) > LEAVE_COMMENT_MAX_LENGTH:
+        raise ValueError("Employee comments are too long.")
+
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError as error:
+        raise ValueError("Leave dates must use YYYY-MM-DD.") from error
+    if end < start:
+        raise ValueError("The end date cannot be before the start date.")
+    if day_part not in LEAVE_DAY_PARTS:
+        raise ValueError("Select full-day or partial-day leave.")
+
+    requested_days = None
+    requested_hours = None
+    if day_part == "FULL_DAY":
+        start_time = None
+        end_time = None
+        requested_days = float((end - start).days + 1)
+    else:
+        if start != end:
+            raise ValueError("Partial-day leave must use the same start and end date.")
+        if not start_time or not end_time:
+            raise ValueError("Partial-day leave requires start and end times.")
+        try:
+            parsed_start = datetime.strptime(start_time, "%H:%M")
+            parsed_end = datetime.strptime(end_time, "%H:%M")
+        except ValueError as error:
+            raise ValueError("Leave times must use HH:MM.") from error
+        if parsed_end <= parsed_start:
+            raise ValueError("The end time must be later than the start time.")
+        requested_hours = round(
+            (parsed_end - parsed_start).total_seconds() / 3600,
+            2
+        )
+
+    return {
+        "leave_type": leave_type,
+        "other_reason": other_reason or None,
+        "start_date": start_date,
+        "end_date": end_date,
+        "day_part": day_part,
+        "start_time": start_time,
+        "end_time": end_time,
+        "requested_days": requested_days,
+        "requested_hours": requested_hours,
+        "employee_comments": employee_comments or None,
+    }
+
+
+def _leave_form_values(entry=None):
+    if entry is None:
+        return {
+            "leave_type": "",
+            "other_reason": "",
+            "start_date": "",
+            "end_date": "",
+            "day_part": "FULL_DAY",
+            "start_time": "",
+            "end_time": "",
+            "employee_comments": "",
+        }
+    return {
+        "leave_type": entry["leave_type"],
+        "other_reason": entry["other_reason"] or "",
+        "start_date": entry["start_date"],
+        "end_date": entry["end_date"],
+        "day_part": entry["day_part"],
+        "start_time": entry["start_time"] or "",
+        "end_time": entry["end_time"] or "",
+        "employee_comments": entry["employee_comments"] or "",
+    }
+
+
+def _leave_prepare_entries(entries):
+    prepared = []
+    for entry in entries:
+        item = dict(entry)
+        item["submitted_display"] = _leave_display_timestamp(
+            item.get("submitted_at_utc")
+        )
+        item["updated_display"] = _leave_display_timestamp(
+            item.get("updated_at_utc")
+        )
+        item["reviewed_display"] = _leave_display_timestamp(
+            item.get("reviewed_at_utc")
+        )
+        prepared.append(item)
+    return prepared
+
+
+def _leave_log_details(values, actor_user_id, previous_status=None, new_status=None):
+    details = [
+        f"Leave type: {values['leave_type']}",
+        f"Dates: {values['start_date']} to {values['end_date']}",
+        f"Day part: {values['day_part']}",
+        f"Actor user ID: {actor_user_id}",
+    ]
+    if previous_status is not None:
+        details.append(f"Previous status: {previous_status}")
+    if new_status is not None:
+        details.append(f"New status: {new_status}")
+    return "\n".join(details)
+
+
+def _leave_log(conn, activity_type, summary, actor_user_id, request_id,
+               values, previous_status=None, new_status=None):
+    log_activity(
+        conn,
+        activity_class="LEAVE",
+        activity_type=activity_type,
+        summary=summary,
+        user_id=actor_user_id,
+        client_id=None,
+        shift_id=None,
+        related_table="leave_requests",
+        related_id=request_id,
+        details=_leave_log_details(
+            values, actor_user_id, previous_status, new_status
+        ),
+        success=1,
+        storyline_visible=False,
+    )
+
+
+def _leave_overlapping_request_exists(conn, user_id, values, exclude_id=None):
+    parameters = [user_id, values["end_date"], values["start_date"]]
+    sql = """
+        SELECT 1
+        FROM leave_requests
+        WHERE user_id = ?
+          AND status <> 'CANCELLED'
+          AND start_date <= ?
+          AND end_date >= ?
+    """
+    if exclude_id is not None:
+        sql += " AND leave_request_id <> ?"
+        parameters.append(exclude_id)
+    sql += " LIMIT 1"
+    return conn.execute(sql, parameters).fetchone() is not None
+
+
+def _leave_get_owned_request(conn, request_id, user_id):
+    return conn.execute("""
+        SELECT lr.*, u.full_name, u.role,
+               reviewer.full_name AS reviewer_name
+        FROM leave_requests lr
+        JOIN users u ON u.user_id = lr.user_id
+        LEFT JOIN users reviewer ON reviewer.user_id = lr.reviewed_by_user_id
+        WHERE lr.leave_request_id = ? AND lr.user_id = ?
+    """, (request_id, user_id)).fetchone()
+
+
+@app.route("/worker-resources")
+def worker_resources():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        _leave_authenticated_actor(conn, session["user_id"])
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+    return render_template("worker_resources.html")
+
+
+@app.route("/leave-requests")
+def leave_requests():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        actor = _leave_authenticated_actor(conn, session["user_id"])
+        entries = conn.execute("""
+            SELECT lr.*, reviewer.full_name AS reviewer_name
+            FROM leave_requests lr
+            LEFT JOIN users reviewer ON reviewer.user_id = lr.reviewed_by_user_id
+            WHERE lr.user_id = ?
+            ORDER BY lr.start_date DESC, lr.leave_request_id DESC
+        """, (actor["user_id"],)).fetchall()
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+    return render_template(
+        "leave_request_list.html",
+        entries=_leave_prepare_entries(entries),
+    )
+
+
+def _render_leave_form(values, actor, error=None, entry=None):
+    return render_template(
+        "leave_request_form.html",
+        values=values,
+        error=error,
+        entry=entry,
+        actor=actor,
+        leave_types=LEAVE_TYPES,
+        token=secrets.token_hex(32) if entry is None else None,
+    )
+
+
+@app.route("/leave-requests/new", methods=["GET", "POST"])
+def leave_request_new():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        actor = _leave_authenticated_actor(conn, session["user_id"])
+        if request.method == "GET":
+            return _render_leave_form(_leave_form_values(), actor)
+
+        try:
+            values = _leave_request_values(request.form)
+        except ValueError as error:
+            return _render_leave_form(
+                dict(request.form), actor, str(error)
+            ), 400
+
+        token = request.form.get("submission_token", "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
+            return _render_leave_form(
+                dict(request.form), actor,
+                "A valid submission token is required."
+            ), 400
+
+        now = _leave_utc_now()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute("""
+                INSERT INTO leave_requests (
+                    user_id, leave_type, other_reason, start_date, end_date,
+                    day_part, start_time, end_time, requested_days,
+                    requested_hours, employee_comments, status,
+                    submitted_at_utc, updated_at_utc, submission_token
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
+            """, (
+                actor["user_id"], values["leave_type"], values["other_reason"],
+                values["start_date"], values["end_date"], values["day_part"],
+                values["start_time"], values["end_time"], values["requested_days"],
+                values["requested_hours"], values["employee_comments"],
+                now, now, token,
+            ))
+            request_id = cursor.lastrowid
+            _leave_log(
+                conn,
+                "leave_request_created",
+                f"Leave request submitted: {values['leave_type']}, "
+                f"{values['start_date']} to {values['end_date']}",
+                actor["user_id"], request_id, values,
+                new_status="PENDING",
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            if conn.in_transaction:
+                conn.rollback()
+            existing = conn.execute("""
+                SELECT leave_request_id, user_id
+                FROM leave_requests WHERE submission_token = ?
+            """, (token,)).fetchone()
+            if existing and existing["user_id"] == actor["user_id"]:
+                flash("This leave request was already submitted.")
+                return redirect(url_for("leave_requests"))
+            return _render_leave_form(
+                dict(request.form), actor,
+                "This submission could not be recorded."
+            ), 409
+        if _leave_overlapping_request_exists(conn, actor["user_id"], values, request_id):
+            flash("Warning: this request overlaps another non-cancelled request.")
+        flash("Leave request submitted.")
+        return redirect(url_for("leave_requests"))
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+
+@app.route("/leave-requests/<int:leave_request_id>")
+def leave_request_detail(leave_request_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        actor = _leave_authenticated_actor(conn, session["user_id"])
+        entry = _leave_get_owned_request(
+            conn, leave_request_id, actor["user_id"]
+        )
+        if entry is None:
+            return "Leave request not found", 404
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+    return render_template(
+        "leave_request_detail.html",
+        entry=_leave_prepare_entries([entry])[0],
+    )
+
+
+@app.route("/leave-requests/<int:leave_request_id>/edit", methods=["GET", "POST"])
+def leave_request_edit(leave_request_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        actor = _leave_authenticated_actor(conn, session["user_id"])
+        entry = _leave_get_owned_request(
+            conn, leave_request_id, actor["user_id"]
+        )
+        if entry is None:
+            return "Leave request not found", 404
+        if entry["status"] != "PENDING":
+            return "Only pending leave requests can be edited.", 409
+        if request.method == "GET":
+            return _render_leave_form(
+                _leave_form_values(entry), actor, entry=entry
+            )
+        try:
+            values = _leave_request_values(request.form)
+        except ValueError as error:
+            return _render_leave_form(
+                dict(request.form), actor, str(error), entry
+            ), 400
+        now = _leave_utc_now()
+        conn.execute("BEGIN IMMEDIATE")
+        updated = conn.execute("""
+            UPDATE leave_requests
+            SET leave_type = ?, other_reason = ?, start_date = ?, end_date = ?,
+                day_part = ?, start_time = ?, end_time = ?, requested_days = ?,
+                requested_hours = ?, employee_comments = ?, updated_at_utc = ?
+            WHERE leave_request_id = ? AND user_id = ? AND status = 'PENDING'
+        """, (
+            values["leave_type"], values["other_reason"], values["start_date"],
+            values["end_date"], values["day_part"], values["start_time"],
+            values["end_time"], values["requested_days"], values["requested_hours"],
+            values["employee_comments"], now, leave_request_id, actor["user_id"],
+        ))
+        if updated.rowcount != 1:
+            conn.rollback()
+            flash("This leave request changed and could not be edited.")
+            return redirect(url_for("leave_requests"))
+        _leave_log(
+            conn,
+            "leave_request_updated",
+            f"Leave request updated: {values['leave_type']}, "
+            f"{values['start_date']} to {values['end_date']}",
+            actor["user_id"], leave_request_id, values,
+            previous_status="PENDING", new_status="PENDING",
+        )
+        conn.commit()
+        flash("Leave request updated.")
+        return redirect(url_for("leave_requests"))
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+
+@app.route("/leave-requests/<int:leave_request_id>/cancel", methods=["GET", "POST"])
+def leave_request_cancel(leave_request_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        actor = _leave_authenticated_actor(conn, session["user_id"])
+        entry = _leave_get_owned_request(
+            conn, leave_request_id, actor["user_id"]
+        )
+        if entry is None:
+            return "Leave request not found", 404
+        if entry["status"] != "PENDING":
+            return "Only pending leave requests can be cancelled.", 409
+        if request.method == "GET":
+            return render_template("leave_request_cancel_confirm.html", entry=entry)
+        conn.execute("BEGIN IMMEDIATE")
+        now = _leave_utc_now()
+        updated = conn.execute("""
+            UPDATE leave_requests
+            SET status = 'CANCELLED', updated_at_utc = ?,
+                cancelled_at_utc = ?, cancelled_by_user_id = ?
+            WHERE leave_request_id = ? AND user_id = ? AND status = 'PENDING'
+        """, (now, now, actor["user_id"], leave_request_id, actor["user_id"]))
+        if updated.rowcount != 1:
+            conn.rollback()
+            flash("This leave request changed and could not be cancelled.")
+            return redirect(url_for("leave_requests"))
+        values = dict(entry)
+        _leave_log(
+            conn,
+            "leave_request_cancelled",
+            f"Leave request cancelled: {entry['leave_type']}, "
+            f"{entry['start_date']} to {entry['end_date']}",
+            actor["user_id"], leave_request_id, values,
+            previous_status="PENDING", new_status="CANCELLED",
+        )
+        conn.commit()
+        flash("Leave request cancelled.")
+        return redirect(url_for("leave_requests"))
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+
+@app.route("/manager-review/leave-requests")
+def leave_request_review_list():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        _leave_management_actor(conn, session["user_id"])
+        status_filter = request.args.get("status", "ALL")
+        if status_filter not in ("ALL", *LEAVE_STATUSES):
+            status_filter = "ALL"
+        if status_filter == "ALL":
+            entries = conn.execute("""
+                SELECT lr.*, submitter.full_name, submitter.role,
+                       reviewer.full_name AS reviewer_name
+                FROM leave_requests lr
+                JOIN users submitter ON submitter.user_id = lr.user_id
+                LEFT JOIN users reviewer ON reviewer.user_id = lr.reviewed_by_user_id
+                ORDER BY CASE lr.status WHEN 'PENDING' THEN 0 ELSE 1 END,
+                         lr.start_date DESC, lr.leave_request_id DESC
+            """).fetchall()
+        else:
+            entries = conn.execute("""
+                SELECT lr.*, submitter.full_name, submitter.role,
+                       reviewer.full_name AS reviewer_name
+                FROM leave_requests lr
+                JOIN users submitter ON submitter.user_id = lr.user_id
+                LEFT JOIN users reviewer ON reviewer.user_id = lr.reviewed_by_user_id
+                WHERE lr.status = ?
+                ORDER BY lr.start_date DESC, lr.leave_request_id DESC
+            """, (status_filter,)).fetchall()
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+    return render_template(
+        "leave_request_review_list.html",
+        entries=_leave_prepare_entries(entries),
+        status_filter=status_filter,
+        statuses=LEAVE_STATUSES,
+    )
+
+
+def _leave_review_entry(conn, request_id):
+    return conn.execute("""
+        SELECT lr.*, submitter.full_name, submitter.role,
+               reviewer.full_name AS reviewer_name
+        FROM leave_requests lr
+        JOIN users submitter ON submitter.user_id = lr.user_id
+        LEFT JOIN users reviewer ON reviewer.user_id = lr.reviewed_by_user_id
+        WHERE lr.leave_request_id = ?
+    """, (request_id,)).fetchone()
+
+
+@app.route("/manager-review/leave-requests/<int:leave_request_id>")
+def leave_request_review_detail(leave_request_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        _leave_management_actor(conn, session["user_id"])
+        entry = _leave_review_entry(conn, leave_request_id)
+        if entry is None:
+            return "Leave request not found", 404
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+    return render_template(
+        "leave_request_review_detail.html",
+        entry=_leave_prepare_entries([entry])[0],
+    )
+
+
+def _leave_review_decision(leave_request_id, decision):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        actor = _leave_management_actor(conn, session["user_id"])
+        entry = _leave_review_entry(conn, leave_request_id)
+        if entry is None:
+            return "Leave request not found", 404
+        if entry["user_id"] == actor["user_id"]:
+            return "A manager cannot decide their own leave request.", 403
+        management_comments = request.form.get("management_comments", "").strip()
+        if len(management_comments) > LEAVE_COMMENT_MAX_LENGTH:
+            return "Management comments are too long.", 400
+        if decision == "DECLINED" and not management_comments:
+            return "A decline comment is required.", 400
+        now = _leave_utc_now()
+        conn.execute("BEGIN IMMEDIATE")
+        updated = conn.execute("""
+            UPDATE leave_requests
+            SET status = ?, updated_at_utc = ?, reviewed_by_user_id = ?,
+                reviewed_at_utc = ?, management_comments = ?
+            WHERE leave_request_id = ? AND status = 'PENDING'
+        """, (
+            decision, now, actor["user_id"], now,
+            management_comments or None, leave_request_id,
+        ))
+        if updated.rowcount != 1:
+            conn.rollback()
+            flash("This leave request has already been decided.")
+            return redirect(url_for("leave_request_review_detail", leave_request_id=leave_request_id))
+        values = dict(entry)
+        _leave_log(
+            conn,
+            f"leave_request_{decision.lower()}",
+            f"Leave request {decision.lower()}: {entry['leave_type']}, "
+            f"{entry['start_date']} to {entry['end_date']}",
+            actor["user_id"], leave_request_id, values,
+            previous_status="PENDING", new_status=decision,
+        )
+        conn.commit()
+        flash(f"Leave request {decision.lower()}.")
+        return redirect(url_for("leave_request_review_detail", leave_request_id=leave_request_id))
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+
+@app.route("/manager-review/leave-requests/<int:leave_request_id>/approve", methods=["POST"])
+def leave_request_approve(leave_request_id):
+    return _leave_review_decision(leave_request_id, "APPROVED")
+
+
+@app.route("/manager-review/leave-requests/<int:leave_request_id>/decline", methods=["POST"])
+def leave_request_decline(leave_request_id):
+    return _leave_review_decision(leave_request_id, "DECLINED")
+
 
 #####################################################################
 # ACTIVITY LOG

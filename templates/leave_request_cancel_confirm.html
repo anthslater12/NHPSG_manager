@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Cancel Leave Request</h2>
+    <p>Cancel {{ entry.leave_type }} from {{ entry.start_date }} to {{ entry.end_date }}?</p>
+    <form method="post">
+        <button type="submit">Confirm Cancellation</button>
+        <a href="{{ url_for('leave_request_detail', leave_request_id=entry.leave_request_id) }}">Keep Request</a>
+    </form>
+</div>
+{% endblock %}

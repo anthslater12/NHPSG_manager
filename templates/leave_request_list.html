@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>My Leave Requests</h2>
+    <p><a href="{{ url_for('leave_request_new') }}">Request Leave</a></p>
+    {% if entries %}
+    <table>
+        <thead><tr><th>Type</th><th>Dates</th><th>Duration</th><th>Status</th><th>Submitted</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for entry in entries %}
+        <tr>
+            <td>{{ entry.leave_type }}{% if entry.leave_type == 'Other' and entry.other_reason %}<br>{{ entry.other_reason }}{% endif %}</td>
+            <td>{{ entry.start_date }} to {{ entry.end_date }}</td>
+            <td>{% if entry.day_part == 'FULL_DAY' %}{{ entry.requested_days }} day(s){% else %}{{ entry.requested_hours }} hour(s){% endif %}</td>
+            <td>{{ entry.status }}</td>
+            <td>{{ entry.submitted_display }}</td>
+            <td>
+                <a href="{{ url_for('leave_request_detail', leave_request_id=entry.leave_request_id) }}">View</a>
+                {% if entry.status == 'PENDING' %}
+                | <a href="{{ url_for('leave_request_edit', leave_request_id=entry.leave_request_id) }}">Edit</a>
+                | <a href="{{ url_for('leave_request_cancel', leave_request_id=entry.leave_request_id) }}">Cancel</a>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No leave requests have been submitted.</p>{% endif %}
+</div>
+{% endblock %}

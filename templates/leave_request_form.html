@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>{% if entry %}Edit Leave Request{% else %}Request Leave{% endif %}</h2>
+    <p>Employee: {{ actor.full_name }} ({{ actor.role }})</p>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+    <form method="post" class="leave-request-form">
+        {% if not entry %}
+        <input type="hidden" name="submission_token" value="{{ request.form.get('submission_token', '') or token|default('') }}">
+        {% endif %}
+
+        <div class="leave-request-grid">
+            <div class="leave-request-field">
+                <label for="leave_type">Leave type</label>
+                <select id="leave_type" name="leave_type" required>
+                    <option value="">Select leave type</option>
+                    {% for leave_type in leave_types %}
+                    <option value="{{ leave_type }}" {% if values.leave_type == leave_type %}selected{% endif %}>{{ leave_type }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <fieldset class="leave-request-field leave-duration-field">
+                <legend>Leave duration</legend>
+                <div class="leave-day-part-options">
+                    <label class="leave-day-part-option" for="day_part_full">
+                        <input id="day_part_full" type="radio" name="day_part" value="FULL_DAY" {% if values.day_part == 'FULL_DAY' %}checked{% endif %}>
+                        <span>Full Day</span>
+                    </label>
+                    <label class="leave-day-part-option" for="day_part_partial">
+                        <input id="day_part_partial" type="radio" name="day_part" value="PARTIAL_DAY" {% if values.day_part == 'PARTIAL_DAY' %}checked{% endif %}>
+                        <span>Partial Day</span>
+                    </label>
+                </div>
+            </fieldset>
+
+            <div id="other_reason_row" class="leave-request-field leave-request-full-row{% if values.leave_type != 'Other' %} leave-request-conditional-hidden{% endif %}">
+                <label for="other_reason">Other explanation</label>
+                <input id="other_reason" name="other_reason" value="{{ values.other_reason }}" maxlength="500"{% if values.leave_type != 'Other' %} disabled{% endif %}>
+            </div>
+
+            <div class="leave-request-field">
+                <label for="start_date">Start date</label>
+                <input id="start_date" type="date" name="start_date" value="{{ values.start_date }}" required>
+            </div>
+
+            <div class="leave-request-field">
+                <label for="end_date">End date</label>
+                <input id="end_date" type="date" name="end_date" value="{{ values.end_date }}" required>
+            </div>
+
+            <div id="partial_time_row" class="leave-request-field leave-request-full-row{% if values.day_part != 'PARTIAL_DAY' %} leave-request-conditional-hidden{% endif %}">
+                <div class="leave-request-time-grid">
+                    <div>
+                        <label for="start_time">Partial-day Start Time</label>
+                        <input id="start_time" type="time" name="start_time" value="{{ values.start_time }}"{% if values.day_part != 'PARTIAL_DAY' %} disabled{% endif %}>
+                    </div>
+                    <div>
+                        <label for="end_time">Partial-day End Time</label>
+                        <input id="end_time" type="time" name="end_time" value="{{ values.end_time }}"{% if values.day_part != 'PARTIAL_DAY' %} disabled{% endif %}>
+                    </div>
+                </div>
+            </div>
+
+            <div class="leave-request-field leave-request-full-row">
+                <label for="employee_comments">Comments</label>
+                <textarea id="employee_comments" name="employee_comments" maxlength="2000">{{ values.employee_comments }}</textarea>
+            </div>
+        </div>
+
+        <div class="leave-request-actions">
+            <button type="submit">{% if entry %}Save Changes{% else %}Submit Request{% endif %}</button>
+            <a href="{{ url_for('leave_requests') }}">Cancel</a>
+        </div>
+    </form>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const leaveType = document.getElementById("leave_type");
+    const otherRow = document.getElementById("other_reason_row");
+    const otherReason = document.getElementById("other_reason");
+    const partialTimeRow = document.getElementById("partial_time_row");
+    const partialInputs = [
+        document.getElementById("start_time"),
+        document.getElementById("end_time")
+    ];
+    const dayPartInputs = document.querySelectorAll("input[name='day_part']");
+
+    function updateConditionalFields() {
+        const isOther = leaveType.value === "Other";
+        const isPartial = document.getElementById("day_part_partial").checked;
+        otherRow.classList.toggle("leave-request-conditional-hidden", !isOther);
+        otherReason.disabled = !isOther;
+        partialTimeRow.classList.toggle("leave-request-conditional-hidden", !isPartial);
+        partialInputs.forEach(function (input) {
+            input.disabled = !isPartial;
+        });
+    }
+
+    leaveType.addEventListener("change", updateConditionalFields);
+    dayPartInputs.forEach(function (input) {
+        input.addEventListener("change", updateConditionalFields);
+    });
+    updateConditionalFields();
+});
+</script>
+{% endblock %}

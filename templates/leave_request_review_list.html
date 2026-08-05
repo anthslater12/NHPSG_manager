@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Leave Requests</h2>
+    <p>
+        {% for status in ('ALL',) + statuses %}
+            <a href="{{ url_for('leave_request_review_list', status=status) }}">{{ status }}</a>{% if not loop.last %} | {% endif %}
+        {% endfor %}
+    </p>
+    {% if entries %}
+    <table>
+        <thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th>Status</th><th>Submitted</th><th>Review</th></tr></thead>
+        <tbody>
+        {% for entry in entries %}
+        <tr>
+            <td>{{ entry.full_name }}<br>{{ entry.role }}</td>
+            <td>{{ entry.leave_type }}</td>
+            <td>{{ entry.start_date }} to {{ entry.end_date }}</td>
+            <td>{{ entry.status }}</td>
+            <td>{{ entry.submitted_display }}</td>
+            <td><a href="{{ url_for('leave_request_review_detail', leave_request_id=entry.leave_request_id) }}">Open</a></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<p>No leave requests match this filter.</p>{% endif %}
+</div>
+{% endblock %}

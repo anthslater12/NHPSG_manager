@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Worker Resources</h2>
+    <p>Access staff resources and your leave request history.</p>
+</div>
+
+<div class="management-review-grid">
+    <div class="card">
+        <h3>Leave Requests</h3>
+        <p>Request leave or review your previous requests.</p>
+        <p>
+            <a href="{{ url_for('leave_request_new') }}">Request Leave</a>
+            |
+            <a href="{{ url_for('leave_requests') }}">My Leave Requests</a>
+        </p>
+    </div>
+
+    <div class="card">
+        <h3>Staff Notices</h3>
+        <p>View notices and staff information assigned to you.</p>
+        <a href="{{ url_for('staff_notice_history') }}">Open Staff Notices</a>
+    </div>
+
+    <div class="card">
+        <h3>Forms and Documents</h3>
+        <p>Future forms and documents will be added here.</p>
+    </div>
+</div>
+{% endblock %}

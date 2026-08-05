@@ -186,6 +186,81 @@ textarea{
 
 }
 
+.leave-request-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 18px;
+    align-items: start;
+}
+
+.leave-request-field > label,
+.leave-request-field > legend {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: bold;
+}
+
+.leave-request-field {
+    min-width: 0;
+}
+
+.leave-request-full-row {
+    grid-column: 1 / -1;
+}
+
+.leave-duration-field {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.leave-day-part-options {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 18px;
+    min-height: 38px;
+}
+
+.leave-day-part-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-weight: normal;
+    cursor: pointer;
+}
+
+.leave-day-part-option input[type="radio"] {
+    width: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.leave-request-time-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+}
+
+.leave-request-time-grid label {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: bold;
+}
+
+.leave-request-conditional-hidden {
+    display: none;
+}
+
+.leave-request-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 18px;
+}
+
 @media (max-width:700px) {
 
     .form-row {
@@ -198,6 +273,15 @@ textarea{
 
         width:100%;
 
+    }
+
+    .leave-request-grid,
+    .leave-request-time-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .leave-request-full-row {
+        grid-column: auto;
     }
 
 }

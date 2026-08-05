@@ -24,6 +24,11 @@
                                                 shift_staff_id=alert.shift_staff_id) }}">
                                 Manager Sign Off
                             </a>
+                        {% elif alert.action_url %}
+                            <br>
+                            <a href="{{ alert.action_url }}">
+                                {{ alert.action_label }}
+                            </a>
                         {% endif %}
                     </li>
                 {% endfor %}

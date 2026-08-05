@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Leave Request Review</h2>
+    <p><strong>Employee:</strong> {{ entry.full_name }} ({{ entry.role }})</p>
+    <p><strong>Type:</strong> {{ entry.leave_type }}{% if entry.other_reason %} — {{ entry.other_reason }}{% endif %}</p>
+    <p><strong>Dates:</strong> {{ entry.start_date }} to {{ entry.end_date }}</p>
+    <p><strong>Duration:</strong> {% if entry.day_part == 'FULL_DAY' %}{{ entry.requested_days }} day(s){% else %}{{ entry.requested_hours }} hour(s), {{ entry.start_time }} to {{ entry.end_time }}{% endif %}</p>
+    <p><strong>Status:</strong> {{ entry.status }}</p>
+    <p><strong>Submitted:</strong> {{ entry.submitted_display }}</p>
+    {% if entry.reviewed_display %}<p><strong>Reviewed:</strong> {{ entry.reviewed_display }}{% if entry.reviewer_name %} by {{ entry.reviewer_name }}{% endif %}</p>{% endif %}
+    {% if entry.employee_comments %}<p><strong>Employee comments:</strong><br>{{ entry.employee_comments }}</p>{% endif %}
+    {% if entry.management_comments %}<p><strong>Management comments:</strong><br>{{ entry.management_comments }}</p>{% endif %}
+
+    {% if entry.status == 'PENDING' %}
+    <form method="post" action="{{ url_for('leave_request_approve', leave_request_id=entry.leave_request_id) }}">
+        <label for="approve_comments">Approval comments (optional)</label>
+        <textarea id="approve_comments" name="management_comments" maxlength="2000"></textarea>
+        <button type="submit">Approve</button>
+    </form>
+    <form method="post" action="{{ url_for('leave_request_decline', leave_request_id=entry.leave_request_id) }}">
+        <label for="decline_comments">Decline comments (required)</label>
+        <textarea id="decline_comments" name="management_comments" maxlength="2000" required></textarea>
+        <button type="submit">Decline</button>
+    </form>
+    {% endif %}
+    <p><a href="{{ url_for('leave_request_review_list') }}">Back to Leave Requests</a></p>
+</div>
+{% endblock %}
