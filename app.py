@@ -801,6 +801,18 @@ def format_incident_storyline_details(
     return "\n".join(lines)
 
 
+def format_toileting_local_datetime_display(value):
+    """Format the stored Vancouver-local Toileting datetime for management UI."""
+    if not isinstance(value, str) or not value.strip():
+        return "Date/time unavailable"
+    try:
+        return datetime.strptime(
+            value.strip(), "%Y-%m-%dT%H:%M"
+        ).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return "Date/time unavailable"
+
+
 def format_behaviour_storyline_details(category_text, notes=None):
     details = "Categories:\n" + category_text.replace(", ", "\n")
     if notes and notes.strip():
@@ -17336,6 +17348,12 @@ def toileting_review_list():
         session["user_id"],
     )).fetchall()
 
+    entries = [dict(entry) for entry in entries]
+    for entry in entries:
+        entry["event_local_display"] = format_toileting_local_datetime_display(
+            entry["event_datetime"]
+        )
+
     conn.close()
 
     reviews_by_entry = {}
@@ -17949,6 +17967,11 @@ def toileting_review_detail(entry_id):
         conn.close()
         return "Toileting event not found", 404
 
+    entry = dict(entry)
+    entry["event_local_display"] = format_toileting_local_datetime_display(
+        entry["event_datetime"]
+    )
+
     review_history = conn.execute("""
         SELECT
             ack.acknowledgement_id,
@@ -18155,6 +18178,11 @@ def toileting_action_new(entry_id):
         conn.close()
         return "Toileting event not found", 404
 
+    entry = dict(entry)
+    entry["event_local_display"] = format_toileting_local_datetime_display(
+        entry["event_datetime"]
+    )
+
     active_users = conn.execute("""
         SELECT
             user_id,
@@ -18240,7 +18268,7 @@ def toileting_action_new(entry_id):
 
     default_description = (
         f"Toileting event: {entry['event_type']}\n"
-        f"Event date and time: {entry['event_datetime']}\n"
+        f"Event date and time: {entry['event_local_display']}\n"
         f"Shift: {entry['shift_date']} "
         f"{entry['shift_type']}\n"
         f"Location: {entry['location']}"
