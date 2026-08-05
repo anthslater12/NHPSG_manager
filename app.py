@@ -755,7 +755,8 @@ def _storyline_time(local_datetime):
 
 def format_toileting_storyline_details(
     location, bm_size, bm_consistency,
-    behaviour_before, behaviour_during, behaviour_after, behaviour_comments
+    behaviour_before, behaviour_during, behaviour_after, behaviour_comments,
+    general_comments=None
 ):
     lines = []
     for label, value in (
@@ -776,6 +777,10 @@ def format_toileting_storyline_details(
     )
     if behaviour:
         lines.append(f"Behaviour: {behaviour}")
+    if general_comments and str(general_comments).strip():
+        lines.append(
+            f"Additional notes:\n{str(general_comments).strip()}"
+        )
     return lines
 
 
@@ -14498,7 +14503,7 @@ def toileting_event_new(shift_id):
         toileting_details = format_toileting_storyline_details(
             location, bm_size, bm_consistency,
             behaviour_before, behaviour_during, behaviour_after,
-            behaviour_comments
+            behaviour_comments, general_comments
         )
 
         log_activity(
