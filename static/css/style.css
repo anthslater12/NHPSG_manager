@@ -392,13 +392,40 @@ td,th{
     margin: 18px 0;
 }
 
+.schedule-worker-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+    gap: 6px 18px;
+}
+
 .schedule-worker-option {
-    display: block;
-    margin: 6px 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    width: fit-content;
+    margin: 4px 0;
+    cursor: pointer;
+}
+
+.schedule-worker-option input[type="checkbox"] {
+    width: auto;
+    min-width: 0;
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.schedule-worker-option span {
+    width: auto;
+    margin: 0;
 }
 
 @media (max-width: 700px) {
     .schedule-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .schedule-worker-options {
         grid-template-columns: 1fr;
     }
 }

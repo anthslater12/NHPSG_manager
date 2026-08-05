@@ -56,14 +56,16 @@
 
         <fieldset>
             <legend>Assigned active Support Workers</legend>
+            <div class="schedule-worker-options">
             {% for worker in workers %}
             <label class="schedule-worker-option">
                 <input type="checkbox" name="worker_ids" value="{{ worker.user_id }}"{% if worker.user_id in values.worker_ids or worker.user_id in existing_worker_ids %} checked{% endif %}>
-                {{ worker.full_name }}
+                <span>{{ worker.full_name }}</span>
             </label>
             {% else %}
             <p>No active Support Workers available.</p>
             {% endfor %}
+            </div>
         </fieldset>
 
         <button type="submit">{% if editing %}Save changes{% else %}Create schedule{% endif %}</button>
