@@ -5,7 +5,7 @@
 {% set shift_cancelled = shift.status == "Cancelled" %}
 
 <div class="shift-dashboard-top-row">
-<div class="card shift-dashboard-summary-card shift-dashboard-notices-card">
+<div class="card shift-dashboard-summary-card">
     <h2>{{ shift.shift_type }} Shift</h2>
 
     <p><strong>Date:</strong> {{ shift.shift_date }}</p>
@@ -18,7 +18,7 @@
     {% endif %}
 </div>
 
-<div class="card shift-dashboard-summary-card">
+<div class="card shift-dashboard-summary-card shift-dashboard-notices-card">
     <h3>Staff Notices</h3>
 
     <p>
@@ -66,6 +66,54 @@
     </p>
 </div>
 </div>
+
+{% if not shift_cancelled %}
+<div class="card shift-dashboard-quick-entry">
+    <h3>Quick Entry</h3>
+
+    <div class="quick-grid">
+        {% if shift_notes_editable %}
+            <a class="quick-button" href="/shift/{{ shift.shift_id }}/note">
+                Edit Staff Notes
+            </a>
+        {% endif %}
+        <a
+            class="quick-button"
+            href="{{ url_for(
+                "toileting_event_new",
+                shift_id=shift["shift_id"]
+            ) }}"
+        >
+            + Toileting
+        </a>
+        {% if food_fluid_authorized %}
+            <a
+                class="quick-button"
+                href="{{ url_for(
+                    'food_fluid_entry_new',
+                    shift_id=shift.shift_id
+                ) }}"
+            >
+                + Food &amp; Fluid
+            </a>
+        {% endif %}
+        {% if sleep_authorized %}
+            <a class="quick-button" href="{{ url_for('sleep_events', shift_id=shift.shift_id) }}">
+                + Sleep
+            </a>
+        {% endif %}
+        <a
+            class="quick-button"
+            href="{{ url_for('shift_activities', shift_id=shift.shift_id) }}"
+        >
+            + Activity
+        </a>
+        <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
+        <a class="quick-button" href="/incident/new">+ Incident</a>
+        <a class="quick-button" href="{{ url_for('client_storyline', client_id=shift.client_id) }}">Storyline</a>
+    </div>
+</div>
+{% endif %}
 
 <div class="card">
     <h3>Staff Notes for this Shift</h3>
@@ -137,54 +185,6 @@
         <p>No staff signed on yet.</p>
     {% endif %}
 </div>
-
-{% if not shift_cancelled %}
-<div class="card shift-dashboard-quick-entry">
-    <h3>Quick Entry</h3>
-
-    <div class="quick-grid">
-        {% if shift_notes_editable %}
-            <a class="quick-button" href="/shift/{{ shift.shift_id }}/note">
-                Edit Staff Notes
-            </a>
-        {% endif %}
-        <a
-            class="quick-button"
-            href="{{ url_for(
-                "toileting_event_new",
-                shift_id=shift["shift_id"]
-            ) }}"
-        >
-            + Toileting
-        </a>
-        {% if food_fluid_authorized %}
-            <a
-                class="quick-button"
-                href="{{ url_for(
-                    'food_fluid_entry_new',
-                    shift_id=shift.shift_id
-                ) }}"
-            >
-                + Food &amp; Fluid
-            </a>
-        {% endif %}
-        {% if sleep_authorized %}
-            <a class="quick-button" href="{{ url_for('sleep_events', shift_id=shift.shift_id) }}">
-                + Sleep
-            </a>
-        {% endif %}
-        <a
-            class="quick-button"
-            href="{{ url_for('shift_activities', shift_id=shift.shift_id) }}"
-        >
-            + Activity
-        </a>
-        <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
-        <a class="quick-button" href="/incident/new">+ Incident</a>
-        <a class="quick-button" href="{{ url_for('client_storyline', client_id=shift.client_id) }}">Storyline</a>
-    </div>
-</div>
-{% endif %}
 
 {% if sleep_authorized %}
 <div class="card">

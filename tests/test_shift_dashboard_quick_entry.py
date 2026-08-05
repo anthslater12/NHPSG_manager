@@ -38,6 +38,27 @@ class ShiftDashboardQuickEntryTests(unittest.TestCase):
         self.assertIn("<h3>Quick Entry</h3>", card)
         self.assertEqual(self.template.count("<h3>Quick Entry</h3>"), 1)
 
+    def test_quick_entry_follows_closed_top_row_as_full_width_card(self):
+        top_row_end = self.template.index(
+            "</div>\n</div>\n\n{% if not shift_cancelled %}"
+        )
+        quick_entry_start = self.template.index(
+            '<div class="card shift-dashboard-quick-entry">'
+        )
+        self.assertGreater(quick_entry_start, top_row_end)
+        self.assertNotIn(
+            "shift-dashboard-quick-entry",
+            self.template[:top_row_end],
+        )
+        staff_notes_start = self.template.index(
+            '<div class="card">\n    <h3>Staff Notes for this Shift</h3>'
+        )
+        staffing_start = self.template.index(
+            "Historical Shift Staffing"
+        )
+        self.assertLess(quick_entry_start, staff_notes_start)
+        self.assertLess(quick_entry_start, staffing_start)
+
     def test_only_top_row_cards_receive_compact_summary_class(self):
         self.assertEqual(
             self.template.count("shift-dashboard-summary-card"), 2
@@ -47,6 +68,7 @@ class ShiftDashboardQuickEntryTests(unittest.TestCase):
             self.template.index("</div>\n\n<div class=\"card\">")
         ]
         self.assertEqual(top_row.count("shift-dashboard-summary-card"), 2)
+        self.assertEqual(top_row.count("shift-dashboard-notices-card"), 1)
         self.assertNotIn(
             "shift-dashboard-summary-card",
             self.template[self.template.index("<h3>Quick Entry</h3>"):]
