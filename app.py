@@ -1014,12 +1014,11 @@ def format_toileting_storyline_details(
 
 
 def format_incident_storyline_details(
-    location, severity, injuries, injury_details, actions_taken,
-    description, follow_up_required, police_notified, medical_treatment
+    location, injuries, injury_details, actions_taken,
+    description, follow_up_required
 ):
     lines = [
         f"Location: {location}",
-        f"Severity: {severity or 'Normal'}",
         f"Injury: {'Yes' if injuries else 'No'}",
     ]
     if injury_details and str(injury_details).strip():
@@ -1029,10 +1028,23 @@ def format_incident_storyline_details(
     lines.extend((
         f"Description: {description}",
         f"Follow-up required: {'Yes' if follow_up_required else 'No'}",
-        f"Police notified: {'Yes' if police_notified else 'No'}",
-        f"Medical treatment: {'Yes' if medical_treatment else 'No'}",
     ))
     return "\n".join(lines)
+
+
+def filter_incident_storyline_details(details):
+    """Hide obsolete incident labels without rewriting audit snapshots."""
+    if not details:
+        return details
+    suppressed_labels = (
+        "Severity:",
+        "Police notified:",
+        "Medical treatment:",
+    )
+    return "\n".join(
+        line for line in str(details).splitlines()
+        if not line.startswith(suppressed_labels)
+    )
 
 
 def format_toileting_local_datetime_display(value):
@@ -15549,7 +15561,9 @@ def client_storyline(client_id):
         elif event["activity_type"] == "toileting_event_created" and event["details"]:
             event["storyline_details"] = event["details"]
         elif event["activity_type"] == "incident_created" and event["details"]:
-            event["storyline_details"] = event["details"]
+            event["storyline_details"] = filter_incident_storyline_details(
+                event["details"]
+            )
         elif event["activity_type"] == "shift_note_updated" and event["details"]:
             event["storyline_details"] = event["details"]
         elif event["activity_type"] == "behaviour_occurrence_created" and event["details"]:
@@ -17317,11 +17331,23 @@ def incident_new():
         witnesses = request.form.get("witnesses", "")
         injury_details = request.form.get("injury_details", "")
 
-        injuries = 1 if "injuries" in request.form else 0
+        injuries = 1 if "injury" in request.form else 0
         police_notified = 1 if "police_notified" in request.form else 0
         medical_treatment = 1 if "medical_treatment" in request.form else 0
         follow_up_required = 1 if "follow_up_required" in request.form else 0
-        severity = "Normal"
+
+        try:
+            incident_event_datetime = convert_vancouver_occurrence_input_to_utc(
+                f"{incident_date}T{incident_time}"
+            )
+        except ValueError as error:
+            message = str(error)
+            if message == "Occurrence time cannot be in the future.":
+                message = "Incident date and time cannot be in the future."
+            return render_template(
+                "incident_new.html",
+                error=message,
+            ), 400
 
         conn = get_db()
 
@@ -17378,10 +17404,6 @@ def incident_new():
 
         incident_id = cur.lastrowid
 
-        incident_event_datetime = convert_vancouver_occurrence_input_to_utc(
-            f"{incident_date}T{incident_time}"
-        )
-
         log_activity(
             conn,
             activity_class="INCIDENT",
@@ -17393,9 +17415,8 @@ def incident_new():
             related_table="incident_reports",
             related_id=incident_id,
             details=format_incident_storyline_details(
-                location, severity, injuries, injury_details, actions_taken,
-                description, follow_up_required, police_notified,
-                medical_treatment
+                location, injuries, injury_details, actions_taken,
+                description, follow_up_required
             ),
             success=1,
             event_datetime=incident_event_datetime,

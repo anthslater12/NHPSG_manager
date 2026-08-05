@@ -247,6 +247,9 @@ class ClientStorylineTests(unittest.TestCase):
             "Follow-up required: No\nPolice notified: Yes\nMedical treatment: No"
         )
         self.add_event("incident_created", "Incident created: Fall", details=details)
+        self.add_event(
+            "shift_note_updated", "Staff note", details="Severity: note\nKeep this"
+        )
         self.add_event("incident_created", "Old generic incident", details="Event UTC: old")
         self.add_event("incident_created", "Hidden incident", details="hidden", visible=0)
         self.add_event("incident_created", "Failed incident", details="failed", success=0)
@@ -255,10 +258,25 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"Location: Home", page)
         self.assertIn(b"&lt;arm&gt;", page)
         self.assertIn(b"&lt;script&gt;incident&lt;/script&gt;", page)
+        self.assertIn(b"Injury: Yes", page)
+        self.assertIn(b"Follow-up required: No", page)
+        self.assertNotIn(b"Severity: High", page)
+        self.assertNotIn(b"Police notified: Yes", page)
+        self.assertNotIn(b"Medical treatment: No", page)
+        self.assertIn(b"Severity: note", page)
         self.assertIn(b"Event UTC: old", page)
         self.assertNotIn(b"Hidden incident", page)
         self.assertNotIn(b"Failed incident", page)
         self.assertNotIn(b"Other client incident", page)
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT details FROM activity_log WHERE activity_type = 'incident_created' AND summary = ?",
+                ("Incident created: Fall",),
+            ).fetchone()[0],
+            details,
+        )
+        conn.close()
 
     def test_shift_note_details_render_from_activity_log_with_safe_history(self):
         self.login()

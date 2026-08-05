@@ -6,6 +6,10 @@
 
     <h2>New Incident Report</h2>
 
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
+
     <form method="post">
 
         <!-- Top Row -->
@@ -17,7 +21,7 @@
                 <input
                     type="date"
                     name="incident_date"
-                    value="{{ today }}"
+                    value="{{ request.form.get('incident_date', '') }}"
                     required>
             </div>
 
@@ -26,7 +30,7 @@
                 <input
                     type="time"
                     name="incident_time"
-                    value="{{ current_time }}"
+                    value="{{ request.form.get('incident_time', '') }}"
                     required>
             </div>
 
@@ -39,12 +43,12 @@
 
                     <option value="">Select type</option>
 
-                    <option>Aggression</option>
-                    <option>Self Injury</option>
-                    <option>Property Damage</option>
-                    <option>Medical</option>
-                    <option>Behaviour</option>
-                    <option>Other</option>
+                    {% for incident_option in [
+                        'Aggression', 'Self Injury', 'Property Damage',
+                        'Medical', 'Behaviour', 'Other'
+                    ] %}
+                        <option value="{{ incident_option }}"{% if request.form.get('incident_type') == incident_option %} selected{% endif %}>{{ incident_option }}</option>
+                    {% endfor %}
 
                 </select>
 
@@ -55,7 +59,8 @@
 
                 <input
                     type="text"
-                    name="location">
+                    name="location"
+                    value="{{ request.form.get('location', '') }}">
             </div>
 
         </div>
@@ -65,7 +70,7 @@
         <textarea
             name="description"
             rows="6"
-            required></textarea>
+            required>{{ request.form.get('description', '') }}</textarea>
 
         <br><br>
 
@@ -73,7 +78,7 @@
 
         <textarea
             name="actions_taken"
-            rows="5"></textarea>
+            rows="5">{{ request.form.get('actions_taken', '') }}</textarea>
 
         <br><br>
 
@@ -81,7 +86,8 @@
 
         <input
             type="text"
-            name="witnesses">
+            name="witnesses"
+            value="{{ request.form.get('witnesses', '') }}">
 
         <br><br>
 
@@ -90,7 +96,8 @@
             <input
                 type="checkbox"
                 name="injury"
-                style="width:auto; margin:0; padding:0;">
+                style="width:auto; margin:0; padding:0;"
+                {% if request.form.get('injury') %}checked{% endif %}>
 
             Was anyone injured?
 
@@ -102,7 +109,7 @@
 
         <textarea
             name="injury_details"
-            rows="4"></textarea>
+            rows="4">{{ request.form.get('injury_details', '') }}</textarea>
 
         <br><br>
 

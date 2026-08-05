@@ -164,7 +164,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
             "incident_date": "2026-08-02", "incident_time": "12:00",
             "location": "Home", "incident_type": "Medical",
             "description": "Client two incident", "actions_taken": "Called nurse",
-            "injury_details": "Bruise <arm>", "injuries": "on",
+            "injury_details": "Bruise <arm>", "injury": "on",
             "follow_up_required": "on", "police_notified": "on",
         })
         self.assertEqual(response.status_code, 302)
@@ -172,7 +172,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
         row = conn.execute("""
             SELECT al.client_id, al.user_id, al.related_table, al.related_id, al.storyline_visible,
                    al.summary, al.details, al.success,
-                   ir.client_id
+                   ir.client_id, ir.injuries, ir.injury_details
             FROM activity_log al JOIN incident_reports ir ON ir.incident_id = al.related_id
             WHERE al.activity_type = 'incident_created'
         """).fetchone()
@@ -180,11 +180,10 @@ class ActivityLogStorylineTests(unittest.TestCase):
         self.assertEqual(row, (
             2, 7, "incident_reports", 1, 1,
             "Incident created: Medical",
-            "Location: Home\nSeverity: Normal\nInjury: Yes\n"
+            "Location: Home\nInjury: Yes\n"
             "Injury details: Bruise <arm>\nActions taken: Called nurse\n"
-            "Description: Client two incident\nFollow-up required: Yes\n"
-            "Police notified: Yes\nMedical treatment: No",
-            1, 2
+            "Description: Client two incident\nFollow-up required: Yes",
+            1, 2, 1, "Bruise <arm>"
         ))
 
     def test_incident_details_omit_blank_optional_fields_and_write_one_log_row(self):
@@ -194,7 +193,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
             "incident_date": "2026-08-02", "incident_time": "12:00",
             "location": "Garden", "incident_type": "Fall",
             "description": "No injury", "actions_taken": "",
-            "injury_details": "", "injuries": "on",
+            "injury_details": "", "injury": "on",
         })
         self.assertEqual(response.status_code, 302)
         conn = sqlite3.connect(self.path)
@@ -204,10 +203,57 @@ class ActivityLogStorylineTests(unittest.TestCase):
         conn.close()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0], (
-            "Location: Garden\nSeverity: Normal\nInjury: Yes\n"
-            "Description: No injury\nFollow-up required: No\n"
-            "Police notified: No\nMedical treatment: No"
+            "Location: Garden\nInjury: Yes\n"
+            "Description: No injury\nFollow-up required: No"
         ))
+
+    def test_unchecked_injury_saves_zero(self):
+        with self.client.session_transaction() as session:
+            session.update(user_id=7, role="Support Worker", full_name="Worker")
+        response = self.client.post("/incident/new", data={
+            "incident_date": "2026-08-02", "incident_time": "12:00",
+            "location": "Garden", "incident_type": "Fall",
+            "description": "No injury reported", "actions_taken": "",
+            "injury_details": "",
+        })
+        self.assertEqual(response.status_code, 302)
+        conn = sqlite3.connect(self.path)
+        row = conn.execute(
+            "SELECT injuries FROM incident_reports"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row[0], 0)
+
+    def test_future_incident_is_rejected_before_writes_and_next_request_succeeds(self):
+        with self.client.session_transaction() as session:
+            session.update(user_id=7, role="Support Worker", full_name="Worker")
+
+        future = self.client.post("/incident/new", data={
+            "incident_date": "2099-01-01", "incident_time": "12:00",
+            "location": "Home", "incident_type": "Fall",
+            "description": "Future incident", "actions_taken": "",
+            "injury_details": "",
+        })
+        self.assertEqual(future.status_code, 400)
+        self.assertIn(b"Incident date and time cannot be in the future.", future.data)
+        self.assertIn(b"2099-01-01", future.data)
+
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM incident_reports").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM activity_log").fetchone()[0], 0)
+        conn.close()
+
+        valid = self.client.post("/incident/new", data={
+            "incident_date": "2026-08-02", "incident_time": "12:00",
+            "location": "Home", "incident_type": "Fall",
+            "description": "Past incident", "actions_taken": "Observed",
+            "injury_details": "",
+        })
+        self.assertEqual(valid.status_code, 302)
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM incident_reports").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM activity_log").fetchone()[0], 1)
+        conn.close()
 
     def test_activity_log_page_does_not_filter_storyline_visibility(self):
         conn = sqlite3.connect(self.path)
