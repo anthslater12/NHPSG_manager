@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Weekly Staff Schedule</title>
+    <style>
+        @page { size: Letter landscape; margin: 0.4in; }
+        * { box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; color: #111; font-size: 8pt; }
+        h1 { margin: 0; font-size: 17pt; }
+        h2 { margin: 2pt 0 8pt; font-size: 12pt; }
+        .metadata { margin-bottom: 10pt; }
+        .metadata p { margin: 2pt 0; }
+        .schedule-grid {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            border-top: 1px solid #222;
+            border-left: 1px solid #222;
+        }
+        .day-column { min-width: 0; border-right: 1px solid #222; }
+        .day-heading {
+            min-height: 30pt;
+            padding: 4pt;
+            background: #e8e8e8;
+            border-bottom: 1px solid #222;
+            font-weight: bold;
+        }
+        .day-date { display: block; font-weight: normal; margin-top: 2pt; }
+        .shift-cell {
+            min-height: 84pt;
+            padding: 4pt;
+            border-bottom: 1px solid #222;
+            page-break-inside: avoid;
+        }
+        .shift-label { margin: 0 0 3pt; font-weight: bold; }
+        .shift-entry { border-top: 1px solid #aaa; padding-top: 3pt; margin-top: 3pt; }
+        .shift-entry:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+        p { margin: 2pt 0; }
+        ul { margin: 2pt 0 2pt 12pt; padding: 0; }
+        .time { font-weight: bold; }
+        .missing { color: #333; font-style: italic; }
+        footer { margin-top: 8pt; font-size: 7pt; }
+    </style>
+</head>
+<body>
+    <h1>NHPSG Manager</h1>
+    <h2>Weekly Staff Schedule</h2>
+    <div class="metadata">
+        <p><strong>Client:</strong> {{ client.client_name }}</p>
+        <p><strong>Week:</strong> {{ monday.isoformat() }} to {{ week_end.isoformat() }}</p>
+        <p><strong>Generated:</strong> {{ generated_at }}</p>
+    </div>
+
+    <div class="schedule-grid">
+        {% for day in days %}
+        <section class="day-column">
+            <div class="day-heading">
+                {{ day.label }}
+                <span class="day-date">{{ day.date_iso }}</span>
+            </div>
+            {% for shift in day.shifts %}
+            <div class="shift-cell">
+                <p class="shift-label">{{ shift.shift_type }}</p>
+                {% if shift.exists %}
+                    {% for entry in shift.entries %}
+                    <div class="shift-entry">
+                        <p class="time">{{ entry.start_display }}&ndash;{{ entry.end_display }}{% if entry.overnight_next_day %} next day{% endif %}</p>
+                        <p><strong>Status:</strong> {{ entry.status }}</p>
+                        {% if entry.workers %}
+                        <p><strong>Staff:</strong></p>
+                        <ul>
+                            {% for worker in entry.workers %}<li>{{ worker }}</li>{% endfor %}
+                        </ul>
+                        {% else %}<p>No workers assigned.</p>{% endif %}
+                        {% if entry.notes %}<p><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p class="missing">Not scheduled</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </section>
+        {% endfor %}
+    </div>
+    <footer>The live NHPSG Manager schedule is authoritative.</footer>
+</body>
+</html>

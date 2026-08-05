@@ -575,6 +575,23 @@ def _schedule_form_context(conn, values, existing=None, client=None):
     }
 
 
+def _generate_schedule_pdf(html):
+    """Render trusted Schedule HTML through the optional WeasyPrint dependency."""
+    try:
+        from weasyprint import HTML
+    except ImportError as error:
+        raise RuntimeError("WeasyPrint is not installed.") from error
+    return HTML(
+        string=html,
+        base_url=os.path.dirname(os.path.abspath(__file__)),
+    ).write_pdf()
+
+
+def _schedule_pdf_filename(client_name, monday):
+    safe_client = re.sub(r"[^A-Za-z0-9_-]+", "_", client_name).strip("._-")
+    return f"NHPSG_Schedule_{safe_client or 'Client'}_{monday.isoformat()}.pdf"
+
+
 def convert_vancouver_occurrence_input_to_utc(
     local_input,
     repeated_hour_choice=None,
@@ -1944,6 +1961,52 @@ def schedule_week(client_id, monday):
         return "Access denied", 403
     except ValueError as error:
         return str(error), 404
+    finally:
+        conn.close()
+
+
+@app.route("/schedule/client/<int:client_id>/week/<monday>/pdf")
+def schedule_week_pdf(client_id, monday):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            user = _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        try:
+            week_start = _parse_schedule_monday(monday)
+        except ValueError as error:
+            return str(error), 404
+        client = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            return "Client not found", 404
+        html = render_template(
+            "schedule_week_pdf.html",
+            client=client,
+            client_id=client_id,
+            monday=week_start,
+            week_end=week_start + timedelta(days=6),
+            days=_schedule_week_context(conn, week_start, client_id),
+            generated_at=datetime.now(VANCOUVER_TIMEZONE).strftime(
+                "%Y-%m-%d %H:%M %Z"
+            ),
+        )
+        try:
+            pdf_bytes = _generate_schedule_pdf(html)
+        except Exception:
+            app.logger.exception("Schedule PDF generation failed.")
+            return "Schedule PDF could not be generated.", 500
+        response = app.make_response(pdf_bytes)
+        response.mimetype = "application/pdf"
+        response.headers["Content-Disposition"] = (
+            f"inline; filename=\"{_schedule_pdf_filename(client['client_name'], week_start)}\""
+        )
+        return response
     finally:
         conn.close()
 

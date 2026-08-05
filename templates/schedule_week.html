@@ -12,6 +12,10 @@
         <a href="{{ url_for('schedule_week', client_id=client_id, monday=next_monday.isoformat()) }}">Next week</a>
     </div>
 
+    {% if can_manage %}
+    <p><a href="{{ url_for('schedule_week_pdf', client_id=client_id, monday=monday.isoformat()) }}">Export PDF</a></p>
+    {% endif %}
+
     {% if can_manage and monday >= current_monday %}
     <form method="post" action="{{ url_for('schedule_copy_previous_week', client_id=client_id, monday=monday.isoformat()) }}">
         <button type="submit">Copy Previous Week</button>
