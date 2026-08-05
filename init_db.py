@@ -1,6 +1,7 @@
 import sqlite3
 from werkzeug.security import generate_password_hash
 import add_behaviour_occurrences_table
+import add_schedule_tables
 
 conn = sqlite3.connect("nhpsg.db")
 cur = conn.cursor()
@@ -84,6 +85,7 @@ VALUES (1, 'Neville', 1)
 """)
 
 add_behaviour_occurrences_table.migrate(conn)
+add_schedule_tables.migrate(conn)
 
 conn.commit()
 conn.close()

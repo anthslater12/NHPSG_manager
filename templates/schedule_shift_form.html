@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card schedule-form-card">
+    <h2>{% if editing %}Edit Scheduled Shift{% else %}Create Scheduled Shift{% endif %}</h2>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <div class="schedule-form-grid">
+            <div>
+                <label>Client</label>
+                <p>{{ client.client_name }}</p>
+            </div>
+
+            <div>
+                <label for="schedule-date">Date</label>
+                <input id="schedule-date" name="shift_date" type="date" value="{{ values.shift_date_value }}"{% if editing %} readonly{% endif %} required>
+            </div>
+
+            <div>
+                <label for="schedule-type">Shift type</label>
+                <select id="schedule-type" name="shift_type"{% if editing %} disabled{% endif %} required>
+                    {% for shift_type in ("Day", "Afternoon", "Overnight") %}
+                    <option value="{{ shift_type }}"{% if values.shift_type == shift_type %} selected{% endif %}>{{ shift_type }}</option>
+                    {% endfor %}
+                </select>
+                {% if editing %}<input type="hidden" name="shift_type" value="{{ values.shift_type }}">{% endif %}
+            </div>
+
+            <div>
+                <label for="schedule-start">Planned start</label>
+                <input id="schedule-start" name="planned_start_time" type="time" value="{{ values.planned_start_time }}" required>
+            </div>
+
+            <div>
+                <label for="schedule-end">Planned end</label>
+                <input id="schedule-end" name="planned_end_time" type="time" value="{{ values.planned_end_time }}" required>
+            </div>
+
+            <div>
+                <label for="schedule-status">Status</label>
+                <select id="schedule-status" name="status" required>
+                    {% for status in ("Draft", "Published", "Closed", "Cancelled") %}
+                    <option value="{{ status }}"{% if values.status == status %} selected{% endif %}>{{ status }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <label for="schedule-notes">Worker-visible notes</label>
+        <p class="schedule-help">Do not enter private medical, illness, disciplinary, or personnel information.</p>
+        <textarea id="schedule-notes" name="notes" rows="4">{{ values.notes }}</textarea>
+
+        <fieldset>
+            <legend>Assigned active Support Workers</legend>
+            {% for worker in workers %}
+            <label class="schedule-worker-option">
+                <input type="checkbox" name="worker_ids" value="{{ worker.user_id }}"{% if worker.user_id in values.worker_ids or worker.user_id in existing_worker_ids %} checked{% endif %}>
+                {{ worker.full_name }}
+            </label>
+            {% else %}
+            <p>No active Support Workers available.</p>
+            {% endfor %}
+        </fieldset>
+
+        <button type="submit">{% if editing %}Save changes{% else %}Create schedule{% endif %}</button>
+        <a href="{{ url_for('schedule_index') }}">Cancel</a>
+    </form>
+</div>
+{% endblock %}

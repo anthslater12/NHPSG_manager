@@ -289,6 +289,130 @@ td,th{
     background: #00315a;
 }
 
+.schedule-navigation {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.schedule-week-picker {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.schedule-week-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.schedule-day-card {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid #d7e0e8;
+    border-radius: 6px;
+    background: #f9fbfd;
+    overflow-wrap: anywhere;
+}
+
+.schedule-day-card h3 {
+    margin: 0 0 12px;
+    font-size: 1rem;
+}
+
+.schedule-day-card h3 time {
+    display: block;
+    margin-top: 4px;
+    font-size: .85rem;
+    font-weight: normal;
+}
+
+.schedule-shift-cell {
+    padding: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #e0e7ed;
+    border-radius: 5px;
+    background: white;
+}
+
+.schedule-shift-cell:last-child {
+    margin-bottom: 0;
+}
+
+.schedule-shift-cell h4,
+.schedule-shift-cell p,
+.schedule-shift-cell ul {
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
+
+.schedule-shift-cell h4 {
+    margin-top: 0;
+}
+
+.schedule-shift-cell ul {
+    padding-left: 20px;
+}
+
+.schedule-time {
+    font-weight: bold;
+}
+
+.schedule-form-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 16px;
+}
+
+.schedule-form-grid label,
+.schedule-form-card > form > label {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: bold;
+}
+
+.schedule-form-grid input,
+.schedule-form-grid select,
+.schedule-form-card textarea {
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.schedule-help {
+    margin-top: 0;
+    color: #555;
+}
+
+.schedule-form-card fieldset {
+    margin: 18px 0;
+}
+
+.schedule-worker-option {
+    display: block;
+    margin: 6px 0;
+}
+
+@media (max-width: 700px) {
+    .schedule-form-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 700px) {
+    .schedule-week-grid {
+        display: block;
+    }
+
+    .schedule-day-card {
+        margin-bottom: 16px;
+    }
+}
+
 .shift-dashboard-quick-entry {
     position: sticky;
     top: 10px;

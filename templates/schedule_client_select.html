@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card schedule-client-select">
+    <h2>Select Client Schedule</h2>
+    {% if clients %}
+    <ul>
+        {% for client in clients %}
+        <li>
+            <a href="{{ url_for('schedule_week', client_id=client.client_id, monday=current_monday.isoformat()) }}">{{ client.client_name }}</a>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No active clients are available for Schedule.</p>
+    {% endif %}
+</div>
+{% endblock %}

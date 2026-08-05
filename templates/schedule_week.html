@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card schedule-page">
+    <h2>Weekly Schedule</h2>
+    <p>Client: {{ client.client_name }}</p>
+    <p>Week of {{ monday.isoformat() }} to {{ week_end.isoformat() }}</p>
+
+    <div class="schedule-navigation" aria-label="Schedule week navigation">
+        <a href="{{ url_for('schedule_week', client_id=client_id, monday=previous_monday.isoformat()) }}">Previous week</a>
+        <a href="{{ url_for('schedule_week', client_id=client_id, monday=current_monday.isoformat()) }}">Current week</a>
+        <a href="{{ url_for('schedule_week', client_id=client_id, monday=next_monday.isoformat()) }}">Next week</a>
+    </div>
+
+    {% if can_manage and monday >= current_monday %}
+    <form method="post" action="{{ url_for('schedule_copy_previous_week', client_id=client_id, monday=monday.isoformat()) }}">
+        <button type="submit">Copy Previous Week</button>
+    </form>
+    {% endif %}
+
+    <form class="schedule-week-picker" method="get" action="{{ url_for('schedule_client_index', client_id=client_id) }}">
+        <label for="schedule-date">Go to week</label>
+        <input id="schedule-date" name="date" type="date" value="{{ monday.isoformat() }}">
+        <button type="submit">View week</button>
+    </form>
+
+    <div class="schedule-week-grid">
+        {% for day in days %}
+        <section class="schedule-day-card">
+            <h3>{{ day.label }} <time datetime="{{ day.date_iso }}">{{ day.date_iso }}</time></h3>
+            {% for shift in day.shifts %}
+            <article class="schedule-shift-cell">
+                <h4>{{ shift.shift_type }}</h4>
+                {% if shift.exists %}
+                {% for entry in shift.entries %}
+                <div class="schedule-shift-entry">
+                    <p><strong>Client:</strong> {{ entry.client_name }}</p>
+                    <p class="schedule-time">{{ entry.start_display }}&ndash;{{ entry.end_display }}{% if entry.overnight_next_day %} next day{% endif %}</p>
+                    <p><strong>Status:</strong> {{ entry.status }}</p>
+                    {% if entry.workers %}
+                    <p><strong>Staff:</strong></p>
+                    <ul>
+                        {% for worker in entry.workers %}
+                        <li>{{ worker }}</li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                    <p>No workers assigned.</p>
+                    {% endif %}
+                    {% if entry.notes %}
+                    <p><strong>Notes:</strong><br>{{ entry.notes }}</p>
+                    {% endif %}
+                    {% if entry.editable %}
+                    <p><a href="{{ url_for('schedule_shift_edit', schedule_shift_id=entry.schedule_shift_id, client_id=client_id) }}">Edit</a></p>
+                    {% endif %}
+                </div>
+                {% endfor %}
+                {% else %}
+                <p class="schedule-not-scheduled">Not scheduled</p>
+                {% if can_manage and day.date >= today %}
+                <p><a href="{{ url_for('schedule_shift_new', client_id=client_id, shift_date=day.date_iso, shift_type=shift.shift_type) }}">Add</a></p>
+                {% endif %}
+                {% endif %}
+            </article>
+            {% endfor %}
+        </section>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

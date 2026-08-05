@@ -261,6 +261,9 @@ SHIFT_ACTIVITY_CATEGORY_FIELDS = (
     "ls_selected",
 )
 SHIFT_ACTIVITY_ASCII_WHITESPACE = " \t\n\r\v\f"
+SCHEDULE_SHIFT_TYPES = ("Day", "Afternoon", "Overnight")
+SCHEDULE_VIEW_ROLES = {"Admin", "Director", "Program Manager", "Support Worker"}
+SCHEDULE_MANAGEMENT_ROLES = {"Admin", "Director", "Program Manager"}
 
 #####################################################################
 # DATABASE & CORE HELPER FUNCTIONS
@@ -377,6 +380,199 @@ def get_behaviour_operational_week_start(vancouver_datetime):
     """Return the Monday date for the instant's named operational week."""
     operational_day = get_behaviour_operational_day(vancouver_datetime)
     return operational_day - timedelta(days=operational_day.weekday())
+
+
+def get_schedule_operational_week_start(vancouver_datetime):
+    """Return the current Schedule week using the Vancouver-local convention."""
+    return get_behaviour_operational_week_start(vancouver_datetime)
+
+
+def _parse_schedule_monday(value):
+    try:
+        monday = date.fromisoformat(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Schedule week must be a valid ISO Monday.") from error
+    if monday.weekday() != 0:
+        raise ValueError("Schedule week must start on a Monday.")
+    return monday
+
+
+def _format_schedule_time(value):
+    parsed = datetime.strptime(value, "%H:%M")
+    return parsed.strftime("%I:%M %p").lstrip("0")
+
+
+def _schedule_week_context(conn, monday, client_id):
+    dates = [monday + timedelta(days=offset) for offset in range(7)]
+    end_date = dates[-1]
+    rows = conn.execute("""
+        SELECT ss.schedule_shift_id, ss.client_id, c.client_name,
+               ss.shift_date, ss.shift_type,
+               ss.planned_start_time, ss.planned_end_time, ss.status,
+               ss.notes, u.full_name
+        FROM schedule_shifts AS ss
+        JOIN clients AS c ON c.client_id = ss.client_id
+        LEFT JOIN schedule_staff AS st
+          ON st.schedule_shift_id = ss.schedule_shift_id
+        LEFT JOIN users AS u ON u.user_id = st.user_id
+        WHERE ss.client_id = ?
+          AND ss.shift_date BETWEEN ? AND ?
+        ORDER BY ss.shift_date,
+                 CASE ss.shift_type
+                     WHEN 'Day' THEN 1
+                     WHEN 'Afternoon' THEN 2
+                     WHEN 'Overnight' THEN 3
+                 END,
+                 u.full_name
+    """, (client_id, monday.isoformat(), end_date.isoformat())).fetchall()
+
+    by_entry = {}
+    for row in rows:
+        key = (row["shift_date"], row["shift_type"], row["client_id"])
+        slot = by_entry.setdefault(key, {
+            "schedule_shift_id": row["schedule_shift_id"],
+            "client_id": row["client_id"],
+            "client_name": row["client_name"],
+            "shift_type": row["shift_type"],
+            "start_display": _format_schedule_time(row["planned_start_time"]),
+            "end_display": _format_schedule_time(row["planned_end_time"]),
+            "overnight_next_day": (
+                row["shift_type"] == "Overnight"
+                and row["planned_end_time"] <= row["planned_start_time"]
+            ),
+            "status": row["status"],
+            "notes": row["notes"],
+            "workers": [],
+            "exists": True,
+        })
+        if row["full_name"] and row["full_name"] not in slot["workers"]:
+            slot["workers"].append(row["full_name"])
+
+    return [{
+        "date": day,
+        "date_iso": day.isoformat(),
+        "label": day.strftime("%A"),
+        "shifts": [
+            {
+                "shift_type": shift_type,
+                "exists": bool([
+                    entry for key, entry in by_entry.items()
+                    if key[0] == day.isoformat() and key[1] == shift_type
+                ]),
+                "entries": [
+                    entry for key, entry in by_entry.items()
+                    if key[0] == day.isoformat() and key[1] == shift_type
+                ],
+            }
+            for shift_type in SCHEDULE_SHIFT_TYPES
+        ],
+    } for day in dates]
+
+
+def _schedule_shift_is_editable(shift_date, status, today=None):
+    today = today or datetime.now(VANCOUVER_TIMEZONE).date()
+    return shift_date >= today and status in ("Draft", "Published")
+
+
+def _schedule_active_workers(conn):
+    return conn.execute("""
+        SELECT user_id, full_name
+        FROM users
+        WHERE active = 1 AND role = 'Support Worker'
+        ORDER BY full_name, user_id
+    """).fetchall()
+
+
+def _schedule_form_values(conn, form, existing=None, client_id=None):
+    errors = []
+    if existing is None:
+        client = None
+        if client_id is None:
+            errors.append("A valid client is required.")
+        client = conn.execute("""
+            SELECT client_id FROM clients WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone() if client_id is not None else None
+        if client is None and "A valid client is required." not in errors:
+            errors.append("A valid active client is required.")
+    else:
+        client_id = existing["client_id"]
+
+    shift_date_value = (form.get("shift_date") or "").strip()
+    try:
+        shift_date = date.fromisoformat(shift_date_value)
+    except (TypeError, ValueError):
+        shift_date = None
+        errors.append("A valid schedule date is required.")
+
+    shift_type = (form.get("shift_type") or "").strip()
+    if shift_type not in SCHEDULE_SHIFT_TYPES:
+        errors.append("A valid shift type is required.")
+
+    start_value = (form.get("planned_start_time") or "").strip()
+    end_value = (form.get("planned_end_time") or "").strip()
+    try:
+        start_time = datetime.strptime(start_value, "%H:%M").time()
+        end_time = datetime.strptime(end_value, "%H:%M").time()
+    except (TypeError, ValueError):
+        start_time = end_time = None
+        errors.append("Start and end times must use HH:MM.")
+
+    status = (form.get("status") or "").strip()
+    if status not in ("Draft", "Published", "Closed", "Cancelled"):
+        errors.append("A valid status is required.")
+
+    selected_values = form.getlist("worker_ids")
+    if len(selected_values) != len(set(selected_values)):
+        errors.append("A worker cannot be assigned more than once.")
+    selected_ids = set()
+    for value in selected_values:
+        try:
+            selected_ids.add(int(value))
+        except (TypeError, ValueError):
+            errors.append("Worker assignments are invalid.")
+            break
+    workers = {
+        row["user_id"]: row for row in _schedule_active_workers(conn)
+    }
+    if not selected_ids.issubset(workers):
+        errors.append("Only active Support Workers may be assigned.")
+
+    today = datetime.now(VANCOUVER_TIMEZONE).date()
+    if shift_date is not None and shift_date < today:
+        errors.append("Past schedules cannot be edited.")
+    if start_time is not None and end_time is not None:
+        if shift_type in ("Day", "Afternoon") and end_time <= start_time:
+            errors.append("Day and Afternoon shifts must end after they start.")
+
+    return {
+        "client_id": client_id,
+        "shift_date": shift_date,
+        "shift_date_value": shift_date_value,
+        "shift_type": shift_type,
+        "planned_start_time": start_value,
+        "planned_end_time": end_value,
+        "status": status,
+        "notes": (form.get("notes") or "").strip(),
+        "worker_ids": selected_ids,
+        "workers": workers,
+        "errors": errors,
+    }
+
+
+def _schedule_form_context(conn, values, existing=None, client=None):
+    return {
+        "values": values,
+        "client": client,
+        "workers": _schedule_active_workers(conn),
+        "existing_worker_ids": {
+            row["user_id"] for row in conn.execute("""
+                SELECT user_id FROM schedule_staff
+                WHERE schedule_shift_id = ?
+            """, (existing["schedule_shift_id"],)).fetchall()
+        } if existing else set(),
+        "editing": existing is not None,
+        "error": "; ".join(values.get("errors", [])),
+    }
 
 
 def convert_vancouver_occurrence_input_to_utc(
@@ -1382,6 +1578,537 @@ def _render_behaviour_record(
         abc_field_labels=ABC_FIELD_LABELS,
         now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"),
         values=values, shift_context=shift_context)
+
+
+@app.route("/schedule")
+def schedule_index():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        user = get_active_authenticated_user(conn, session["user_id"])
+        if user["role"] not in SCHEDULE_VIEW_ROLES:
+            return "Access denied", 403
+        clients = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE active = 1 ORDER BY client_name, client_id
+        """).fetchall()
+        monday = get_schedule_operational_week_start(
+            datetime.now(VANCOUVER_TIMEZONE)
+        )
+        if len(clients) == 1:
+            return redirect(url_for(
+                "schedule_week", client_id=clients[0]["client_id"],
+                monday=monday.isoformat()
+            ))
+        return render_template(
+            "schedule_client_select.html",
+            clients=clients,
+            current_monday=monday,
+        )
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+
+def _schedule_management_user(conn):
+    user = get_active_authenticated_user(conn, session["user_id"])
+    if user["role"] not in SCHEDULE_MANAGEMENT_ROLES:
+        raise PermissionError("Schedule management access is required.")
+    return user
+
+
+def _schedule_form_defaults(request_args):
+    shift_date = request_args.get("shift_date", "")
+    shift_type = request_args.get("shift_type", "Day")
+    if shift_type not in SCHEDULE_SHIFT_TYPES:
+        shift_type = "Day"
+    return {
+        "client_id": "",
+        "shift_date": None,
+        "shift_date_value": shift_date,
+        "shift_type": shift_type,
+        "planned_start_time": "",
+        "planned_end_time": "",
+        "status": "Draft",
+        "notes": "",
+        "worker_ids": set(),
+        "errors": [],
+    }
+
+
+def _schedule_log_details(values):
+    return (
+        f"Date: {values['shift_date_value']}\n"
+        f"Shift type: {values['shift_type']}\n"
+        f"Time: {values['planned_start_time']}-{values['planned_end_time']}\n"
+        f"Status: {values['status']}"
+    )
+
+
+@app.route("/schedule/client/<int:client_id>/week")
+def schedule_client_index(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        user = get_active_authenticated_user(conn, session["user_id"])
+        if user["role"] not in SCHEDULE_VIEW_ROLES:
+            return "Access denied", 403
+        client = conn.execute("""
+            SELECT client_id FROM clients WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            return "Client not found", 404
+        requested_date = request.args.get("date")
+        if requested_date:
+            try:
+                selected_date = date.fromisoformat(requested_date)
+            except ValueError:
+                return "Schedule date must be a valid ISO date.", 400
+            monday = selected_date - timedelta(days=selected_date.weekday())
+        else:
+            monday = get_schedule_operational_week_start(
+                datetime.now(VANCOUVER_TIMEZONE)
+            )
+        return redirect(url_for(
+            "schedule_week", client_id=client_id, monday=monday.isoformat()
+        ))
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+
+@app.route("/schedule/client/<int:client_id>/shift/new", methods=["GET", "POST"])
+def schedule_shift_new(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            user = _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        client = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            return "Client not found", 404
+
+        values = _schedule_form_defaults(request.args)
+        if request.method == "POST":
+            values = _schedule_form_values(conn, request.form, client_id=client_id)
+            if not values["errors"]:
+                now_utc = serialize_behaviour_utc(
+                    datetime.now(timezone.utc).replace(microsecond=0)
+                )
+                try:
+                    conn.execute("BEGIN")
+                    cursor = conn.execute("""
+                        INSERT INTO schedule_shifts
+                        (client_id, shift_date, shift_type,
+                         planned_start_time, planned_end_time, status, notes,
+                         created_by, created_at_utc, updated_by, updated_at_utc)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        values["client_id"], values["shift_date_value"],
+                        values["shift_type"], values["planned_start_time"],
+                        values["planned_end_time"], values["status"],
+                        values["notes"], user["user_id"], now_utc,
+                        user["user_id"], now_utc,
+                    ))
+                    schedule_shift_id = cursor.lastrowid
+                    log_activity(
+                        conn, "SCHEDULE", "schedule_shift_created",
+                        f"Schedule shift created: {values['shift_type']} on {values['shift_date_value']}",
+                        user_id=user["user_id"], client_id=values["client_id"],
+                        related_table="schedule_shifts",
+                        related_id=schedule_shift_id,
+                        details=_schedule_log_details(values),
+                        storyline_visible=False,
+                    )
+                    for worker_id in sorted(values["worker_ids"]):
+                        assignment = conn.execute("""
+                            INSERT INTO schedule_staff
+                            (schedule_shift_id, user_id, assigned_by, assigned_at_utc)
+                            VALUES (?, ?, ?, ?)
+                        """, (schedule_shift_id, worker_id,
+                               user["user_id"], now_utc))
+                        log_activity(
+                            conn, "SCHEDULE", "schedule_staff_assigned",
+                            f"Staff assigned to schedule shift {schedule_shift_id}",
+                            user_id=user["user_id"], client_id=values["client_id"],
+                            related_table="schedule_staff",
+                            related_id=assignment.lastrowid,
+                            details=f"Worker user ID: {worker_id}",
+                            storyline_visible=False,
+                        )
+                    conn.commit()
+                    flash("Scheduled shift created.")
+                    monday = values["shift_date"] - timedelta(
+                        days=values["shift_date"].weekday()
+                    )
+                    return redirect(url_for(
+                        "schedule_week", client_id=client_id,
+                        monday=monday.isoformat()
+                    ))
+                except sqlite3.IntegrityError:
+                    conn.rollback()
+                    values["errors"] = [
+                        "A schedule already exists for this client, date, and shift type."
+                    ]
+                except Exception:
+                    conn.rollback()
+                    return "Schedule could not be saved.", 500
+        return render_template(
+            "schedule_shift_form.html",
+            **_schedule_form_context(conn, values, client=client),
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/schedule/shift/<int:schedule_shift_id>/edit", methods=["GET", "POST"])
+def schedule_shift_edit(schedule_shift_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            user = _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        existing = conn.execute("""
+            SELECT * FROM schedule_shifts WHERE schedule_shift_id = ?
+        """, (schedule_shift_id,)).fetchone()
+        if existing is None:
+            return "Schedule not found", 404
+        client = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (existing["client_id"],)).fetchone()
+        if client is None:
+            return "Client not found", 404
+        existing_date = date.fromisoformat(existing["shift_date"])
+        if not _schedule_shift_is_editable(existing_date, existing["status"]):
+            return "Schedule is not editable.", 403
+
+        if request.method == "GET":
+            values = {
+                "client_id": existing["client_id"],
+                "shift_date": existing_date,
+                "shift_date_value": existing["shift_date"],
+                "shift_type": existing["shift_type"],
+                "planned_start_time": existing["planned_start_time"],
+                "planned_end_time": existing["planned_end_time"],
+                "status": existing["status"],
+                "notes": existing["notes"] or "",
+                "worker_ids": set(),
+                "errors": [],
+            }
+        else:
+            values = _schedule_form_values(conn, request.form, existing)
+            if not values["errors"]:
+                now_utc = serialize_behaviour_utc(
+                    datetime.now(timezone.utc).replace(microsecond=0)
+                )
+                try:
+                    conn.execute("BEGIN")
+                    conn.execute("""
+                        UPDATE schedule_shifts
+                        SET planned_start_time = ?, planned_end_time = ?,
+                            status = ?, notes = ?, updated_by = ?,
+                            updated_at_utc = ?
+                        WHERE schedule_shift_id = ?
+                    """, (
+                        values["planned_start_time"], values["planned_end_time"],
+                        values["status"], values["notes"], user["user_id"],
+                        now_utc, schedule_shift_id,
+                    ))
+                    log_activity(
+                        conn, "SCHEDULE", "schedule_shift_updated",
+                        f"Schedule shift updated: {existing['shift_type']} on {existing['shift_date']}",
+                        user_id=user["user_id"], client_id=existing["client_id"],
+                        related_table="schedule_shifts", related_id=schedule_shift_id,
+                        details=_schedule_log_details(values), storyline_visible=False,
+                    )
+                    old_rows = conn.execute("""
+                        SELECT schedule_staff_id, user_id
+                        FROM schedule_staff WHERE schedule_shift_id = ?
+                    """, (schedule_shift_id,)).fetchall()
+                    old_by_user = {row["user_id"]: row for row in old_rows}
+                    for worker_id in sorted(values["worker_ids"] - old_by_user.keys()):
+                        assignment = conn.execute("""
+                            INSERT INTO schedule_staff
+                            (schedule_shift_id, user_id, assigned_by, assigned_at_utc)
+                            VALUES (?, ?, ?, ?)
+                        """, (schedule_shift_id, worker_id,
+                               user["user_id"], now_utc))
+                        log_activity(
+                            conn, "SCHEDULE", "schedule_staff_assigned",
+                            f"Staff assigned to schedule shift {schedule_shift_id}",
+                            user_id=user["user_id"], client_id=existing["client_id"],
+                            related_table="schedule_staff", related_id=assignment.lastrowid,
+                            details=f"Worker user ID: {worker_id}", storyline_visible=False,
+                        )
+                    for worker_id in sorted(old_by_user.keys() - values["worker_ids"]):
+                        assignment_id = old_by_user[worker_id]["schedule_staff_id"]
+                        conn.execute(
+                            "DELETE FROM schedule_staff WHERE schedule_staff_id = ?",
+                            (assignment_id,)
+                        )
+                        log_activity(
+                            conn, "SCHEDULE", "schedule_staff_removed",
+                            f"Staff removed from schedule shift {schedule_shift_id}",
+                            user_id=user["user_id"], client_id=existing["client_id"],
+                            related_table="schedule_staff", related_id=assignment_id,
+                            details=f"Worker user ID: {worker_id}", storyline_visible=False,
+                        )
+                    conn.commit()
+                    flash("Scheduled shift updated.")
+                    monday = existing_date - timedelta(days=existing_date.weekday())
+                    return redirect(url_for(
+                        "schedule_week", client_id=existing["client_id"],
+                        monday=monday.isoformat()
+                    ))
+                except sqlite3.IntegrityError:
+                    conn.rollback()
+                    values["errors"] = ["Schedule could not be updated."]
+                except Exception:
+                    conn.rollback()
+                    return "Schedule could not be saved.", 500
+
+        if request.method == "GET":
+            values["worker_ids"] = {
+                row["user_id"] for row in conn.execute("""
+                    SELECT user_id FROM schedule_staff
+                    WHERE schedule_shift_id = ?
+                """, (schedule_shift_id,)).fetchall()
+            }
+        return render_template(
+            "schedule_shift_form.html",
+            **_schedule_form_context(conn, values, existing, client),
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/schedule/client/<int:client_id>/week/<monday>")
+def schedule_week(client_id, monday):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        user = get_active_authenticated_user(conn, session["user_id"])
+        if user["role"] not in SCHEDULE_VIEW_ROLES:
+            return "Access denied", 403
+        can_manage = user["role"] in SCHEDULE_MANAGEMENT_ROLES
+        client = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            return "Client not found", 404
+        week_start = _parse_schedule_monday(monday)
+        current_monday = get_schedule_operational_week_start(
+            datetime.now(VANCOUVER_TIMEZONE)
+        )
+        days = _schedule_week_context(conn, week_start, client_id)
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+        for day in days:
+            for shift in day["shifts"]:
+                for entry in shift["entries"]:
+                    entry["editable"] = (
+                        can_manage
+                        and _schedule_shift_is_editable(
+                            day["date"], entry["status"], today
+                        )
+                    )
+        return render_template(
+            "schedule_week.html",
+            monday=week_start,
+            week_end=week_start + timedelta(days=6),
+            client=client,
+            client_id=client_id,
+            days=days,
+            can_manage=can_manage,
+            today=today,
+            previous_monday=week_start - timedelta(days=7),
+            next_monday=week_start + timedelta(days=7),
+            current_monday=current_monday,
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except ValueError as error:
+        return str(error), 404
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/schedule/client/<int:client_id>/week/<monday>/copy-previous",
+    methods=["POST"],
+)
+def schedule_copy_previous_week(client_id, monday):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            user = _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        try:
+            destination_monday = _parse_schedule_monday(monday)
+        except ValueError as error:
+            flash(str(error))
+            return redirect(url_for("schedule_index"))
+
+        client = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            flash("The selected client is not active.")
+            return redirect(url_for("schedule_index"))
+
+        current_monday = get_schedule_operational_week_start(
+            datetime.now(VANCOUVER_TIMEZONE)
+        )
+        if destination_monday < current_monday:
+            flash("A past schedule week cannot be populated.")
+            return redirect(url_for(
+                "schedule_week", client_id=client_id,
+                monday=destination_monday.isoformat()
+            ))
+
+        source_monday = destination_monday - timedelta(days=7)
+        destination_sunday = destination_monday + timedelta(days=6)
+        source_sunday = source_monday + timedelta(days=6)
+        now_utc = serialize_behaviour_utc(
+            datetime.now(timezone.utc).replace(microsecond=0)
+        )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            revalidated_client = conn.execute("""
+                SELECT client_id FROM clients
+                WHERE client_id = ? AND active = 1
+            """, (client_id,)).fetchone()
+            if revalidated_client is None:
+                conn.rollback()
+                flash("The selected client is no longer active.")
+                return redirect(url_for("schedule_index"))
+            destination_count = conn.execute("""
+                SELECT COUNT(*) FROM schedule_shifts
+                WHERE client_id = ? AND shift_date BETWEEN ? AND ?
+            """, (
+                client_id, destination_monday.isoformat(),
+                destination_sunday.isoformat(),
+            )).fetchone()[0]
+            if destination_count:
+                conn.rollback()
+                flash("The destination week already contains schedule data.")
+                return redirect(url_for(
+                    "schedule_week", client_id=client_id,
+                    monday=destination_monday.isoformat()
+                ))
+
+            source_shifts = conn.execute("""
+                SELECT * FROM schedule_shifts
+                WHERE client_id = ? AND shift_date BETWEEN ? AND ?
+                ORDER BY shift_date, schedule_shift_id
+            """, (
+                client_id, source_monday.isoformat(), source_sunday.isoformat()
+            )).fetchall()
+            if not source_shifts:
+                conn.rollback()
+                flash("There is no previous schedule for this client to copy.")
+                return redirect(url_for(
+                    "schedule_week", client_id=client_id,
+                    monday=destination_monday.isoformat()
+                ))
+
+            copied_shift_ids = {}
+            copied_assignment_count = 0
+            for source in source_shifts:
+                source_date = date.fromisoformat(source["shift_date"])
+                destination_date = source_date + timedelta(days=7)
+                cursor = conn.execute("""
+                    INSERT INTO schedule_shifts
+                    (client_id, shift_date, shift_type, planned_start_time,
+                     planned_end_time, status, notes, created_by,
+                     created_at_utc, updated_by, updated_at_utc)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    client_id, destination_date.isoformat(), source["shift_type"],
+                    source["planned_start_time"], source["planned_end_time"],
+                    source["status"], source["notes"], user["user_id"],
+                    now_utc, user["user_id"], now_utc,
+                ))
+                destination_shift_id = cursor.lastrowid
+                copied_shift_ids[source["schedule_shift_id"]] = destination_shift_id
+                assignments = conn.execute("""
+                    SELECT user_id, assignment_note
+                    FROM schedule_staff
+                    WHERE schedule_shift_id = ?
+                    ORDER BY schedule_staff_id
+                """, (source["schedule_shift_id"],)).fetchall()
+                for assignment in assignments:
+                    conn.execute("""
+                        INSERT INTO schedule_staff
+                        (schedule_shift_id, user_id, assignment_note,
+                         assigned_by, assigned_at_utc)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        destination_shift_id, assignment["user_id"],
+                        assignment["assignment_note"], user["user_id"], now_utc,
+                    ))
+                    copied_assignment_count += 1
+
+            first_destination_id = next(iter(copied_shift_ids.values()))
+            log_activity(
+                conn, "SCHEDULE", "schedule_week_copied",
+                f"Schedule week copied for {client['client_name']}",
+                user_id=user["user_id"], client_id=client_id, shift_id=None,
+                related_table="schedule_shifts", related_id=first_destination_id,
+                details=(
+                    f"Client: {client['client_name']}\n"
+                    f"Source week: {source_monday.isoformat()}\n"
+                    f"Destination week: {destination_monday.isoformat()}\n"
+                    f"Shifts copied: {len(source_shifts)}\n"
+                    f"Staff assignments copied: {copied_assignment_count}"
+                ),
+                storyline_visible=False,
+            )
+            conn.commit()
+            flash(
+                f"Copied {len(source_shifts)} scheduled shift(s) and "
+                f"{copied_assignment_count} staff assignment(s)."
+            )
+            return redirect(url_for(
+                "schedule_week", client_id=client_id,
+                monday=destination_monday.isoformat()
+            ))
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            flash("The previous schedule could not be copied.")
+            return redirect(url_for(
+                "schedule_week", client_id=client_id,
+                monday=destination_monday.isoformat()
+            ))
+        except Exception:
+            conn.rollback()
+            return "Schedule copy could not be completed.", 500
+    finally:
+        conn.close()
+
+
+@app.route("/schedule/week/<monday>")
+def schedule_week_legacy(monday):
+    return redirect(url_for("schedule_index"))
 
 
 @app.route("/behaviour/week/<monday>")
