@@ -2165,6 +2165,30 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
         self.assertIn("Review for Publication", active_html)
         self.assertNotIn(f"/staff-notices/{inactive_id}/review", inactive_html)
 
+    def test_admin_list_formats_created_and_updated_times_in_vancouver(self):
+        notice_id = self.create_notice()
+        second_id = self.create_notice()
+        conn = sqlite3.connect(self.database_path)
+        conn.execute("""
+            UPDATE staff_notices
+            SET created_at_utc = '2026-07-26T22:39:20Z',
+                updated_at_utc = '2026-11-01T09:15:00Z'
+            WHERE notice_id = ?
+        """, (notice_id,))
+        conn.execute(
+            "UPDATE staff_notices SET updated_at_utc = NULL WHERE notice_id = ?",
+            (second_id,)
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(1, "Admin")
+        html = self.client.get("/staff-notices/manage").get_data(as_text=True)
+        self.assertIn("Jul 26, 2026 at 3:39 PM", html)
+        self.assertIn("Nov 1, 2026 at 2:15 AM", html)
+        self.assertIn("—", html)
+        self.assertNotIn("2026-07-26T22:39:20Z", html)
+
     def test_all_staff_notice_templates_load(self):
         for template_name in (
             "staff_notice_admin_list.html",

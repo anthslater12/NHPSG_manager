@@ -3931,6 +3931,17 @@ def format_staff_notice_local_datetime(
     )
 
 
+def format_staff_notice_friendly_local_datetime(value):
+    """Format a stored UTC Staff Notice timestamp for management display."""
+    local_value = staff_notice_utc_datetime_to_local(value)
+    hour = local_value.hour % 12 or 12
+    meridiem = "AM" if local_value.hour < 12 else "PM"
+    return (
+        f"{local_value.strftime('%b')} {local_value.day}, "
+        f"{local_value.year} at {hour}:{local_value.minute:02d} {meridiem}"
+    )
+
+
 def get_application_local_date(now_utc=None):
     if now_utc is None:
         now_utc = get_application_now_utc()
@@ -11158,6 +11169,18 @@ def staff_notice_admin_list():
                 ) DESC,
                 sn.notice_id DESC
         """).fetchall()
+        notices = [dict(row) for row in notices]
+        for notice in notices:
+            notice["created_at_display"] = (
+                format_staff_notice_friendly_local_datetime(
+                    notice["created_at_utc"]
+                )
+            )
+            notice["updated_at_display"] = (
+                format_staff_notice_friendly_local_datetime(
+                    notice["updated_at_utc"]
+                ) if notice["updated_at_utc"] else None
+            )
     finally:
         conn.close()
 
@@ -14832,12 +14855,12 @@ def auto_sign_on_user(user_id):
             raise PermissionError(
                 "This role cannot automatically sign on to a shift."
             )
-        active_clients = conn.execute("""
+        active_clients = [dict(row) for row in conn.execute("""
             SELECT client_id
             FROM clients
             WHERE active = 1
             ORDER BY client_id
-        """).fetchall()
+        """).fetchall()]
         if len(active_clients) != 1:
             raise RuntimeError(
                 "Automatic sign-on requires exactly one active client."

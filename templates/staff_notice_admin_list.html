@@ -54,8 +54,8 @@
                             {{ notice.client_name or "Organization-wide" }}
                         </td>
                         <td>{{ notice.created_by }}</td>
-                        <td>{{ notice.created_at_utc }}</td>
-                        <td>{{ notice.updated_at_utc or "—" }}</td>
+                        <td>{{ notice.created_at_display }}</td>
+                        <td>{{ notice.updated_at_display or "—" }}</td>
                         <td>
                             {% if notice.status == "Published" %}
                                 <span class="status-active">Published</span>
