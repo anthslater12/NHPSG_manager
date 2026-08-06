@@ -120,13 +120,16 @@ class ScheduleNavigationTests(unittest.TestCase):
         self.assertEqual(response.data.count(b"schedule-day-card"), 7)
         self.assertIn(b"/schedule/client/10/week/2026-07-27", response.data)
         self.assertIn(b"/schedule/client/10/week/2026-08-10", response.data)
-        self.assertIn(b"7:30 AM", response.data)
-        self.assertIn(b"Sam Worker &mdash; 7:00 AM&ndash;3:00 PM", response.data)
-        self.assertIn(b"Dana Director &mdash; 8:00 AM&ndash;4:00 PM", response.data)
+        self.assertNotIn(b"<strong>Client:</strong>", response.data)
+        self.assertNotIn(b"<strong>Status:</strong>", response.data)
+        self.assertNotIn(b"<strong>Staff:</strong>", response.data)
+        self.assertIn(b"7:00AM&ndash;3:00PM &mdash; Sam Worker", response.data)
+        self.assertIn(b"8:00AM&ndash;4:00PM &mdash; Dana Director", response.data)
+        self.assertNotIn(b"<ul>", response.data)
+        self.assertNotIn(b"7:30 AM&ndash;3:30 PM", response.data)
+        self.assertNotIn(b"11:00 PM&ndash;7:30 AM", response.data)
         self.assertNotIn(b"Default planned hours: 7:30 AM&ndash;3:30 PM", response.data)
-        self.assertIn(b"Default planned hours: 11:00 PM&ndash;7:30 AM next day", response.data)
-        self.assertIn(b"11:00 PM", response.data)
-        self.assertIn(b"7:30 AM next day", response.data)
+        self.assertNotIn(b"Default planned hours:", response.data)
         self.assertIn(b"Sam Worker", response.data)
         self.assertIn(b"Dana Director", response.data)
         self.assertIn(b"Bring the communication book.", response.data)
@@ -136,7 +139,7 @@ class ScheduleNavigationTests(unittest.TestCase):
         self.login()
         response = self.client.get("/schedule/client/10/week/2026-08-03")
         page = response.data.decode()
-        self.assertLess(page.index("Sam Worker &mdash; 7:00 AM"), page.index("Dana Director &mdash; 8:00 AM"))
+        self.assertLess(page.index("7:00AM&ndash;3:00PM &mdash; Sam Worker"), page.index("8:00AM&ndash;4:00PM &mdash; Dana Director"))
         conn = sqlite3.connect(app.DB_NAME)
         overnight_id = conn.execute("""
             SELECT schedule_shift_id FROM schedule_shifts
@@ -151,7 +154,7 @@ class ScheduleNavigationTests(unittest.TestCase):
         conn.commit()
         conn.close()
         response = self.client.get("/schedule/client/10/week/2026-08-03")
-        self.assertIn(b"10:00 PM&ndash;6:00 AM next day", response.data)
+        self.assertIn(b"10:00PM&ndash;6:00AM next day &mdash; Sam Worker", response.data)
 
     def test_null_worker_times_fall_back_to_parent_for_display(self):
         self.login()
@@ -164,7 +167,7 @@ class ScheduleNavigationTests(unittest.TestCase):
         conn.commit()
         conn.close()
         response = self.client.get("/schedule/client/10/week/2026-08-03")
-        self.assertIn(b"Sam Worker &mdash; 7:30 AM&ndash;3:30 PM", response.data)
+        self.assertIn(b"7:30AM&ndash;3:30PM &mdash; Sam Worker", response.data)
 
     def test_shift_order_and_no_operational_assignment_or_write_controls(self):
         self.login()

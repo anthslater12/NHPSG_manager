@@ -384,8 +384,17 @@ td,th{
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 10px;
+    margin-top: 12px;
     margin-bottom: 20px;
+}
+
+.schedule-week-picker-label {
+    margin-bottom: 3px;
+}
+
+.schedule-week-picker-date {
+    margin-right: 2px;
 }
 
 .schedule-week-grid {
@@ -478,16 +487,19 @@ td,th{
 
 .schedule-worker-options {
     display: grid;
-    grid-template-columns: repeat(2, minmax(180px, 1fr));
-    gap: 6px 18px;
+    grid-template-columns: minmax(0, 590px);
+    gap: 6px;
 }
 
 .schedule-worker-header {
     display: grid;
-    grid-template-columns: minmax(170px, 1fr) 110px 110px;
+    grid-template-columns: 280px 150px 150px;
     gap: 0.5rem;
     margin-bottom: 4px;
     font-weight: bold;
+    width: 596px;
+    max-width: 100%;
+    box-sizing: border-box;
 }
 
 .schedule-worker-header span:first-child {
@@ -496,10 +508,13 @@ td,th{
 
 .schedule-worker-option {
     display: grid;
-    grid-template-columns: minmax(170px, 1fr) auto;
+    grid-template-columns: 280px 150px 150px;
     align-items: center;
     gap: 0.5rem;
     margin: 4px 0;
+    width: 596px;
+    max-width: 100%;
+    box-sizing: border-box;
 }
 
 .schedule-worker-name {
@@ -522,15 +537,47 @@ td,th{
 }
 
 .schedule-worker-hours {
-    display: grid;
-    grid-template-columns: auto 110px auto 110px;
-    align-items: center;
-    gap: 4px;
+    display: contents;
+}
+
+.schedule-worker-time-label {
+    display: none;
 }
 
 .schedule-worker-hours input {
     width: 100%;
     box-sizing: border-box;
+}
+
+.schedule-default-time-help {
+    margin-bottom: 12px;
+}
+
+/* Keep each assignment row readable when a worker name is long. */
+.schedule-worker-name span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+/* The row grid supplies the desktop Start and End columns. */
+.schedule-worker-option > .schedule-worker-hours {
+    grid-column: 2 / 4;
+}
+
+.schedule-worker-option > .schedule-worker-hours input:first-of-type {
+    grid-column: 2;
+}
+
+.schedule-worker-option > .schedule-worker-hours input:last-of-type {
+    grid-column: 3;
+}
+
+.schedule-worker-option > .schedule-worker-hours input {
+    align-self: center;
+}
+
+.schedule-worker-hours {
+    align-items: center;
 }
 
 @media (max-width: 700px) {
@@ -539,24 +586,33 @@ td,th{
     }
 
     .schedule-worker-options {
-        grid-template-columns: 1fr;
-    }
-
-    .schedule-worker-header {
-        grid-template-columns: 1fr 1fr;
-    }
-
-    .schedule-worker-header span:first-child {
-        grid-column: 1 / -1;
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .schedule-worker-option {
         grid-template-columns: 1fr;
         gap: 4px;
+        width: 100%;
+    }
+
+    .schedule-worker-header {
+        display: none;
     }
 
     .schedule-worker-hours {
-        grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 4px 8px;
+    }
+
+    .schedule-worker-option > .schedule-worker-hours {
+        grid-column: 1;
+    }
+
+    .schedule-worker-time-label {
+        display: block;
+        margin: 0;
+        font-weight: bold;
     }
 }
 

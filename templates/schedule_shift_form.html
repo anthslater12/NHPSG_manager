@@ -31,12 +31,12 @@
             </div>
 
             <div>
-                <label for="schedule-start">Planned start</label>
+                <label for="schedule-start">Default planned start</label>
                 <input id="schedule-start" name="planned_start_time" type="time" value="{{ values.planned_start_time }}" required>
             </div>
 
             <div>
-                <label for="schedule-end">Planned end</label>
+                <label for="schedule-end">Default planned end</label>
                 <input id="schedule-end" name="planned_end_time" type="time" value="{{ values.planned_end_time }}" required>
             </div>
 
@@ -49,6 +49,8 @@
                 </select>
             </div>
         </div>
+
+        <p class="schedule-help schedule-default-time-help">These default times are used when a newly selected worker does not have individual hours entered.</p>
 
         <label for="schedule-notes">Worker-visible notes</label>
         <p class="schedule-help">Do not enter private medical, illness, disciplinary, or personnel information.</p>
@@ -69,9 +71,9 @@
                 <span>{{ worker.full_name }}</span>
                 </label>
                 <span class="schedule-worker-hours">
-                    <label for="worker-start-{{ worker.user_id }}">Start</label>
+                    <label class="schedule-worker-time-label" for="worker-start-{{ worker.user_id }}">Start</label>
                     <input id="worker-start-{{ worker.user_id }}" name="worker_planned_start_time_{{ worker.user_id }}" type="time" value="{{ worker.planned_start_time }}">
-                    <label for="worker-end-{{ worker.user_id }}">End</label>
+                    <label class="schedule-worker-time-label" for="worker-end-{{ worker.user_id }}">End</label>
                     <input id="worker-end-{{ worker.user_id }}" name="worker_planned_end_time_{{ worker.user_id }}" type="time" value="{{ worker.planned_end_time }}">
                 </span>
             </div>

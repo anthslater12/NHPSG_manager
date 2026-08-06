@@ -23,9 +23,9 @@
     {% endif %}
 
     <form class="schedule-week-picker" method="get" action="{{ url_for('schedule_client_index', client_id=client_id) }}">
-        <label for="schedule-date">Go to week</label>
-        <input id="schedule-date" name="date" type="date" value="{{ monday.isoformat() }}">
-        <button type="submit">View week</button>
+        <label class="schedule-week-picker-label" for="schedule-date">Go to week</label>
+        <input class="schedule-week-picker-date" id="schedule-date" name="date" type="date" value="{{ monday.isoformat() }}">
+        <button class="schedule-week-picker-submit" type="submit">View week</button>
     </form>
 
     <div class="schedule-week-grid">
@@ -38,18 +38,13 @@
                 {% if shift.exists %}
                 {% for entry in shift.entries %}
                 <div class="schedule-shift-entry">
-                    <p><strong>Client:</strong> {{ entry.client_name }}</p>
-                    <p class="schedule-time">{{ entry.start_display }}&ndash;{{ entry.end_display }}{% if entry.overnight_next_day %} next day{% endif %}</p>
-                    <p><strong>Status:</strong> {{ entry.status }}</p>
                     {% if entry.workers %}
-                    <p><strong>Staff:</strong></p>
-                    <ul>
+                    <div class="schedule-worker-lines">
                         {% for worker in entry.workers %}
-                        <li>{{ worker.full_name }} &mdash; {{ worker.planned_start_display }}&ndash;{{ worker.planned_end_display }}{% if worker.crosses_midnight %} next day{% endif %}</li>
+                        <div class="schedule-worker-line">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} next day{% endif %} &mdash; {{ worker.full_name }}</div>
                         {% endfor %}
-                    </ul>
+                    </div>
                     {% else %}
-                    <p class="schedule-time">Default planned hours: {{ entry.start_display }}&ndash;{{ entry.end_display }}{% if entry.overnight_next_day %} next day{% endif %}</p>
                     <p>No workers assigned.</p>
                     {% endif %}
                     {% if entry.notes %}
