@@ -57,6 +57,24 @@ CREATE TABLE IF NOT EXISTS schedule_staff (
     schedule_staff_id INTEGER PRIMARY KEY AUTOINCREMENT,
     schedule_shift_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
+    planned_start_time TEXT CHECK (
+        planned_start_time IS NULL
+        OR (
+            length(planned_start_time) = 5
+            AND planned_start_time GLOB '[0-9][0-9]:[0-9][0-9]'
+            AND CAST(substr(planned_start_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23
+            AND CAST(substr(planned_start_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59
+        )
+    ),
+    planned_end_time TEXT CHECK (
+        planned_end_time IS NULL
+        OR (
+            length(planned_end_time) = 5
+            AND planned_end_time GLOB '[0-9][0-9]:[0-9][0-9]'
+            AND CAST(substr(planned_end_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23
+            AND CAST(substr(planned_end_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59
+        )
+    ),
     assignment_note TEXT,
     assigned_by INTEGER NOT NULL,
     assigned_at_utc TEXT NOT NULL CHECK (

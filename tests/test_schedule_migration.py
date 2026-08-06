@@ -88,6 +88,7 @@ class ScheduleMigrationTests(unittest.TestCase):
             )),
             {
                 "schedule_staff_id", "schedule_shift_id", "user_id",
+                "planned_start_time", "planned_end_time",
                 "assignment_note", "assigned_by", "assigned_at_utc",
             }
         )
@@ -129,6 +130,23 @@ class ScheduleMigrationTests(unittest.TestCase):
             "idx_schedule_staff_shift",
             "idx_schedule_staff_user",
         }.issubset(indexes))
+
+    def test_fresh_assignment_hours_are_nullable_but_strict_when_present(self):
+        columns = {
+            row["name"]: row
+            for row in self.conn.execute("PRAGMA table_info(schedule_staff)")
+        }
+        self.assertEqual(columns["planned_start_time"]["notnull"], 0)
+        self.assertEqual(columns["planned_end_time"]["notnull"], 0)
+        shift_id = self.insert_shift()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("""
+                INSERT INTO schedule_staff (
+                    schedule_shift_id, user_id, planned_start_time,
+                    planned_end_time, assigned_by, assigned_at_utc
+                ) VALUES (?, 2, '7:30', '15:30', 1, '2026-08-05T15:00:00Z')
+            """, (shift_id,))
+        self.conn.rollback()
 
     def test_migration_is_idempotent_and_preserves_unrelated_data(self):
         migration.migrate(self.conn)
