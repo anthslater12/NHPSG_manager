@@ -139,6 +139,11 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.assertIn("<div class=\"schedule-pdf-meta-item\"><strong>Generated:", self.last_html)
         self.assertIn('<table class="schedule-pdf-grid">', self.last_html)
         self.assertIn("table-layout: fixed", self.last_html)
+        self.assertIn(".schedule-pdf-grid td { padding: 6pt;", self.last_html)
+        self.assertIn("margin: 0 0 8pt; line-height: 1.25", self.last_html)
+        self.assertIn(".schedule-pdf-notes { margin-top: 5pt", self.last_html)
+        self.assertIn(".schedule-pdf-worker-time {", self.last_html)
+        self.assertIn("font-weight: bold", self.last_html)
         self.assertEqual(self.last_html.count('<th scope="col">'), 7)
         shift_rows = re.findall(
             r'<tr class="schedule-pdf-shift-row">(.*?)</tr>',
@@ -174,7 +179,7 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.assertNotIn("<ul>", self.last_html)
         self.assertNotIn("The live NHPSG Manager schedule is authoritative.", self.last_html)
         self.assertEqual(self.last_html.count("Client / Ten &lt;Test&gt;"), 1)
-        self.assertIn("Notes &lt;must&gt; stay escaped", self.last_html)
+        self.assertIn('class="schedule-pdf-notes"><strong>Notes:</strong> Notes &lt;must&gt; stay escaped', self.last_html)
         self.assertNotIn("The live NHPSG Manager schedule is authoritative.", self.last_html)
         self.assertEqual(before, self.rows("SELECT * FROM schedule_shifts"))
         self.assertEqual(self.rows("SELECT * FROM activity_log"), [])

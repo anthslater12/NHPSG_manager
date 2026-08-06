@@ -16,16 +16,17 @@
         .schedule-pdf-grid th,
         .schedule-pdf-grid td { width: 14.2857%; border: 1px solid #222; vertical-align: top; }
         .schedule-pdf-grid th { padding: 4pt; background: #e8e8e8; text-align: left; }
-        .schedule-pdf-grid td { padding: 4pt; overflow: hidden; }
+        .schedule-pdf-grid td { padding: 6pt; overflow: hidden; }
         .schedule-pdf-day-date { display: block; font-weight: normal; margin-top: 2pt; }
         .schedule-pdf-shift-label { margin: 0 0 3pt; font-weight: bold; }
         .schedule-pdf-shift-content p { margin: 2pt 0; }
         .schedule-pdf-worker-lines { margin: 2pt 0; }
-        .schedule-pdf-worker { max-width: 100%; margin: 0 0 5pt; line-height: 1.2; page-break-inside: avoid; }
+        .schedule-pdf-worker { max-width: 100%; margin: 0 0 8pt; line-height: 1.25; page-break-inside: avoid; }
         .schedule-pdf-worker:last-child { margin-bottom: 0; }
         .schedule-pdf-worker-time { display: inline; max-width: 100%; font-size: 7.5pt; font-weight: bold; white-space: nowrap; }
         .schedule-pdf-worker-separator { white-space: pre; }
         .schedule-pdf-worker-name { overflow-wrap: anywhere; word-break: normal; }
+        .schedule-pdf-notes { margin-top: 5pt !important; }
         .missing { color: #333; font-style: italic; }
         .schedule-pdf-legend { margin-top: 10pt; font-size: 7pt; text-align: left; }
     </style>
@@ -61,7 +62,7 @@
                             {% for worker in entry.workers %}<div class="schedule-pdf-worker"><span class="schedule-pdf-worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} ND{% endif %}</span><span class="schedule-pdf-worker-separator"> &mdash; </span><span class="schedule-pdf-worker-name">{{ worker.full_name }}</span></div>{% endfor %}
                             </div>
                             {% else %}<p>No workers assigned.</p>{% endif %}
-                            {% if entry.notes %}<p><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
+                            {% if entry.notes %}<p class="schedule-pdf-notes"><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
                         {% endfor %}
                         </div>
                     {% else %}
