@@ -7,10 +7,9 @@
         @page { size: Letter landscape; margin: 0.4in; }
         * { box-sizing: border-box; }
         body { font-family: Arial, sans-serif; color: #111; font-size: 8pt; }
-        h1 { margin: 0; font-size: 17pt; }
-        h2 { margin: 2pt 0 8pt; font-size: 12pt; }
-        .metadata { margin-bottom: 10pt; }
-        .metadata p { margin: 2pt 0; }
+        h1 { margin: 0 0 4pt; font-size: 17pt; }
+        .metadata { display: flex; flex-wrap: wrap; gap: 0 14pt; margin-bottom: 6pt; }
+        .metadata span { white-space: nowrap; }
         .schedule-grid {
             display: grid;
             grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -37,19 +36,19 @@
         .shift-entry:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
         .shift-entry p { margin: 2pt 0; }
         .worker-lines { margin: 2pt 0; }
-        .worker-line { line-height: 1.15; page-break-inside: avoid; }
-        .worker-time { font-weight: bold; white-space: nowrap; }
+        .schedule-pdf-worker { max-width: 100%; margin: 0 0 3pt; line-height: 1.25; page-break-inside: avoid; }
+        .schedule-pdf-worker:last-child { margin-bottom: 0; }
+        .schedule-pdf-worker-time { font-weight: bold; white-space: nowrap; }
+        .schedule-pdf-worker-name { overflow-wrap: anywhere; word-break: normal; }
         .missing { color: #333; font-style: italic; }
-        footer { margin-top: 8pt; font-size: 7pt; }
     </style>
 </head>
 <body>
-    <h1>NHPSG Manager</h1>
-    <h2>Weekly Staff Schedule</h2>
+    <h1>NHPSG Manager &mdash; Weekly Staff Schedule</h1>
     <div class="metadata">
-        <p><strong>Client:</strong> {{ client.client_name }}</p>
-        <p><strong>Week:</strong> {{ monday.isoformat() }} to {{ week_end.isoformat() }}</p>
-        <p><strong>Generated:</strong> {{ generated_at }}</p>
+        <span><strong>Client:</strong> {{ client.client_name }}</span>
+        <span><strong>Week:</strong> {{ monday.isoformat() }} to {{ week_end.isoformat() }}</span>
+        <span><strong>Generated:</strong> {{ generated_at }}</span>
     </div>
 
     <div class="schedule-grid">
@@ -67,7 +66,7 @@
                     <div class="shift-entry">
                         {% if entry.workers %}
                         <div class="worker-lines">
-                        {% for worker in entry.workers %}<div class="worker-line"><span class="worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} next day{% endif %}</span><span> &mdash; {{ worker.full_name }}</span></div>{% endfor %}
+                        {% for worker in entry.workers %}<div class="schedule-pdf-worker"><span class="schedule-pdf-worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} next day{% endif %}</span><span class="schedule-pdf-worker-separator"> &mdash; </span><span class="schedule-pdf-worker-name">{{ worker.full_name }}</span></div>{% endfor %}
                         </div>
                         {% else %}<p>No workers assigned.</p>{% endif %}
                         {% if entry.notes %}<p><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
@@ -81,6 +80,5 @@
         </section>
         {% endfor %}
     </div>
-    <footer>The live NHPSG Manager schedule is authoritative.</footer>
 </body>
 </html>
