@@ -213,6 +213,12 @@ class ScheduleNavigationTests(unittest.TestCase):
             response = self.client.get("/schedule/client/10/week/2026-08-03")
             self.assertIn(b'href="/schedule"', response.data)
 
+    def test_management_export_pdf_link_opens_in_new_tab(self):
+        self.login()
+        response = self.client.get("/schedule/client/10/week/2026-08-03")
+        self.assertIn(b'target="_blank"', response.data)
+        self.assertIn(b'rel="noopener"', response.data)
+
     def test_read_only_view_does_not_change_schedule_rows(self):
         self.login()
         with sqlite3.connect(app.DB_NAME) as conn:

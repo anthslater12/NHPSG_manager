@@ -8,11 +8,11 @@
         * { box-sizing: border-box; }
         body { font-family: Arial, sans-serif; color: #111; font-size: 8pt; }
         h1 { margin: 0 0 4pt; font-size: 17pt; }
-        .schedule-pdf-meta { display: table; width: 100%; margin-bottom: 8pt; }
+        .schedule-pdf-meta { display: table; width: 100%; margin-bottom: 14pt; }
         .schedule-pdf-meta-item { display: table-cell; white-space: nowrap; }
         .schedule-pdf-meta-item:nth-child(2) { text-align: center; }
         .schedule-pdf-meta-item:nth-child(3) { text-align: right; }
-        .schedule-pdf-grid { width: 100%; table-layout: fixed; border-collapse: collapse; }
+        .schedule-pdf-grid { width: 100%; margin: 0 auto; table-layout: fixed; border-collapse: collapse; }
         .schedule-pdf-grid th,
         .schedule-pdf-grid td { width: 14.2857%; border: 1px solid #222; vertical-align: top; }
         .schedule-pdf-grid th { padding: 4pt; background: #e8e8e8; text-align: left; }
@@ -27,6 +27,7 @@
         .schedule-pdf-worker-separator { white-space: pre; }
         .schedule-pdf-worker-name { overflow-wrap: anywhere; word-break: normal; }
         .missing { color: #333; font-style: italic; }
+        .schedule-pdf-legend { margin-top: 10pt; font-size: 7pt; text-align: left; }
     </style>
 </head>
 <body>
@@ -57,7 +58,7 @@
                         {% for entry in shift.entries %}
                             {% if entry.workers %}
                             <div class="schedule-pdf-worker-lines">
-                            {% for worker in entry.workers %}<div class="schedule-pdf-worker"><span class="schedule-pdf-worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} next day{% endif %}</span><span class="schedule-pdf-worker-separator"> &mdash; </span><span class="schedule-pdf-worker-name">{{ worker.full_name }}</span></div>{% endfor %}
+                            {% for worker in entry.workers %}<div class="schedule-pdf-worker"><span class="schedule-pdf-worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} ND{% endif %}</span><span class="schedule-pdf-worker-separator"> &mdash; </span><span class="schedule-pdf-worker-name">{{ worker.full_name }}</span></div>{% endfor %}
                             </div>
                             {% else %}<p>No workers assigned.</p>{% endif %}
                             {% if entry.notes %}<p><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
@@ -72,5 +73,6 @@
             {% endfor %}
         </tbody>
     </table>
+    <div class="schedule-pdf-legend">ND = next day</div>
 </body>
 </html>

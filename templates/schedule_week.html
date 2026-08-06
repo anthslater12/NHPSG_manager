@@ -13,7 +13,7 @@
     </div>
 
     {% if can_manage %}
-    <p><a href="{{ url_for('schedule_week_pdf', client_id=client_id, monday=monday.isoformat()) }}">Export PDF</a></p>
+    <p><a href="{{ url_for('schedule_week_pdf', client_id=client_id, monday=monday.isoformat()) }}" target="_blank" rel="noopener">Export PDF</a></p>
     {% endif %}
 
     {% if can_manage and monday >= current_monday %}
