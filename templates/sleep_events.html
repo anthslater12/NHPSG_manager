@@ -10,6 +10,8 @@
     <form method="post">
         <label for="event_local">Event date and time</label>
         <input type="datetime-local" id="event_local" name="event_local" value="{{ values.event_local }}" required>
+        <label for="sleep-note">Optional note</label>
+        <textarea id="sleep-note" name="note" rows="3">{{ values.note }}</textarea>
         <button type="submit" name="event_type" value="fell_asleep">Record Fell Asleep</button>
         <button type="submit" name="event_type" value="woke_up">Record Woke Up</button>
     </form>
@@ -18,11 +20,12 @@
     <h3>Recent Sleep history</h3>
     {% if events %}
         <table>
-            <tr><th>Event</th><th>Date and time</th><th>Recorded by</th></tr>
+            <tr><th>Event</th><th>Date and time</th><th>Notes</th><th>Recorded by</th></tr>
             {% for event in events %}
                 <tr>
                     <td>{{ "Fell asleep" if event.event_type == "fell_asleep" else "Woke up" }}</td>
                     <td>{{ event.event_local_display }}</td>
+                    <td>{{ event.note or "—" }}</td>
                     <td>{{ event.full_name }}</td>
                 </tr>
             {% endfor %}

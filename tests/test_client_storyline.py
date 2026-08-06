@@ -433,13 +433,14 @@ class ClientStorylineTests(unittest.TestCase):
         self.login()
         self.add_event("shift_activity_created", "Trampoline", details="A, T")
         self.add_event("food_fluid_entry_created", "Offered - Juice", details="Outcome: Consumed")
-        self.add_event("sleep_fell_asleep", "Fell asleep")
+        self.add_event("sleep_fell_asleep", "Fell asleep", details="Note: Settled after music")
         page = self.client.get("/client/1/storyline").data
         self.assertEqual(page.count(b'class="storyline-event"'), 3)
         self.assertEqual(page.count(b"storyline-divider"), 3)
         self.assertIn(b"Trampoline", page)
         self.assertIn(b"A, T", page)
         self.assertIn(b"Outcome: Consumed", page)
+        self.assertIn(b"Note: Settled after music", page)
         self.assertIn(b"Fell asleep", page)
 
     def test_activity_details_use_compact_spacing_and_keep_divider(self):

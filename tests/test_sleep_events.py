@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import add_sleep_events_table
+import add_sleep_events_note
 import app
 
 
@@ -43,6 +44,7 @@ class SleepEventsTests(unittest.TestCase):
             INSERT INTO shift_staff VALUES (100, 10, 1, 1), (200, 10, 2, 0);
         """)
         add_sleep_events_table.migrate(conn)
+        add_sleep_events_note.migrate(conn)
         conn.commit()
         conn.close()
 
@@ -56,17 +58,20 @@ class SleepEventsTests(unittest.TestCase):
         conn.close()
         return result
 
-    def post(self, event_type, shift_id=10, event_local="2026-08-02T08:00"):
+    def post(self, event_type, shift_id=10, event_local="2026-08-02T08:00", note=None):
+        data = {"event_type": event_type, "event_local": event_local}
+        if note is not None:
+            data["note"] = note
         return self.client.post(
             f"/shift/{shift_id}/sleep",
-            data={"event_type": event_type, "event_local": event_local}
+            data=data
         )
 
     def test_fresh_schema_has_only_required_sleep_fields_and_constraint(self):
         columns = self.rows("PRAGMA table_info(sleep_events)")
         self.assertEqual([row[1] for row in columns], [
             "sleep_event_id", "client_id", "shift_id", "event_type",
-            "event_datetime", "recorded_by_user_id", "created_at"
+            "event_datetime", "recorded_by_user_id", "note", "created_at"
         ])
         with self.assertRaises(sqlite3.IntegrityError):
             conn = sqlite3.connect(self.path)
@@ -80,19 +85,68 @@ class SleepEventsTests(unittest.TestCase):
         conn.close()
         self.assertEqual(count, 1)
 
+    def test_legacy_migration_adds_nullable_note_idempotently(self):
+        legacy = sqlite3.connect(self.path)
+        legacy.execute("CREATE TABLE legacy_sleep (id INTEGER)")
+        legacy.execute("DROP TABLE sleep_events")
+        legacy.execute("""CREATE TABLE sleep_events (
+            sleep_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL, shift_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL, event_datetime TEXT NOT NULL,
+            recorded_by_user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        legacy.execute("INSERT INTO sleep_events (client_id, shift_id, event_type, event_datetime, recorded_by_user_id) VALUES (2, 10, 'fell_asleep', 'x', 1)")
+        add_sleep_events_note.migrate(legacy)
+        add_sleep_events_note.migrate(legacy)
+        self.assertEqual([row[1] for row in legacy.execute("PRAGMA table_info(sleep_events)") if row[1] == "note"], ["note"])
+        self.assertEqual(legacy.execute("SELECT note FROM sleep_events").fetchone()[0], None)
+        legacy.close()
+
     def test_assigned_worker_records_fell_asleep_with_one_visible_audit(self):
         self.login(1)
         response = self.post("fell_asleep")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type, client_id, shift_id, recorded_by_user_id FROM sleep_events"), [("fell_asleep", 2, 10, 1)])
-        self.assertEqual(self.rows("SELECT activity_type, summary, client_id, shift_id, user_id, related_table, related_id, event_datetime, storyline_visible FROM activity_log"), [("sleep_fell_asleep", "Client fell asleep", 2, 10, 1, "sleep_events", 1, "2026-08-02T15:00:00Z", 1)])
+        self.assertEqual(self.rows("SELECT activity_type, summary, client_id, shift_id, user_id, related_table, related_id, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_fell_asleep", "Client fell asleep", 2, 10, 1, "sleep_events", 1, "2026-08-02T15:00:00Z", None, 0)])
+
+    def test_sleep_note_is_trimmed_and_storyline_visible(self):
+        self.login(1)
+        self.assertEqual(self.post("fell_asleep", note="  Resting <quietly>  ").status_code, 302)
+        self.assertEqual(self.rows("SELECT note FROM sleep_events"), [("Resting <quietly>",)])
+        self.assertEqual(self.rows("SELECT details, storyline_visible FROM activity_log"), [("Note: Resting <quietly>", 1)])
+
+    def test_sleep_history_displays_note_and_escapes_html(self):
+        self.login(1)
+        self.assertEqual(self.post("fell_asleep", note="<b>Settled</b>").status_code, 302)
+        response = self.client.get("/shift/10/sleep")
+        self.assertIn(b"&lt;b&gt;Settled&lt;/b&gt;", response.data)
+        self.assertNotIn(b"<b>Settled</b>", response.data)
+
+    def test_whitespace_only_sleep_note_is_null_and_hidden(self):
+        self.login(1)
+        self.assertEqual(self.post("fell_asleep", note="  \t ").status_code, 302)
+        self.assertEqual(self.rows("SELECT note FROM sleep_events"), [(None,)])
+        self.assertEqual(self.rows("SELECT details, storyline_visible FROM activity_log"), [(None, 0)])
+
+    def test_sleep_history_uses_dash_for_missing_note(self):
+        self.login(1)
+        self.assertEqual(self.post("fell_asleep").status_code, 302)
+        response = self.client.get("/shift/10/sleep")
+        self.assertIn(b">\xe2\x80\x94</td>", response.data)
 
     def test_assigned_worker_records_woke_up_without_prior_event(self):
         self.login(1)
         response = self.post("woke_up")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type FROM sleep_events"), [("woke_up",)])
-        self.assertEqual(self.rows("SELECT activity_type, event_datetime, storyline_visible FROM activity_log"), [("sleep_woke_up", "2026-08-02T15:00:00Z", 1)])
+        self.assertEqual(self.rows("SELECT activity_type, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_woke_up", "2026-08-02T15:00:00Z", None, 0)])
+
+    def test_wake_note_is_stored_and_logged(self):
+        self.login(1)
+        self.assertEqual(self.post("woke_up", note="  Awake & well  ").status_code, 302)
+        self.assertEqual(self.rows("SELECT event_type, note FROM sleep_events"), [("woke_up", "Awake & well")])
+        self.assertEqual(self.rows("SELECT details, storyline_visible FROM activity_log"), [("Note: Awake & well", 1)])
 
     def test_duplicate_events_are_append_only(self):
         self.login(1)

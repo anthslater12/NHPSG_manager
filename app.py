@@ -22,6 +22,7 @@ import time
 import re
 import secrets
 import add_leave_requests_table
+import add_sleep_events_note
 
 app = Flask(__name__)
 app.secret_key = "change-this-later"
@@ -309,6 +310,7 @@ def get_db():
 
         conn.row_factory = sqlite3.Row
         add_leave_requests_table.migrate(conn)
+        add_sleep_events_note.migrate(conn)
         return conn
 
     except Exception as error:
@@ -15596,12 +15598,15 @@ def sleep_events(shift_id):
     values = {
         "event_local": datetime.now(VANCOUVER_TIMEZONE).strftime(
             "%Y-%m-%dT%H:%M"
-        )
+        ),
+        "note": "",
     }
     if request.method == "POST":
         event_type = request.form.get("event_type", "")
         event_local = request.form.get("event_local", "")
+        note = request.form.get("note", "").strip() or None
         values["event_local"] = event_local
+        values["note"] = request.form.get("note", "")
         if event_type not in ("fell_asleep", "woke_up"):
             error = "Sleep event type is invalid."
         else:
@@ -15617,12 +15622,12 @@ def sleep_events(shift_id):
                 cursor = conn.execute("""
                     INSERT INTO sleep_events
                     (client_id, shift_id, event_type, event_datetime,
-                     recorded_by_user_id)
-                    VALUES (?, ?, ?, ?, ?)
+                     recorded_by_user_id, note)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """, (
                     context["client_id"], shift_id, event_type,
                     event_datetime,
-                    session["user_id"]
+                    session["user_id"], note
                 ))
                 event_id = cursor.lastrowid
                 activity_type = (
@@ -15635,6 +15640,7 @@ def sleep_events(shift_id):
                     if event_type == "fell_asleep"
                     else "Client woke up"
                 )
+                activity_details = f"Note: {note}" if note else None
                 log_activity(
                     conn,
                     activity_class="SLEEP",
@@ -15645,9 +15651,10 @@ def sleep_events(shift_id):
                     shift_id=shift_id,
                     related_table="sleep_events",
                     related_id=event_id,
+                    details=activity_details,
                     success=1,
                     event_datetime=event_datetime,
-                    storyline_visible=True
+                    storyline_visible=bool(note)
                 )
                 conn.commit()
                 return redirect(url_for("sleep_events", shift_id=shift_id, created=1))
@@ -15748,6 +15755,10 @@ def client_storyline(client_id):
             if event["details"].startswith(("Outcome:", "Original outcome:")):
                 event["storyline_details"] = event["details"]
         elif event["activity_type"] == "shift_activity_created" and event["details"]:
+            event["storyline_details"] = event["details"]
+        elif event["activity_type"] in {
+            "sleep_fell_asleep", "sleep_woke_up"
+        } and event["details"]:
             event["storyline_details"] = event["details"]
         elif event["activity_type"] == "toileting_event_created" and event["details"]:
             event["storyline_details"] = event["details"]
