@@ -45,10 +45,11 @@
                     <p><strong>Staff:</strong></p>
                     <ul>
                         {% for worker in entry.workers %}
-                        <li>{{ worker }}</li>
+                        <li>{{ worker.full_name }} &mdash; {{ worker.planned_start_display }}&ndash;{{ worker.planned_end_display }}{% if worker.crosses_midnight %} next day{% endif %}</li>
                         {% endfor %}
                     </ul>
                     {% else %}
+                    <p class="schedule-time">Default planned hours: {{ entry.start_display }}&ndash;{{ entry.end_display }}{% if entry.overnight_next_day %} next day{% endif %}</p>
                     <p>No workers assigned.</p>
                     {% endif %}
                     {% if entry.notes %}

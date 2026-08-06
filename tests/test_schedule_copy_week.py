@@ -76,15 +76,19 @@ class ScheduleCopyWeekTests(unittest.TestCase):
     def insert_source_data(self, conn):
         self.insert_shift(
             conn, 10, self.source_monday, "Day", "08:15", "16:45",
-            "Published", "Monday notes", [(4, "Day handover"), (5, "Old assignment")]
+            "Published", "Monday notes", [
+                (4, "Day handover", "08:15", "16:45"),
+                (5, "Old assignment", "08:45", "17:15"),
+            ]
         )
         self.insert_shift(
             conn, 10, self.source_monday + timedelta(days=2), "Overnight",
-            "23:30", "07:00", "Closed", "Overnight notes", [(4, "Night")]
+            "23:30", "07:00", "Closed", "Overnight notes",
+            [(4, "Night", "23:45", "07:30")]
         )
         self.insert_shift(
             conn, 20, self.source_monday, "Day", "06:00", "14:00",
-            "Draft", "Other client", [(4, "Other")]
+            "Draft", "Other client", [(4, "Other", "06:00", "14:00")]
         )
 
     def insert_shift(self, conn, client_id, shift_date, shift_type, start, end,
@@ -100,13 +104,15 @@ class ScheduleCopyWeekTests(unittest.TestCase):
             client_id, shift_date.isoformat(), shift_type, start, end,
             status, notes,
         )).lastrowid
-        for user_id, note in assignments:
+        for assignment in assignments:
+            user_id, note, start, end = assignment
             conn.execute("""
                 INSERT INTO schedule_staff
-                (schedule_shift_id, user_id, assignment_note, assigned_by,
+                (schedule_shift_id, user_id, assignment_note,
+                 planned_start_time, planned_end_time, assigned_by,
                  assigned_at_utc)
-                VALUES (?, ?, ?, 1, '2026-08-01T15:00:00Z')
-            """, (shift_id, user_id, note))
+                VALUES (?, ?, ?, ?, ?, 1, '2026-08-01T15:00:00Z')
+            """, (shift_id, user_id, note, start, end))
         conn.commit()
         return shift_id
 
@@ -173,8 +179,14 @@ class ScheduleCopyWeekTests(unittest.TestCase):
             ORDER BY sh.shift_date, ss.user_id
         """, (self.current_monday.isoformat(),
                (self.current_monday + timedelta(days=6)).isoformat()))
-        self.assertEqual([(row["user_id"], row["assignment_note"]) for row in assignments], [
-            (4, "Day handover"), (5, "Old assignment"), (4, "Night")
+        self.assertEqual([
+            (row["user_id"], row["assignment_note"],
+             row["planned_start_time"], row["planned_end_time"])
+            for row in assignments
+        ], [
+            (4, "Day handover", "08:15", "16:45"),
+            (5, "Old assignment", "08:45", "17:15"),
+            (4, "Night", "23:45", "07:30"),
         ])
         self.assertTrue(all(row["assigned_by"] == 1 for row in assignments))
         event = self.rows("SELECT * FROM activity_log")[0]
@@ -199,6 +211,27 @@ class ScheduleCopyWeekTests(unittest.TestCase):
             "SELECT * FROM schedule_shifts WHERE client_id = 10 AND shift_date >= ?",
             (self.current_monday.isoformat(),)
         )), 2)
+
+    def test_null_source_worker_hours_copy_using_parent_defaults(self):
+        with sqlite3.connect(app.DB_NAME) as conn:
+            conn.execute("""
+                UPDATE schedule_staff
+                SET planned_start_time = NULL, planned_end_time = NULL
+                WHERE schedule_shift_id = (
+                    SELECT schedule_shift_id FROM schedule_shifts
+                    WHERE client_id = 10 AND shift_type = 'Day'
+                ) AND user_id = 4
+            """)
+            conn.commit()
+        self.assertEqual(self.post_copy().status_code, 302)
+        destination = self.rows("""
+            SELECT ss.planned_start_time, ss.planned_end_time
+            FROM schedule_staff AS ss
+            JOIN schedule_shifts AS sh ON sh.schedule_shift_id = ss.schedule_shift_id
+            WHERE sh.client_id = 10 AND sh.shift_date = ? AND sh.shift_type = 'Day'
+              AND ss.user_id = 4
+        """, (self.current_monday.isoformat(),))[0]
+        self.assertEqual((destination[0], destination[1]), ("08:15", "16:45"))
 
     def test_destination_protection_is_atomic(self):
         conn = sqlite3.connect(app.DB_NAME)

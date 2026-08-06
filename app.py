@@ -425,7 +425,9 @@ def _schedule_week_context(conn, monday, client_id):
         SELECT ss.schedule_shift_id, ss.client_id, c.client_name,
                ss.shift_date, ss.shift_type,
                ss.planned_start_time, ss.planned_end_time, ss.status,
-               ss.notes, u.full_name
+               ss.notes, u.user_id, u.full_name,
+               st.planned_start_time AS worker_planned_start_time,
+               st.planned_end_time AS worker_planned_end_time
         FROM schedule_shifts AS ss
         JOIN clients AS c ON c.client_id = ss.client_id
         LEFT JOIN schedule_staff AS st
@@ -439,7 +441,7 @@ def _schedule_week_context(conn, monday, client_id):
                      WHEN 'Afternoon' THEN 2
                      WHEN 'Overnight' THEN 3
                  END,
-                 u.full_name
+                 u.full_name, u.user_id
     """, (client_id, monday.isoformat(), end_date.isoformat())).fetchall()
 
     by_entry = {}
@@ -461,8 +463,32 @@ def _schedule_week_context(conn, monday, client_id):
             "workers": [],
             "exists": True,
         })
-        if row["full_name"] and row["full_name"] not in slot["workers"]:
-            slot["workers"].append(row["full_name"])
+        if row["user_id"] is not None:
+            # Phase 6A columns remain nullable during staged deployment. Keep
+            # this display-only fallback narrow; create/edit validation remains
+            # authoritative and is not bypassed here.
+            worker_start = row["worker_planned_start_time"] or row["planned_start_time"]
+            worker_end = row["worker_planned_end_time"] or row["planned_end_time"]
+            slot["workers"].append({
+                "user_id": row["user_id"],
+                "full_name": row["full_name"],
+                "planned_start_time": worker_start,
+                "planned_end_time": worker_end,
+                "planned_start_display": _format_schedule_time(worker_start),
+                "planned_end_display": _format_schedule_time(worker_end),
+                "crosses_midnight": (
+                    row["shift_type"] == "Overnight"
+                    and worker_end < worker_start
+                ),
+            })
+
+    for slot in by_entry.values():
+        slot["workers"].sort(key=lambda worker: (
+            worker["planned_start_time"],
+            worker["planned_end_time"],
+            worker["full_name"] or "",
+            worker["user_id"],
+        ))
 
     return [{
         "date": day,
@@ -2294,20 +2320,33 @@ def schedule_copy_previous_week(client_id, monday):
                 destination_shift_id = cursor.lastrowid
                 copied_shift_ids[source["schedule_shift_id"]] = destination_shift_id
                 assignments = conn.execute("""
-                    SELECT user_id, assignment_note
+                    SELECT user_id, assignment_note,
+                           planned_start_time, planned_end_time
                     FROM schedule_staff
                     WHERE schedule_shift_id = ?
                     ORDER BY schedule_staff_id
                 """, (source["schedule_shift_id"],)).fetchall()
                 for assignment in assignments:
+                    # Legacy assignments may not yet have individual hours;
+                    # copy their effective display values without writing NULL.
+                    assignment_start = (
+                        assignment["planned_start_time"]
+                        or source["planned_start_time"]
+                    )
+                    assignment_end = (
+                        assignment["planned_end_time"]
+                        or source["planned_end_time"]
+                    )
                     conn.execute("""
                         INSERT INTO schedule_staff
                         (schedule_shift_id, user_id, assignment_note,
+                         planned_start_time, planned_end_time,
                          assigned_by, assigned_at_utc)
-                        VALUES (?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (
                         destination_shift_id, assignment["user_id"],
-                        assignment["assignment_note"], user["user_id"], now_utc,
+                        assignment["assignment_note"], assignment_start,
+                        assignment_end, user["user_id"], now_utc,
                     ))
                     copied_assignment_count += 1
 

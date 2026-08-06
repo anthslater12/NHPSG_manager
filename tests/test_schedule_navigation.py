@@ -79,9 +79,14 @@ class ScheduleNavigationTests(unittest.TestCase):
             ).lastrowid
         conn.executemany("""
             INSERT INTO schedule_staff
-            (schedule_shift_id, user_id, assigned_by, assigned_at_utc)
-            VALUES (?, ?, 1, '2026-08-01T15:00:00Z')
-        """, ((ids["Day"], 2), (ids["Afternoon"], 4)))
+            (schedule_shift_id, user_id, planned_start_time,
+             planned_end_time, assigned_by, assigned_at_utc)
+            VALUES (?, ?, ?, ?, 1, '2026-08-01T15:00:00Z')
+        """, (
+            (ids["Day"], 2, "07:00", "15:00"),
+            (ids["Day"], 4, "08:00", "16:00"),
+            (ids["Afternoon"], 4, "15:30", "23:00"),
+        ))
         # This operational assignment must not leak into the planned schedule.
         conn.execute("""
             CREATE TABLE shift_staff (
@@ -116,12 +121,50 @@ class ScheduleNavigationTests(unittest.TestCase):
         self.assertIn(b"/schedule/client/10/week/2026-07-27", response.data)
         self.assertIn(b"/schedule/client/10/week/2026-08-10", response.data)
         self.assertIn(b"7:30 AM", response.data)
+        self.assertIn(b"Sam Worker &mdash; 7:00 AM&ndash;3:00 PM", response.data)
+        self.assertIn(b"Dana Director &mdash; 8:00 AM&ndash;4:00 PM", response.data)
+        self.assertNotIn(b"Default planned hours: 7:30 AM&ndash;3:30 PM", response.data)
+        self.assertIn(b"Default planned hours: 11:00 PM&ndash;7:30 AM next day", response.data)
         self.assertIn(b"11:00 PM", response.data)
         self.assertIn(b"7:30 AM next day", response.data)
         self.assertIn(b"Sam Worker", response.data)
         self.assertIn(b"Dana Director", response.data)
         self.assertIn(b"Bring the communication book.", response.data)
         self.assertIn(b"Not scheduled", response.data)
+
+    def test_workers_are_ordered_by_individual_start_and_overnight_next_day_is_worker_specific(self):
+        self.login()
+        response = self.client.get("/schedule/client/10/week/2026-08-03")
+        page = response.data.decode()
+        self.assertLess(page.index("Sam Worker &mdash; 7:00 AM"), page.index("Dana Director &mdash; 8:00 AM"))
+        conn = sqlite3.connect(app.DB_NAME)
+        overnight_id = conn.execute("""
+            SELECT schedule_shift_id FROM schedule_shifts
+            WHERE shift_type = 'Overnight'
+        """).fetchone()[0]
+        conn.execute("""
+            INSERT INTO schedule_staff
+            (schedule_shift_id, user_id, planned_start_time, planned_end_time,
+             assigned_by, assigned_at_utc)
+            VALUES (?, 2, '22:00', '06:00', 1, '2026-08-01T15:00:00Z')
+        """, (overnight_id,))
+        conn.commit()
+        conn.close()
+        response = self.client.get("/schedule/client/10/week/2026-08-03")
+        self.assertIn(b"10:00 PM&ndash;6:00 AM next day", response.data)
+
+    def test_null_worker_times_fall_back_to_parent_for_display(self):
+        self.login()
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute("""
+            UPDATE schedule_staff
+            SET planned_start_time = NULL, planned_end_time = NULL
+            WHERE user_id = 2
+        """)
+        conn.commit()
+        conn.close()
+        response = self.client.get("/schedule/client/10/week/2026-08-03")
+        self.assertIn(b"Sam Worker &mdash; 7:30 AM&ndash;3:30 PM", response.data)
 
     def test_shift_order_and_no_operational_assignment_or_write_controls(self):
         self.login()

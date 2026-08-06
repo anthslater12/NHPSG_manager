@@ -70,8 +70,10 @@ class SchedulePdfExportTests(unittest.TestCase):
         shift_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute("""
             INSERT INTO schedule_staff
-            (schedule_shift_id, user_id, assignment_note, assigned_by, assigned_at_utc)
-            VALUES (?, 4, 'assignment', 1, '2026-08-01T15:00:00Z')
+            (schedule_shift_id, user_id, assignment_note, planned_start_time,
+             planned_end_time, assigned_by, assigned_at_utc)
+            VALUES (?, 4, 'assignment', '23:00', '06:30', 1,
+                    '2026-08-01T15:00:00Z')
         """, (shift_id,))
         conn.commit()
         conn.close()
@@ -129,8 +131,9 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.assertIn("Afternoon", self.last_html)
         self.assertIn("Overnight", self.last_html)
         self.assertIn("11:45 PM", self.last_html)
-        self.assertIn("7:15 AM next day", self.last_html)
-        self.assertIn("Sam Worker", self.last_html)
+        self.assertIn("6:30 AM next day", self.last_html)
+        self.assertIn("Sam Worker &mdash; 11:00 PM&ndash;6:30 AM next day", self.last_html)
+        self.assertNotIn("Default planned hours: 11:45 PM&ndash;7:15 AM", self.last_html)
         self.assertIn("Notes &lt;must&gt; stay escaped", self.last_html)
         self.assertIn("Published", self.last_html)
         self.assertIn("The live NHPSG Manager schedule is authoritative.", self.last_html)
