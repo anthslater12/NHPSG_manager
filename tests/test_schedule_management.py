@@ -147,6 +147,182 @@ class ScheduleManagementTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(len(self.rows("SELECT * FROM schedule_shifts")), 2)
 
+    def test_create_worker_specific_hours_are_stored_and_logged(self):
+        self.login()
+        response = self.create(
+            worker_ids=["4", "5"],
+            worker_planned_start_time_4="07:00",
+            worker_planned_end_time_4="15:00",
+            worker_planned_start_time_5="07:30",
+            worker_planned_end_time_5="15:30",
+        )
+        self.assertEqual(response.status_code, 302)
+        rows = self.rows("""
+            SELECT user_id, planned_start_time, planned_end_time
+            FROM schedule_staff ORDER BY user_id
+        """)
+        self.assertEqual(
+            [(row["user_id"], row["planned_start_time"], row["planned_end_time"])
+             for row in rows],
+            [(4, "07:00", "15:00"), (5, "07:30", "15:30")],
+        )
+        events = self.rows("""
+            SELECT activity_type, details FROM activity_log
+            WHERE activity_type = 'schedule_staff_assigned'
+            ORDER BY activity_id
+        """)
+        self.assertIn("Planned hours: 07:30-15:30", events[1]["details"])
+
+    def test_create_afternoon_allows_worker_hours_outside_parent_defaults(self):
+        self.login()
+        response = self.create(
+            shift_type="Afternoon", planned_start_time="14:00", planned_end_time="22:00",
+            worker_ids=["4"], worker_planned_start_time_4="12:00",
+            worker_planned_end_time_4="20:00",
+        )
+        self.assertEqual(response.status_code, 302)
+        row = self.rows("SELECT * FROM schedule_staff")[0]
+        self.assertEqual((row["planned_start_time"], row["planned_end_time"]), ("12:00", "20:00"))
+
+    def test_form_renders_worker_time_fields_and_associated_labels(self):
+        self.login()
+        response = self.client.get("/schedule/client/10/shift/new")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'name="worker_planned_start_time_4"', response.data)
+        self.assertIn(b'name="worker_planned_end_time_4"', response.data)
+        self.assertIn(b'for="worker-start-4"', response.data)
+        self.assertIn(b'for="worker-end-4"', response.data)
+
+    def test_new_worker_blank_times_default_and_partial_blank_rejected(self):
+        self.login()
+        self.assertEqual(self.create(worker_ids=["4"]).status_code, 302)
+        row = self.rows("SELECT * FROM schedule_staff")[0]
+        self.assertEqual((row["planned_start_time"], row["planned_end_time"]), ("07:30", "15:30"))
+
+        response = self.create(
+            shift_type="Afternoon", worker_ids=["5"],
+            worker_planned_start_time_5="14:00",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Planned start and end times are required for Taylor Worker", response.data)
+
+    def test_worker_time_validation_all_shift_types(self):
+        self.login()
+        cases = (
+            {"worker_planned_start_time_4": "7:30", "worker_planned_end_time_4": "15:30"},
+            {"worker_planned_start_time_4": "20:00", "worker_planned_end_time_4": "04:00"},
+            {"shift_type": "Afternoon", "worker_planned_start_time_4": "20:00", "worker_planned_end_time_4": "04:00"},
+            {"shift_type": "Overnight", "worker_planned_start_time_4": "22:00", "worker_planned_end_time_4": "22:00"},
+        )
+        for overrides in cases:
+            response = self.create(worker_ids=["4"], **overrides)
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.create(
+            shift_type="Overnight", planned_start_time="23:00", planned_end_time="07:00",
+            worker_ids=["4"], worker_planned_start_time_4="23:30",
+            worker_planned_end_time_4="06:30",
+        ).status_code, 302)
+
+    def test_unchecked_worker_times_are_ignored(self):
+        self.login()
+        response = self.create(
+            worker_ids=["4"],
+            worker_planned_start_time_5="not-a-time",
+            worker_planned_end_time_5="also-not-a-time",
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.rows("SELECT user_id FROM schedule_staff")[0]["user_id"], 4
+        )
+
+    def test_edit_worker_hours_preserves_assignment_metadata_and_logs_only_changes(self):
+        self.login()
+        self.assertEqual(self.create(worker_ids=["4"]).status_code, 302)
+        shift = self.rows("SELECT * FROM schedule_shifts")[0]
+        before = self.rows("SELECT * FROM schedule_staff")[0]
+        self.assertEqual(self.client.post(
+            f"/schedule/shift/{shift['schedule_shift_id']}/edit",
+            data=self.form(
+                worker_ids=["4"],
+                worker_planned_start_time_4="08:00",
+                worker_planned_end_time_4="16:00",
+            ),
+        ).status_code, 302)
+        after = self.rows("SELECT * FROM schedule_staff")[0]
+        self.assertEqual(after["schedule_staff_id"], before["schedule_staff_id"])
+        self.assertEqual(after["assignment_note"], before["assignment_note"])
+        self.assertEqual(after["assigned_by"], before["assigned_by"])
+        self.assertEqual(after["assigned_at_utc"], before["assigned_at_utc"])
+        events = self.rows("SELECT * FROM activity_log ORDER BY activity_id")
+        hours = [row for row in events if row["activity_type"] == "schedule_staff_hours_updated"]
+        self.assertEqual(len(hours), 1)
+        self.assertEqual(hours[0]["related_id"], after["schedule_staff_id"])
+        self.assertIn("Previous planned hours: 07:30-15:30", hours[0]["details"])
+        self.assertIn("New planned hours: 08:00-16:00", hours[0]["details"])
+
+        self.assertEqual(self.client.post(
+            f"/schedule/shift/{shift['schedule_shift_id']}/edit",
+            data=self.form(
+                worker_ids=["4"],
+                worker_planned_start_time_4="08:00",
+                worker_planned_end_time_4="16:00",
+            ),
+        ).status_code, 302)
+        self.assertEqual(
+            len([row for row in self.rows("SELECT * FROM activity_log")
+                 if row["activity_type"] == "schedule_staff_hours_updated"]),
+            1,
+        )
+
+    def test_edit_parent_defaults_do_not_overwrite_worker_hours(self):
+        self.login()
+        self.assertEqual(self.create(
+            worker_ids=["4"], worker_planned_start_time_4="08:00",
+            worker_planned_end_time_4="16:00",
+        ).status_code, 302)
+        shift = self.rows("SELECT * FROM schedule_shifts")[0]
+        self.assertEqual(self.client.post(
+            f"/schedule/shift/{shift['schedule_shift_id']}/edit",
+            data=self.form(
+                planned_start_time="09:00", planned_end_time="17:00",
+                worker_ids=["4"], worker_planned_start_time_4="08:00",
+                worker_planned_end_time_4="16:00",
+            ),
+        ).status_code, 302)
+        row = self.rows("SELECT * FROM schedule_staff")[0]
+        self.assertEqual((row["planned_start_time"], row["planned_end_time"]), ("08:00", "16:00"))
+
+    def test_hours_update_activity_failure_rolls_back_all_edit_changes(self):
+        self.login()
+        self.assertEqual(self.create(worker_ids=["4"]).status_code, 302)
+        shift = self.rows("SELECT * FROM schedule_shifts")[0]
+        original = app.log_activity
+
+        def fail_hours(conn, *args, **kwargs):
+            if args[1] == "schedule_staff_hours_updated":
+                raise RuntimeError("activity failure")
+            return original(conn, *args, **kwargs)
+
+        app.log_activity = fail_hours
+        try:
+            response = self.client.post(
+                f"/schedule/shift/{shift['schedule_shift_id']}/edit",
+                data=self.form(
+                    planned_start_time="09:00", planned_end_time="17:00",
+                    worker_ids=["4"],
+                    worker_planned_start_time_4="08:00",
+                    worker_planned_end_time_4="16:00",
+                ),
+            )
+        finally:
+            app.log_activity = original
+        self.assertEqual(response.status_code, 500)
+        shift_after = self.rows("SELECT * FROM schedule_shifts")[0]
+        assignment_after = self.rows("SELECT * FROM schedule_staff")[0]
+        self.assertEqual((shift_after["planned_start_time"], shift_after["planned_end_time"]), ("07:30", "15:30"))
+        self.assertEqual((assignment_after["planned_start_time"], assignment_after["planned_end_time"]), ("07:30", "15:30"))
+        self.assertEqual(len(self.rows("SELECT * FROM activity_log")), 2)
+
     def test_validation_rejects_bad_values_and_duplicate_schedule(self):
         self.login()
         invalid = (
@@ -198,7 +374,9 @@ class ScheduleManagementTests(unittest.TestCase):
             f"/schedule/shift/{shift['schedule_shift_id']}/edit",
             data=self.form(
                 planned_start_time="08:15", planned_end_time="16:45",
-                status="Published", notes="Updated notes", worker_ids=["4"]
+                status="Published", notes="Updated notes", worker_ids=["4"],
+                worker_planned_start_time_4="07:30",
+                worker_planned_end_time_4="15:30",
             ),
         )
         self.assertEqual(response.status_code, 302)

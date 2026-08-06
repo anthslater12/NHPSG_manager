@@ -499,6 +499,46 @@ def _schedule_active_workers(conn):
     """).fetchall()
 
 
+def _schedule_worker_time_values(form, worker_id):
+    return (
+        (form.get(f"worker_planned_start_time_{worker_id}") or "").strip(),
+        (form.get(f"worker_planned_end_time_{worker_id}") or "").strip(),
+    )
+
+
+def _validate_schedule_worker_hours(worker_name, shift_type, start_value, end_value):
+    if not start_value or not end_value:
+        return f"Planned start and end times are required for {worker_name}."
+    try:
+        start = datetime.strptime(start_value, "%H:%M").time()
+        end = datetime.strptime(end_value, "%H:%M").time()
+    except ValueError:
+        return f"Planned hours for {worker_name} must use HH:MM."
+    if shift_type in ("Day", "Afternoon") and end <= start:
+        return (
+            f"{shift_type} shift end time for {worker_name} must be later "
+            "than the start time."
+        )
+    if shift_type == "Overnight" and end == start:
+        return f"Overnight start and end times for {worker_name} cannot be equal."
+    return None
+
+
+def _schedule_staff_hours_details(
+    worker_id, worker_name, previous_start, previous_end, new_start, new_end,
+    shift_id, shift_date, shift_type,
+):
+    return (
+        f"Worker user ID: {worker_id}\n"
+        f"Worker: {worker_name or 'Unknown'}\n"
+        f"Previous planned hours: {previous_start}-{previous_end}\n"
+        f"New planned hours: {new_start}-{new_end}\n"
+        f"Parent schedule shift ID: {shift_id}\n"
+        f"Shift date: {shift_date}\n"
+        f"Shift type: {shift_type}"
+    )
+
+
 def _schedule_form_values(conn, form, existing=None, client_id=None):
     errors = []
     if existing is None:
@@ -553,6 +593,33 @@ def _schedule_form_values(conn, form, existing=None, client_id=None):
     if not selected_ids.issubset(workers):
         errors.append("Only active Support Workers may be assigned.")
 
+    existing_assignments = {}
+    if existing is not None:
+        existing_assignments = {
+            row["user_id"]: row for row in conn.execute("""
+                SELECT schedule_staff_id, user_id, planned_start_time,
+                       planned_end_time
+                FROM schedule_staff
+                WHERE schedule_shift_id = ?
+            """, (existing["schedule_shift_id"],)).fetchall()
+        }
+    worker_times = {}
+    for worker_id in sorted(selected_ids):
+        worker_start, worker_end = _schedule_worker_time_values(form, worker_id)
+        if not worker_start and not worker_end and worker_id not in existing_assignments:
+            worker_start, worker_end = start_value, end_value
+        worker_times[worker_id] = {
+            "planned_start_time": worker_start,
+            "planned_end_time": worker_end,
+        }
+        if worker_id in workers:
+            worker_error = _validate_schedule_worker_hours(
+                workers[worker_id]["full_name"], shift_type,
+                worker_start, worker_end,
+            )
+            if worker_error:
+                errors.append(worker_error)
+
     today = datetime.now(VANCOUVER_TIMEZONE).date()
     if shift_date is not None and shift_date < today:
         errors.append("Past schedules cannot be edited.")
@@ -570,22 +637,49 @@ def _schedule_form_values(conn, form, existing=None, client_id=None):
         "status": status,
         "notes": (form.get("notes") or "").strip(),
         "worker_ids": selected_ids,
+        "worker_times": worker_times,
         "workers": workers,
         "errors": errors,
     }
 
 
 def _schedule_form_context(conn, values, existing=None, client=None):
+    existing_assignments = {}
+    if existing is not None:
+        existing_assignments = {
+            row["user_id"]: row for row in conn.execute("""
+                SELECT schedule_staff_id, user_id, planned_start_time,
+                       planned_end_time
+                FROM schedule_staff
+                WHERE schedule_shift_id = ?
+            """, (existing["schedule_shift_id"],)).fetchall()
+        }
+    worker_times = values.get("worker_times", {})
+    workers = []
+    for row in _schedule_active_workers(conn):
+        worker_id = row["user_id"]
+        submitted = worker_times.get(worker_id)
+        stored = existing_assignments.get(worker_id)
+        if submitted is not None:
+            start_value = submitted["planned_start_time"]
+            end_value = submitted["planned_end_time"]
+        elif stored is not None:
+            start_value = stored["planned_start_time"] or ""
+            end_value = stored["planned_end_time"] or ""
+        else:
+            start_value = values.get("planned_start_time", "")
+            end_value = values.get("planned_end_time", "")
+        workers.append({
+            "user_id": worker_id,
+            "full_name": row["full_name"],
+            "selected": worker_id in values.get("worker_ids", set()),
+            "planned_start_time": start_value,
+            "planned_end_time": end_value,
+        })
     return {
         "values": values,
         "client": client,
-        "workers": _schedule_active_workers(conn),
-        "existing_worker_ids": {
-            row["user_id"] for row in conn.execute("""
-                SELECT user_id FROM schedule_staff
-                WHERE schedule_shift_id = ?
-            """, (existing["schedule_shift_id"],)).fetchall()
-        } if existing else set(),
+        "workers": workers,
         "editing": existing is not None,
         "error": "; ".join(values.get("errors", [])),
     }
@@ -1679,6 +1773,7 @@ def _schedule_form_defaults(request_args):
         "status": "Draft",
         "notes": "",
         "worker_ids": set(),
+        "worker_times": {},
         "errors": [],
     }
 
@@ -1776,11 +1871,15 @@ def schedule_shift_new(client_id):
                         storyline_visible=False,
                     )
                     for worker_id in sorted(values["worker_ids"]):
+                        worker_hours = values["worker_times"][worker_id]
                         assignment = conn.execute("""
                             INSERT INTO schedule_staff
-                            (schedule_shift_id, user_id, assigned_by, assigned_at_utc)
-                            VALUES (?, ?, ?, ?)
+                            (schedule_shift_id, user_id, planned_start_time,
+                             planned_end_time, assigned_by, assigned_at_utc)
+                            VALUES (?, ?, ?, ?, ?, ?)
                         """, (schedule_shift_id, worker_id,
+                               worker_hours["planned_start_time"],
+                               worker_hours["planned_end_time"],
                                user["user_id"], now_utc))
                         log_activity(
                             conn, "SCHEDULE", "schedule_staff_assigned",
@@ -1788,7 +1887,12 @@ def schedule_shift_new(client_id):
                             user_id=user["user_id"], client_id=values["client_id"],
                             related_table="schedule_staff",
                             related_id=assignment.lastrowid,
-                            details=f"Worker user ID: {worker_id}",
+                            details=(
+                                f"Worker user ID: {worker_id}\n"
+                                f"Planned hours: "
+                                f"{worker_hours['planned_start_time']}-"
+                                f"{worker_hours['planned_end_time']}"
+                            ),
                             storyline_visible=False,
                         )
                     conn.commit()
@@ -1881,24 +1985,72 @@ def schedule_shift_edit(schedule_shift_id):
                         details=_schedule_log_details(values), storyline_visible=False,
                     )
                     old_rows = conn.execute("""
-                        SELECT schedule_staff_id, user_id
-                        FROM schedule_staff WHERE schedule_shift_id = ?
+                        SELECT ss.schedule_staff_id, ss.user_id,
+                               ss.planned_start_time, ss.planned_end_time,
+                               u.full_name
+                        FROM schedule_staff AS ss
+                        JOIN users AS u ON u.user_id = ss.user_id
+                        WHERE ss.schedule_shift_id = ?
                     """, (schedule_shift_id,)).fetchall()
                     old_by_user = {row["user_id"]: row for row in old_rows}
                     for worker_id in sorted(values["worker_ids"] - old_by_user.keys()):
+                        worker_hours = values["worker_times"][worker_id]
                         assignment = conn.execute("""
                             INSERT INTO schedule_staff
-                            (schedule_shift_id, user_id, assigned_by, assigned_at_utc)
-                            VALUES (?, ?, ?, ?)
+                            (schedule_shift_id, user_id, planned_start_time,
+                             planned_end_time, assigned_by, assigned_at_utc)
+                            VALUES (?, ?, ?, ?, ?, ?)
                         """, (schedule_shift_id, worker_id,
+                               worker_hours["planned_start_time"],
+                               worker_hours["planned_end_time"],
                                user["user_id"], now_utc))
                         log_activity(
                             conn, "SCHEDULE", "schedule_staff_assigned",
                             f"Staff assigned to schedule shift {schedule_shift_id}",
                             user_id=user["user_id"], client_id=existing["client_id"],
                             related_table="schedule_staff", related_id=assignment.lastrowid,
-                            details=f"Worker user ID: {worker_id}", storyline_visible=False,
+                            details=(
+                                f"Worker user ID: {worker_id}\n"
+                                f"Planned hours: "
+                                f"{worker_hours['planned_start_time']}-"
+                                f"{worker_hours['planned_end_time']}"
+                            ), storyline_visible=False,
                         )
+                    for worker_id in sorted(values["worker_ids"] & old_by_user.keys()):
+                        old_assignment = old_by_user[worker_id]
+                        worker_hours = values["worker_times"][worker_id]
+                        old_start = old_assignment["planned_start_time"]
+                        old_end = old_assignment["planned_end_time"]
+                        if (
+                            worker_hours["planned_start_time"] != old_start
+                            or worker_hours["planned_end_time"] != old_end
+                        ):
+                            conn.execute("""
+                                UPDATE schedule_staff
+                                SET planned_start_time = ?, planned_end_time = ?
+                                WHERE schedule_staff_id = ?
+                            """, (
+                                worker_hours["planned_start_time"],
+                                worker_hours["planned_end_time"],
+                                old_assignment["schedule_staff_id"],
+                            ))
+                            log_activity(
+                                conn, "SCHEDULE", "schedule_staff_hours_updated",
+                                f"Planned hours updated for {old_assignment['full_name']}",
+                                user_id=user["user_id"],
+                                client_id=existing["client_id"],
+                                related_table="schedule_staff",
+                                related_id=old_assignment["schedule_staff_id"],
+                                details=_schedule_staff_hours_details(
+                                    worker_id, old_assignment["full_name"],
+                                    old_start, old_end,
+                                    worker_hours["planned_start_time"],
+                                    worker_hours["planned_end_time"],
+                                    schedule_shift_id, existing["shift_date"],
+                                    existing["shift_type"],
+                                ),
+                                storyline_visible=False,
+                            )
                     for worker_id in sorted(old_by_user.keys() - values["worker_ids"]):
                         assignment_id = old_by_user[worker_id]["schedule_staff_id"]
                         conn.execute(

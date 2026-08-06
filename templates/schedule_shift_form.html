@@ -56,12 +56,25 @@
 
         <fieldset>
             <legend>Assigned active Support Workers</legend>
+            <div class="schedule-worker-header" aria-hidden="true">
+                <span>Assigned / Worker</span>
+                <span>Start</span>
+                <span>End</span>
+            </div>
             <div class="schedule-worker-options">
             {% for worker in workers %}
-            <label class="schedule-worker-option">
-                <input type="checkbox" name="worker_ids" value="{{ worker.user_id }}"{% if worker.user_id in values.worker_ids or worker.user_id in existing_worker_ids %} checked{% endif %}>
+            <div class="schedule-worker-option">
+                <label class="schedule-worker-name">
+                <input type="checkbox" name="worker_ids" value="{{ worker.user_id }}"{% if worker.selected %} checked{% endif %}>
                 <span>{{ worker.full_name }}</span>
-            </label>
+                </label>
+                <span class="schedule-worker-hours">
+                    <label for="worker-start-{{ worker.user_id }}">Start</label>
+                    <input id="worker-start-{{ worker.user_id }}" name="worker_planned_start_time_{{ worker.user_id }}" type="time" value="{{ worker.planned_start_time }}">
+                    <label for="worker-end-{{ worker.user_id }}">End</label>
+                    <input id="worker-end-{{ worker.user_id }}" name="worker_planned_end_time_{{ worker.user_id }}" type="time" value="{{ worker.planned_end_time }}">
+                </span>
+            </div>
             {% else %}
             <p>No active Support Workers available.</p>
             {% endfor %}
