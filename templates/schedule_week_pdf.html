@@ -8,10 +8,11 @@
         * { box-sizing: border-box; }
         body { font-family: Arial, sans-serif; color: #111; font-size: 8pt; }
         h1 { margin: 0 0 4pt; font-size: 17pt; }
+        .schedule-pdf-week { margin: 0 0 4pt; font-size: 17pt; font-weight: bold; text-align: center; }
         .schedule-pdf-meta { display: table; width: 100%; margin-bottom: 14pt; }
         .schedule-pdf-meta-item { display: table-cell; white-space: nowrap; }
-        .schedule-pdf-meta-item:nth-child(2) { text-align: center; }
-        .schedule-pdf-meta-item:nth-child(3) { text-align: right; }
+        .schedule-pdf-meta-client { text-align: left; }
+        .schedule-pdf-meta-generated { text-align: right; }
         .schedule-pdf-grid { width: 100%; margin: 0 auto; table-layout: fixed; border-collapse: collapse; }
         .schedule-pdf-grid th,
         .schedule-pdf-grid td { width: 14.2857%; border: 1px solid #222; vertical-align: top; }
@@ -33,10 +34,10 @@
 </head>
 <body>
     <h1>NHPSG Manager &mdash; Weekly Staff Schedule</h1>
+    <div class="schedule-pdf-week">Week: {{ monday.isoformat() }} to {{ week_end.isoformat() }}</div>
     <div class="schedule-pdf-meta">
-        <div class="schedule-pdf-meta-item"><strong>Client:</strong> {{ client.client_name }}</div>
-        <div class="schedule-pdf-meta-item"><strong>Week:</strong> {{ monday.isoformat() }} to {{ week_end.isoformat() }}</div>
-        <div class="schedule-pdf-meta-item"><strong>Generated:</strong> {{ generated_at }}</div>
+        <div class="schedule-pdf-meta-item schedule-pdf-meta-client"><strong>Client:</strong> {{ client.client_name }}</div>
+        <div class="schedule-pdf-meta-item schedule-pdf-meta-generated"><strong>Generated:</strong> {{ generated_at }}</div>
     </div>
 
     <table class="schedule-pdf-grid">
