@@ -35,9 +35,10 @@
         .shift-label { margin: 0 0 3pt; font-weight: bold; }
         .shift-entry { border-top: 1px solid #aaa; padding-top: 3pt; margin-top: 3pt; }
         .shift-entry:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
-        p { margin: 2pt 0; }
-        ul { margin: 2pt 0 2pt 12pt; padding: 0; }
-        .time { font-weight: bold; }
+        .shift-entry p { margin: 2pt 0; }
+        .worker-lines { margin: 2pt 0; }
+        .worker-line { line-height: 1.15; page-break-inside: avoid; }
+        .worker-time { font-weight: bold; white-space: nowrap; }
         .missing { color: #333; font-style: italic; }
         footer { margin-top: 8pt; font-size: 7pt; }
     </style>
@@ -64,14 +65,11 @@
                 {% if shift.exists %}
                     {% for entry in shift.entries %}
                     <div class="shift-entry">
-                        <p class="time">{{ entry.start_display }}&ndash;{{ entry.end_display }}{% if entry.overnight_next_day %} next day{% endif %}</p>
-                        <p><strong>Status:</strong> {{ entry.status }}</p>
                         {% if entry.workers %}
-                        <p><strong>Staff:</strong></p>
-                        <ul>
-                        {% for worker in entry.workers %}<li>{{ worker.full_name }} &mdash; {{ worker.planned_start_display }}&ndash;{{ worker.planned_end_display }}{% if worker.crosses_midnight %} next day{% endif %}</li>{% endfor %}
-                        </ul>
-                        {% else %}<p class="time">Default planned hours: {{ entry.start_display }}&ndash;{{ entry.end_display }}{% if entry.overnight_next_day %} next day{% endif %}</p><p>No workers assigned.</p>{% endif %}
+                        <div class="worker-lines">
+                        {% for worker in entry.workers %}<div class="worker-line"><span class="worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} next day{% endif %}</span><span> &mdash; {{ worker.full_name }}</span></div>{% endfor %}
+                        </div>
+                        {% else %}<p>No workers assigned.</p>{% endif %}
                         {% if entry.notes %}<p><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
                     </div>
                     {% endfor %}
