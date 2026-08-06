@@ -8,77 +8,69 @@
         * { box-sizing: border-box; }
         body { font-family: Arial, sans-serif; color: #111; font-size: 8pt; }
         h1 { margin: 0 0 4pt; font-size: 17pt; }
-        .metadata { display: flex; flex-wrap: wrap; gap: 0 14pt; margin-bottom: 6pt; }
-        .metadata span { white-space: nowrap; }
-        .schedule-grid {
-            display: grid;
-            grid-template-columns: repeat(7, minmax(0, 1fr));
-            border-top: 1px solid #222;
-            border-left: 1px solid #222;
-        }
-        .day-column { min-width: 0; border-right: 1px solid #222; }
-        .day-heading {
-            min-height: 30pt;
-            padding: 4pt;
-            background: #e8e8e8;
-            border-bottom: 1px solid #222;
-            font-weight: bold;
-        }
-        .day-date { display: block; font-weight: normal; margin-top: 2pt; }
-        .shift-cell {
-            min-height: 84pt;
-            padding: 4pt;
-            border-bottom: 1px solid #222;
-            page-break-inside: avoid;
-        }
-        .shift-label { margin: 0 0 3pt; font-weight: bold; }
-        .shift-entry { border-top: 1px solid #aaa; padding-top: 3pt; margin-top: 3pt; }
-        .shift-entry:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
-        .shift-entry p { margin: 2pt 0; }
-        .worker-lines { margin: 2pt 0; }
-        .schedule-pdf-worker { max-width: 100%; margin: 0 0 3pt; line-height: 1.25; page-break-inside: avoid; }
+        .schedule-pdf-meta { display: table; width: 100%; margin-bottom: 8pt; }
+        .schedule-pdf-meta-item { display: table-cell; white-space: nowrap; }
+        .schedule-pdf-meta-item:nth-child(2) { text-align: center; }
+        .schedule-pdf-meta-item:nth-child(3) { text-align: right; }
+        .schedule-pdf-grid { width: 100%; table-layout: fixed; border-collapse: collapse; }
+        .schedule-pdf-grid th,
+        .schedule-pdf-grid td { width: 14.2857%; border: 1px solid #222; vertical-align: top; }
+        .schedule-pdf-grid th { padding: 4pt; background: #e8e8e8; text-align: left; }
+        .schedule-pdf-grid td { padding: 4pt; overflow: hidden; }
+        .schedule-pdf-day-date { display: block; font-weight: normal; margin-top: 2pt; }
+        .schedule-pdf-shift-label { margin: 0 0 3pt; font-weight: bold; }
+        .schedule-pdf-shift-content p { margin: 2pt 0; }
+        .schedule-pdf-worker-lines { margin: 2pt 0; }
+        .schedule-pdf-worker { max-width: 100%; margin: 0 0 5pt; line-height: 1.2; page-break-inside: avoid; }
         .schedule-pdf-worker:last-child { margin-bottom: 0; }
-        .schedule-pdf-worker-time { font-weight: bold; white-space: nowrap; }
+        .schedule-pdf-worker-time { display: inline; max-width: 100%; font-size: 7.5pt; font-weight: bold; white-space: nowrap; }
+        .schedule-pdf-worker-separator { white-space: pre; }
         .schedule-pdf-worker-name { overflow-wrap: anywhere; word-break: normal; }
         .missing { color: #333; font-style: italic; }
     </style>
 </head>
 <body>
     <h1>NHPSG Manager &mdash; Weekly Staff Schedule</h1>
-    <div class="metadata">
-        <span><strong>Client:</strong> {{ client.client_name }}</span>
-        <span><strong>Week:</strong> {{ monday.isoformat() }} to {{ week_end.isoformat() }}</span>
-        <span><strong>Generated:</strong> {{ generated_at }}</span>
+    <div class="schedule-pdf-meta">
+        <div class="schedule-pdf-meta-item"><strong>Client:</strong> {{ client.client_name }}</div>
+        <div class="schedule-pdf-meta-item"><strong>Week:</strong> {{ monday.isoformat() }} to {{ week_end.isoformat() }}</div>
+        <div class="schedule-pdf-meta-item"><strong>Generated:</strong> {{ generated_at }}</div>
     </div>
 
-    <div class="schedule-grid">
-        {% for day in days %}
-        <section class="day-column">
-            <div class="day-heading">
-                {{ day.label }}
-                <span class="day-date">{{ day.date_iso }}</span>
-            </div>
-            {% for shift in day.shifts %}
-            <div class="shift-cell">
-                <p class="shift-label">{{ shift.shift_type }}</p>
-                {% if shift.exists %}
-                    {% for entry in shift.entries %}
-                    <div class="shift-entry">
-                        {% if entry.workers %}
-                        <div class="worker-lines">
-                        {% for worker in entry.workers %}<div class="schedule-pdf-worker"><span class="schedule-pdf-worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} next day{% endif %}</span><span class="schedule-pdf-worker-separator"> &mdash; </span><span class="schedule-pdf-worker-name">{{ worker.full_name }}</span></div>{% endfor %}
+    <table class="schedule-pdf-grid">
+        <thead>
+            <tr>
+                {% for day in days %}
+                <th scope="col">{{ day.label }}<span class="schedule-pdf-day-date">{{ day.date_iso }}</span></th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for shift_index in range(3) %}
+            <tr class="schedule-pdf-shift-row">
+                {% for day in days %}
+                {% set shift = day.shifts[shift_index] %}
+                <td>
+                    <div class="schedule-pdf-shift-label">{{ shift.shift_type }}</div>
+                    {% if shift.exists %}
+                        <div class="schedule-pdf-shift-content">
+                        {% for entry in shift.entries %}
+                            {% if entry.workers %}
+                            <div class="schedule-pdf-worker-lines">
+                            {% for worker in entry.workers %}<div class="schedule-pdf-worker"><span class="schedule-pdf-worker-time">{{ worker.planned_start_display|replace(" ", "") }}&ndash;{{ worker.planned_end_display|replace(" ", "") }}{% if worker.crosses_midnight %} next day{% endif %}</span><span class="schedule-pdf-worker-separator"> &mdash; </span><span class="schedule-pdf-worker-name">{{ worker.full_name }}</span></div>{% endfor %}
+                            </div>
+                            {% else %}<p>No workers assigned.</p>{% endif %}
+                            {% if entry.notes %}<p><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
+                        {% endfor %}
                         </div>
-                        {% else %}<p>No workers assigned.</p>{% endif %}
-                        {% if entry.notes %}<p><strong>Notes:</strong> {{ entry.notes }}</p>{% endif %}
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <p class="missing">Not scheduled</p>
-                {% endif %}
-            </div>
+                    {% else %}
+                        <p class="missing">Not scheduled</p>
+                    {% endif %}
+                </td>
+                {% endfor %}
+            </tr>
             {% endfor %}
-        </section>
-        {% endfor %}
-    </div>
+        </tbody>
+    </table>
 </body>
 </html>

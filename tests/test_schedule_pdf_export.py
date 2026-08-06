@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -131,10 +132,22 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.assertTrue(response.data.startswith(b"%PDF-1.7"))
         self.assertIn("<h1>NHPSG Manager &mdash; Weekly Staff Schedule</h1>", self.last_html)
         self.assertIn("Client / Ten &lt;Test&gt;", self.last_html)
-        self.assertIn("<div class=\"metadata\">", self.last_html)
-        self.assertIn("<span><strong>Client:</strong>", self.last_html)
-        self.assertIn("<span><strong>Week:</strong>", self.last_html)
-        self.assertIn("<span><strong>Generated:</strong>", self.last_html)
+        self.assertIn("<div class=\"schedule-pdf-meta\">", self.last_html)
+        self.assertEqual(self.last_html.count('class="schedule-pdf-meta-item"'), 3)
+        self.assertIn("<div class=\"schedule-pdf-meta-item\"><strong>Client:", self.last_html)
+        self.assertIn("<div class=\"schedule-pdf-meta-item\"><strong>Week:", self.last_html)
+        self.assertIn("<div class=\"schedule-pdf-meta-item\"><strong>Generated:", self.last_html)
+        self.assertIn('<table class="schedule-pdf-grid">', self.last_html)
+        self.assertIn("table-layout: fixed", self.last_html)
+        self.assertEqual(self.last_html.count('<th scope="col">'), 7)
+        shift_rows = re.findall(
+            r'<tr class="schedule-pdf-shift-row">(.*?)</tr>',
+            self.last_html,
+            flags=re.DOTALL,
+        )
+        self.assertEqual(len(shift_rows), 3)
+        self.assertTrue(all(row.count("<td>") == 7 for row in shift_rows))
+        self.assertEqual(self.last_html.count('class="schedule-pdf-worker"'), 2)
         self.assertIn("2026-", self.last_html)
         self.assertIn("Monday", self.last_html)
         self.assertIn("Sunday", self.last_html)
@@ -153,6 +166,7 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.assertNotIn("<strong>Status:</strong>", self.last_html)
         self.assertNotIn("<strong>Staff:</strong>", self.last_html)
         self.assertNotIn("<ul>", self.last_html)
+        self.assertNotIn("The live NHPSG Manager schedule is authoritative.", self.last_html)
         self.assertEqual(self.last_html.count("Client / Ten &lt;Test&gt;"), 1)
         self.assertIn("Notes &lt;must&gt; stay escaped", self.last_html)
         self.assertNotIn("The live NHPSG Manager schedule is authoritative.", self.last_html)
