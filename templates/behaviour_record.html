@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+{% include "_documentation_context_banner.html" %}
 <div class="card"><h2>Record Behaviour</h2>
 {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
 <form method="post">

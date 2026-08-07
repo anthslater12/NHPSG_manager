@@ -1725,7 +1725,8 @@ def _behaviour_recent_occurrences(conn, client_id):
 
 def _render_behaviour_record(
     conn, selected_client_id=None, error=None, values=None, shift_context=False,
-    submission_token=None, duplicate_warning=None
+    submission_token=None, duplicate_warning=None,
+    documentation_context=None, documentation_context_alternatives=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -1744,7 +1745,11 @@ def _render_behaviour_record(
         abc_response_fields=ABC_RESPONSE_FIELDS,
         abc_field_labels=ABC_FIELD_LABELS,
         now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"),
-        values=values, shift_context=shift_context)
+        values=values, shift_context=shift_context,
+        documentation_context=documentation_context,
+        documentation_context_alternatives=(
+            documentation_context_alternatives or []
+        ))
 
 
 @app.route("/schedule")
@@ -2434,39 +2439,38 @@ def behaviour_record(shift_id=None):
         return "Access denied", 403
 
     shift = None
+    documentation_context = None
+    documentation_context_alternatives = []
     if shift_id is not None:
         if user["role"] != "Support Worker":
             conn.close()
             return "Access denied", 403
-        shift = conn.execute("""
-            SELECT shift_id, client_id, status
-            FROM shifts
-            WHERE shift_id = ?
-        """, (shift_id,)).fetchone()
-        if shift is None:
-            conn.close()
-            return "Shift not found", 404
-        if shift["status"] != "Open":
-            conn.close()
-            return "Behaviour can only be recorded during an open shift.", 403
         try:
-            validate_active_behaviour_client(conn, shift["client_id"])
-        except ValueError:
+            shift, documentation_context_alternatives = (
+                get_worker_documentation_module_context(
+                    conn, shift_id, user["user_id"]
+                )
+            )
+        except DocumentationContextUnavailable:
             conn.close()
-            return "An active client is required.", 403
-        assigned = conn.execute("""
-            SELECT 1
-            FROM shift_staff
-            WHERE shift_id = ? AND user_id = ? AND active = 1
-        """, (shift_id, user["user_id"])).fetchone()
-        if assigned is None:
+            return _documentation_context_redirect()
+        except PermissionError:
             conn.close()
             return "Access denied", 403
+        documentation_context = (
+            dict(shift)
+            if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+            else None
+        )
 
     if request.method == "GET":
         selected = shift["client_id"] if shift is not None else request.args.get("client_id", type=int)
         response = _render_behaviour_record(
-            conn, selected, shift_context=shift is not None
+            conn, selected, shift_context=shift is not None,
+            documentation_context=documentation_context,
+            documentation_context_alternatives=(
+                documentation_context_alternatives
+            )
         )
         conn.close()
         return response
@@ -2543,6 +2547,13 @@ def behaviour_record(shift_id=None):
         token = request.form.get("submission_token", "")
         if not BEHAVIOUR_TOKEN_PATTERN.fullmatch(token):
             raise ValueError("Behaviour submission token is invalid.")
+        if shift_id is not None:
+            shift, documentation_context_alternatives = (
+                get_worker_documentation_module_context(
+                    conn, shift_id, user["user_id"]
+                )
+            )
+            client_id = shift["client_id"]
         confirmation_values = request.form.getlist("confirm_distinct_episode")
         if len(confirmation_values) > 1 or (
             confirmation_values and confirmation_values[0] != "1"
@@ -2575,7 +2586,11 @@ def behaviour_record(shift_id=None):
                 response = _render_behaviour_record(
                     conn, client_id, values=values,
                     shift_context=True, submission_token=token,
-                    duplicate_warning=duplicate_warning
+                    duplicate_warning=duplicate_warning,
+                    documentation_context=documentation_context,
+                    documentation_context_alternatives=(
+                        documentation_context_alternatives
+                    )
                 )
                 conn.close()
                 return response
@@ -2641,6 +2656,11 @@ def behaviour_record(shift_id=None):
         week = get_behaviour_operational_week_start(behaviour_utc_to_vancouver(occurrence_utc))
         conn.close()
         return redirect(url_for("behaviour_weekly", monday=week.isoformat()))
+    except DocumentationContextUnavailable:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+        return _documentation_context_redirect()
     except (ValueError, PermissionError) as error:
         selected_client = (
             shift["client_id"] if shift is not None
@@ -2649,7 +2669,11 @@ def behaviour_record(shift_id=None):
         response = _render_behaviour_record(
             conn, selected_client, str(error), values,
             shift_context=shift is not None,
-            submission_token=values.get("submission_token")
+            submission_token=values.get("submission_token"),
+            documentation_context=documentation_context,
+            documentation_context_alternatives=(
+                documentation_context_alternatives
+            )
         )
         conn.close()
         return response, 400
@@ -3066,6 +3090,93 @@ def _store_documentation_shift_id(shift_id):
 
 def _clear_documentation_shift_id():
     session.pop(DOCUMENTATION_CONTEXT_SESSION_KEY, None)
+
+
+class DocumentationContextUnavailable(PermissionError):
+    """The selected worker documentation context is no longer usable."""
+
+
+def _documentation_context_redirect():
+    _clear_documentation_shift_id()
+    flash(
+        "Your documentation shift is no longer available. "
+        "Please choose another shift."
+    )
+    return redirect(url_for("documentation_context"))
+
+
+def get_worker_documentation_module_context(
+    conn,
+    requested_shift_id,
+    user_id,
+    active_context_loader=None
+):
+    """Resolve one worker module context without granting session authority."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may record documentation."
+        )
+
+    raw_selected_id = session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+    selected_id = _session_documentation_shift_id()
+    if raw_selected_id is not None and selected_id is None:
+        _clear_documentation_shift_id()
+        raise DocumentationContextUnavailable()
+
+    if selected_id is not None:
+        if requested_shift_id != selected_id:
+            raise DocumentationContextUnavailable()
+        state = get_worker_documentation_context_state(
+            conn,
+            actor["user_id"],
+            selected_shift_id=selected_id
+        )
+        selected = state["selected"]
+        if selected is None:
+            _clear_documentation_shift_id()
+            raise DocumentationContextUnavailable()
+        context = dict(selected)
+        context["status"] = context.get("shift_status")
+        context["recorded_by_user_id"] = actor["user_id"]
+        context["editable"] = True
+        alternatives = [
+            candidate
+            for candidate in state["available"]
+            if candidate["shift_id"] != selected_id
+        ]
+        return context, alternatives
+
+    if active_context_loader is not None:
+        return active_context_loader(
+            conn, requested_shift_id, actor["user_id"]
+        ), []
+
+    context = conn.execute("""
+        SELECT
+            s.*,
+            c.client_name,
+            c.active AS client_active,
+            ss.shift_staff_id,
+            ss.active AS assignment_active,
+            ? AS recorded_by_user_id,
+            1 AS editable
+        FROM shifts s
+        JOIN clients c ON c.client_id = s.client_id
+        JOIN shift_staff ss
+          ON ss.shift_id = s.shift_id
+         AND ss.user_id = ?
+        WHERE s.shift_id = ?
+          AND s.status = 'Open'
+          AND c.active = 1
+          AND ss.active = 1
+        LIMIT 1
+    """, (actor["user_id"], actor["user_id"], requested_shift_id)).fetchone()
+    if context is None:
+        raise PermissionError(
+            "Active participation in this open shift is required."
+        )
+    return dict(context), []
 
 
 def can_edit_shared_shift_note(conn, shift, user_id):
@@ -15612,6 +15723,14 @@ def shift_dashboard(shift_id):
                 if context["shift_id"] != shift_id
             ]
 
+    if documentation_context is not None:
+        food_fluid_authorized = True
+        recent_food_fluid_entries = get_food_fluid_shift_entries(
+            conn, shift_id, limit=5
+        )
+        sleep_authorized = True
+        recent_sleep_events = get_sleep_events(conn, shift_id)[:5]
+
     conn.close()
 
     return render_template(
@@ -15665,19 +15784,27 @@ def toileting_event_new(shift_id):
 
     conn = get_db()
 
-    shift = conn.execute("""
-    SELECT
-        shifts.*,
-        clients.client_name
-    FROM shifts
-    JOIN clients
-        ON shifts.client_id = clients.client_id
-    WHERE shifts.shift_id = ?
-    """, (shift_id,)).fetchone()
-
-    if shift is None:
+    cancelled_shift = conn.execute(
+        "SELECT shift_id, status FROM shifts WHERE shift_id = ?",
+        (shift_id,)
+    ).fetchone()
+    if cancelled_shift and _shift_is_cancelled(cancelled_shift):
         conn.close()
-        return "Shift not found", 404
+        return _cancelled_shift_response()
+
+    try:
+        shift, documentation_context_alternatives = (
+            get_worker_documentation_module_context(
+                conn, shift_id, session["user_id"]
+            )
+        )
+    except DocumentationContextUnavailable:
+        conn.close()
+        return _documentation_context_redirect()
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
+
     if _shift_is_cancelled(shift):
         conn.close()
         return _cancelled_shift_response()
@@ -15884,7 +16011,15 @@ def toileting_event_new(shift_id):
                 behaviour_during=behaviour_during,
                 behaviour_after=behaviour_after,
                 behaviour_comments=behaviour_comments,
-                general_comments=general_comments
+                general_comments=general_comments,
+                documentation_context=(
+                    shift
+                    if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                    else None
+                ),
+                documentation_context_alternatives=(
+                    documentation_context_alternatives
+                )
             )
 
         if event_type == "Urination":
@@ -15904,7 +16039,19 @@ def toileting_event_new(shift_id):
         if urine_unusual != "Yes":
             urine_unusual_details = None
 
-        cur = conn.execute("""
+        try:
+            shift, documentation_context_alternatives = (
+                get_worker_documentation_module_context(
+                    conn, shift_id, session["user_id"]
+                )
+            )
+        except DocumentationContextUnavailable:
+            conn.close()
+            return _documentation_context_redirect()
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute("""
             INSERT INTO toileting_events
             (
                 shift_id,
@@ -15925,52 +16072,55 @@ def toileting_event_new(shift_id):
                 general_comments
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            shift_id,
-            shift["client_id"],
-            session["user_id"],
-            event_type,
-            event_datetime,
-            location,
-            bm_size,
-            bm_consistency,
-            bm_unusual_details,
-            urine_volume,
-            urine_unusual_details,
-            behaviour_before,
-            behaviour_during,
-            behaviour_after,
-            behaviour_comments,
-            general_comments
-        ))
+            """, (
+                shift_id,
+                shift["client_id"],
+                session["user_id"],
+                event_type,
+                event_datetime,
+                location,
+                bm_size,
+                bm_consistency,
+                bm_unusual_details,
+                urine_volume,
+                urine_unusual_details,
+                behaviour_before,
+                behaviour_during,
+                behaviour_after,
+                behaviour_comments,
+                general_comments
+            ))
 
-        toileting_event_id = cur.lastrowid
+            toileting_event_id = cur.lastrowid
 
-        toileting_details = format_toileting_storyline_details(
-            location, bm_size, bm_consistency,
-            behaviour_before, behaviour_during, behaviour_after,
-            behaviour_comments, general_comments
-        )
+            toileting_details = format_toileting_storyline_details(
+                location, bm_size, bm_consistency,
+                behaviour_before, behaviour_during, behaviour_after,
+                behaviour_comments, general_comments
+            )
 
-        log_activity(
-            conn,
-            activity_class="TOILETING",
-            activity_type="toileting_event_created",
-            summary=f"Toileting event recorded: {event_type}",
-            user_id=session["user_id"],
-            client_id=shift["client_id"],
-            shift_id=shift_id,
-            related_table="toileting_events",
-            related_id=toileting_event_id,
-            details="\n".join(toileting_details) or None,
-            success=1,
-            event_datetime=convert_vancouver_occurrence_input_to_utc(
-                event_datetime
-            ),
-            storyline_visible=True
-        )
-
-        conn.commit()
+            log_activity(
+                conn,
+                activity_class="TOILETING",
+                activity_type="toileting_event_created",
+                summary=f"Toileting event recorded: {event_type}",
+                user_id=session["user_id"],
+                client_id=shift["client_id"],
+                shift_id=shift_id,
+                related_table="toileting_events",
+                related_id=toileting_event_id,
+                details="\n".join(toileting_details) or None,
+                success=1,
+                event_datetime=convert_vancouver_occurrence_input_to_utc(
+                    event_datetime
+                ),
+                storyline_visible=True
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
         conn.close()
 
         return redirect(
@@ -15984,7 +16134,15 @@ def toileting_event_new(shift_id):
 
     return render_template(
         "toileting_event_new.html",
-        shift=shift
+        shift=shift,
+        documentation_context=(
+            shift
+            if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+            else None
+        ),
+        documentation_context_alternatives=(
+            documentation_context_alternatives
+        )
     )
 
 
@@ -15999,9 +16157,17 @@ def sleep_events(shift_id):
 
     conn = get_db()
     try:
-        context = get_active_sleep_shift_context(
-            conn, shift_id, session["user_id"]
+        context, documentation_context_alternatives = (
+                get_worker_documentation_module_context(
+                    conn,
+                    shift_id,
+                    session["user_id"],
+                    active_context_loader=get_active_sleep_shift_context
+                )
         )
+    except DocumentationContextUnavailable:
+        conn.close()
+        return _documentation_context_redirect()
     except PermissionError:
         conn.close()
         return "Active participation in this open shift is required.", 403
@@ -16031,6 +16197,14 @@ def sleep_events(shift_id):
                 if event_utc > datetime.now(timezone.utc) + timedelta(minutes=5):
                     raise ValueError("Sleep event cannot be unreasonably in the future.")
                 event_datetime = event_utc.isoformat().replace("+00:00", "Z")
+                context, documentation_context_alternatives = (
+                    get_worker_documentation_module_context(
+                        conn,
+                        shift_id,
+                        session["user_id"],
+                        active_context_loader=get_active_sleep_shift_context
+                    )
+                )
                 cursor = conn.execute("""
                     INSERT INTO sleep_events
                     (client_id, shift_id, event_type, event_datetime,
@@ -16070,6 +16244,11 @@ def sleep_events(shift_id):
                 )
                 conn.commit()
                 return redirect(url_for("sleep_events", shift_id=shift_id, created=1))
+            except DocumentationContextUnavailable:
+                if conn.in_transaction:
+                    conn.rollback()
+                conn.close()
+                return _documentation_context_redirect()
             except (ValueError, sqlite3.IntegrityError) as caught_error:
                 if conn.in_transaction:
                     conn.rollback()
@@ -16082,7 +16261,14 @@ def sleep_events(shift_id):
         shift=context,
         events=events,
         error=error,
-        values=values
+        values=values,
+        documentation_context=(
+            context if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+            else None
+        ),
+        documentation_context_alternatives=(
+            documentation_context_alternatives
+        )
     )
 
 
@@ -16225,17 +16411,30 @@ def food_fluid_shift_list(shift_id):
 
     conn = get_db()
     try:
-        shift_context = get_active_food_fluid_shift_context(
-            conn,
-            shift_id,
-            session["user_id"]
+        shift_context, documentation_context_alternatives = (
+            get_worker_documentation_module_context(
+                conn,
+                shift_id,
+                session["user_id"],
+                active_context_loader=get_active_food_fluid_shift_context
+            )
         )
         entries = get_food_fluid_shift_entries(conn, shift_id)
         return render_template(
             "food_fluid_shift_list.html",
             shift=shift_context,
-            entries=entries
+            entries=entries,
+            documentation_context=(
+                shift_context
+                if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                else None
+            ),
+            documentation_context_alternatives=(
+                documentation_context_alternatives
+            )
         )
+    except DocumentationContextUnavailable:
+        return _documentation_context_redirect()
     except PermissionError:
         return "Access denied", 403
     finally:
@@ -16255,10 +16454,13 @@ def food_fluid_entry_new(shift_id):
     values = {}
 
     try:
-        shift_context = get_active_food_fluid_shift_context(
-            conn,
-            shift_id,
-            session["user_id"]
+        shift_context, documentation_context_alternatives = (
+            get_worker_documentation_module_context(
+                conn,
+                shift_id,
+                session["user_id"],
+                active_context_loader=get_active_food_fluid_shift_context
+            )
         )
 
         if request.method == "GET":
@@ -16269,6 +16471,14 @@ def food_fluid_entry_new(shift_id):
                 error=None,
                 interaction_types=FOOD_FLUID_INTERACTION_TYPES,
                 outcomes=FOOD_FLUID_OUTCOMES,
+                documentation_context=(
+                    shift_context
+                    if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                    else None
+                ),
+                documentation_context_alternatives=(
+                    documentation_context_alternatives
+                ),
                 default_event_local=datetime.now(
                     VANCOUVER_TIMEZONE
                 ).strftime("%Y-%m-%dT%H:%M")
@@ -16357,10 +16567,13 @@ def food_fluid_entry_new(shift_id):
 
         conn.execute("BEGIN IMMEDIATE")
         try:
-            shift_context = get_active_food_fluid_shift_context(
-                conn,
-                shift_id,
-                session["user_id"]
+            shift_context, documentation_context_alternatives = (
+                get_worker_documentation_module_context(
+                    conn,
+                    shift_id,
+                    session["user_id"],
+                    active_context_loader=get_active_food_fluid_shift_context
+                )
             )
             event_at_utc = convert_food_fluid_event_input_to_utc(
                 shift_context,
@@ -16436,6 +16649,10 @@ def food_fluid_entry_new(shift_id):
             )
         )
 
+    except DocumentationContextUnavailable:
+        if conn.in_transaction:
+            conn.rollback()
+        return _documentation_context_redirect()
     except PermissionError:
         if conn.in_transaction:
             conn.rollback()
@@ -16450,6 +16667,14 @@ def food_fluid_entry_new(shift_id):
             error=str(error),
             interaction_types=FOOD_FLUID_INTERACTION_TYPES,
             outcomes=FOOD_FLUID_OUTCOMES,
+            documentation_context=(
+                shift_context
+                if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                else None
+            ),
+            documentation_context_alternatives=(
+                documentation_context_alternatives
+            ),
             default_event_local=datetime.now(
                 VANCOUVER_TIMEZONE
             ).strftime("%Y-%m-%dT%H:%M")
@@ -17811,10 +18036,13 @@ def shift_activities(shift_id):
     values = {}
 
     try:
-        context = get_shift_activity_context(
-            conn,
-            shift_id,
-            session["user_id"]
+        context, documentation_context_alternatives = (
+            get_worker_documentation_module_context(
+                conn,
+                shift_id,
+                session["user_id"],
+                active_context_loader=get_shift_activity_context
+            )
         )
 
         if request.method == "POST":
@@ -17827,10 +18055,13 @@ def shift_activities(shift_id):
 
             conn.execute("BEGIN IMMEDIATE")
             try:
-                context = require_active_shift_activity_context(
-                    conn,
-                    shift_id,
-                    session["user_id"]
+                context, documentation_context_alternatives = (
+                    get_worker_documentation_module_context(
+                        conn,
+                        shift_id,
+                        session["user_id"],
+                        active_context_loader=get_shift_activity_context
+                    )
                 )
                 cursor = conn.execute("""
                     INSERT INTO shift_activities
@@ -17903,8 +18134,20 @@ def shift_activities(shift_id):
             entries=entries,
             values=values,
             error=None,
-            created=request.args.get("created") == "1"
+            created=request.args.get("created") == "1",
+            documentation_context=(
+                context
+                if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                else None
+            ),
+            documentation_context_alternatives=(
+                documentation_context_alternatives
+            )
         )
+    except DocumentationContextUnavailable:
+        if conn.in_transaction:
+            conn.rollback()
+        return _documentation_context_redirect()
     except LookupError:
         return "Shift not found", 404
     except PermissionError:
@@ -17921,7 +18164,15 @@ def shift_activities(shift_id):
             entries=entries,
             values=values,
             error=str(error),
-            created=False
+            created=False,
+            documentation_context=(
+                context
+                if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                else None
+            ),
+            documentation_context_alternatives=(
+                documentation_context_alternatives
+            )
         ), 400
     finally:
         conn.close()
