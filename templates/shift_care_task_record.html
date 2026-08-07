@@ -2,9 +2,22 @@
 
 {% block content %}
 
+{% include "_documentation_context_banner.html" %}
+
 <div class="card">
 
 <h2>Record Care Task</h2>
+
+<p>
+    <strong>Client:</strong> {{ documentation_context.client_name }}
+</p>
+
+{% if documentation_context and documentation_context.period_label == "Previous" %}
+    <p class="documentation-context-late-note">
+        You are entering late documentation for care that occurred during
+        this selected completed shift. The shift is not being reopened.
+    </p>
+{% endif %}
 
 {% if error %}
     <div class="error-message">

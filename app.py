@@ -3239,6 +3239,39 @@ def get_shift_activity_context(conn, shift_id, user_id):
     return context
 
 
+def get_applicable_care_tasks(conn, shift):
+    """Return active Care routines applicable to one exact shift."""
+    return conn.execute("""
+        SELECT *
+        FROM care_tasks
+        WHERE active = 1
+          AND occurs LIKE ?
+        ORDER BY task_name
+    """, (f"%{shift['shift_type']}%",)).fetchall()
+
+
+def get_care_active_documentation_context(conn, shift_id, user_id):
+    """Resolve an exact active Care documentation context."""
+    context = get_worker_documentation_shift_context(
+        conn,
+        shift_id,
+        user_id
+    )
+    if context is None:
+        raise PermissionError(
+            "Active participation in this open shift is required."
+        )
+    if context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE:
+        raise PermissionError(
+            "An explicit documentation context is required for this shift."
+        )
+    context = _documentation_context_view(context)
+    context["status"] = context.get("shift_status")
+    context["recorded_by_user_id"] = user_id
+    context["editable"] = True
+    return context
+
+
 def require_active_shift_activity_context(conn, shift_id, user_id):
     """Return authoritative context for an Activity V1 append."""
     context = get_shift_activity_context(conn, shift_id, user_id)
@@ -15634,13 +15667,7 @@ def shift_dashboard(shift_id):
         session["user_id"]
     )
     
-    care_tasks = conn.execute("""
-        SELECT *
-        FROM care_tasks
-        WHERE active = 1
-        AND occurs LIKE ?
-        ORDER BY task_name
-    """, (f"%{shift['shift_type']}%",)).fetchall()
+    care_tasks = get_applicable_care_tasks(conn, shift)
 
     care_task_entries = conn.execute("""
         SELECT
@@ -21757,142 +21784,216 @@ def shift_care_task_record(shift_id, care_task_id):
         return redirect(url_for("login"))
 
     conn = get_db()
+    context = None
+    task = None
+    status = request.form.get("status", "")
+    comment = request.form.get("comment", "").strip()
 
-    shift = conn.execute("""
-        SELECT *
-        FROM shifts
-        WHERE shift_id = ?
-    """, (shift_id,)).fetchone()
-
-    task = conn.execute("""
-        SELECT *
-        FROM care_tasks
-        WHERE care_task_id = ?
-    """, (care_task_id,)).fetchone()
-
-    if shift is None:
-        conn.close()
-        return "Shift not found", 404
-    if _shift_is_cancelled(shift):
-        conn.close()
-        return _cancelled_shift_response()
-
-    if task is None:
-        conn.close()
-        return "Care task not found", 404
-
-    if request.method == "POST":
-        status = request.form.get("status", "")
-        comment = request.form.get("comment", "").strip()
-
-        error = None
-
-        valid_outcomes = [
-            "Completed",
-            "Attempted",
-            "Not Completed",
-        ]
-
-        if status not in valid_outcomes:
-            error = "Please select a valid outcome."
-
-        elif (
-            status == "Attempted"
-            and task["comment_required_attempted"] == 1
-            and not comment
-        ):
-            error = "A comment is required when this task is Attempted."
-
-        elif (
-            status == "Not Completed"
-            and task["comment_required_not_completed"] == 1
-            and not comment
-        ):
-            error = (
-                "A comment is required when this task is Not Completed."
+    def render_record(error=None, response_status=200):
+        return render_template(
+            "shift_care_task_record.html",
+            shift=context,
+            task=task,
+            error=error,
+            selected_status=status,
+            comment=comment,
+            documentation_context=context,
+            documentation_context_alternatives=(
+                documentation_context_alternatives
             )
+        ), response_status
 
-        if error:
-            conn.close()
-
-            return render_template(
-                "shift_care_task_record.html",
-                shift=shift,
-                task=task,
-                error=error,
-                selected_status=status,
-                comment=comment
+    try:
+        context, documentation_context_alternatives = (
+            get_worker_documentation_module_context(
+                conn,
+                shift_id,
+                session["user_id"],
+                active_context_loader=(
+                    get_care_active_documentation_context
+                )
             )
+        )
 
-        existing = conn.execute("""
-            SELECT entry_id
-            FROM shift_care_task_entries
-            WHERE shift_id = ?
-              AND care_task_id = ?
-        """, (
-            shift_id,
-            care_task_id
-        )).fetchone()
+        applicable_tasks = get_applicable_care_tasks(conn, context)
+        task = next(
+            (
+                candidate
+                for candidate in applicable_tasks
+                if candidate["care_task_id"] == care_task_id
+            ),
+            None
+        )
+        if task is None:
+            return "Care task not found or not applicable", 404
 
-        if existing:
+        if request.method == "POST":
+            error = None
+            valid_outcomes = [
+                "Completed",
+                "Attempted",
+                "Not Completed",
+            ]
 
-            conn.close()
+            if status not in valid_outcomes:
+                error = "Please select a valid outcome."
+            elif (
+                status == "Attempted"
+                and task["comment_required_attempted"] == 1
+                and not comment
+            ):
+                error = "A comment is required when this task is Attempted."
+            elif (
+                status == "Not Completed"
+                and task["comment_required_not_completed"] == 1
+                and not comment
+            ):
+                error = (
+                    "A comment is required when this task is Not Completed."
+                )
+
+            if error:
+                return render_record(error, 400)
+
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                context, documentation_context_alternatives = (
+                    get_worker_documentation_module_context(
+                        conn,
+                        shift_id,
+                        session["user_id"],
+                        active_context_loader=(
+                            get_care_active_documentation_context
+                        )
+                    )
+                )
+                applicable_tasks = get_applicable_care_tasks(
+                    conn,
+                    context
+                )
+                task = next(
+                    (
+                        candidate
+                        for candidate in applicable_tasks
+                        if candidate["care_task_id"] == care_task_id
+                    ),
+                    None
+                )
+                if task is None:
+                    raise LookupError(
+                        "Care task not found or not applicable."
+                    )
+
+                existing = conn.execute("""
+                    SELECT entry_id
+                    FROM shift_care_task_entries
+                    WHERE shift_id = ?
+                      AND care_task_id = ?
+                """, (
+                    context["shift_id"],
+                    care_task_id
+                )).fetchone()
+
+                if existing:
+                    if (
+                        context["documentation_access"]
+                        == DOCUMENTATION_ACCESS_POST_SHIFT
+                    ):
+                        raise PermissionError(
+                            "This Care result already exists and cannot "
+                            "be edited through post-shift documentation."
+                        )
+                    conn.rollback()
+                    return redirect(
+                        url_for(
+                            "shift_care_task_entry_edit",
+                            shift_id=context["shift_id"],
+                            entry_id=existing["entry_id"]
+                        )
+                    )
+
+                cur = conn.execute("""
+                    INSERT INTO shift_care_task_entries
+                    (
+                        shift_id,
+                        care_task_id,
+                        outcome,
+                        comment,
+                        completed_by_user_id
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    context["shift_id"],
+                    care_task_id,
+                    status,
+                    comment,
+                    context["recorded_by_user_id"]
+                ))
+
+                entry_id = cur.lastrowid
+
+                log_activity(
+                    conn,
+                    activity_class="CARE",
+                    activity_type=(
+                        f"care_task_{status.lower().replace(' ', '_')}"
+                    ),
+                    summary=f"{task['task_name']} - {status}",
+                    user_id=context["recorded_by_user_id"],
+                    client_id=context["client_id"],
+                    shift_id=context["shift_id"],
+                    related_table="shift_care_task_entries",
+                    related_id=entry_id,
+                    storyline_visible=True,
+                    details=comment,
+                    success=1
+                )
+                conn.commit()
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
 
             return redirect(
                 url_for(
-                    "shift_care_task_entry_edit",
-                    shift_id=shift_id,
-                    entry_id=existing["entry_id"]
+                    "shift_dashboard",
+                    shift_id=context["shift_id"]
                 )
             )
 
-        cur = conn.execute("""
-            INSERT INTO shift_care_task_entries
-            (
-                shift_id,
-                care_task_id,
-                outcome,
-                comment,
-                completed_by_user_id
-            )
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            shift_id,
-            care_task_id,
-            status,
-            comment,
-            session["user_id"]
-        ))
-
-        entry_id = cur.lastrowid
-
-        log_activity(
-            conn,
-            activity_class="CARE",
-            activity_type=f"care_task_{status.lower().replace(' ', '_')}",
-            summary=f"{task['task_name']} - {status}",
-            user_id=session["user_id"],
-            client_id=shift["client_id"],
-            shift_id=shift_id,
-            related_table="shift_care_task_entries",
-            related_id=entry_id,
-            storyline_visible=True,
-            details=comment,
-            success=1
-        )
-
-        conn.commit()
+        return render_record()
+    except DocumentationContextUnavailable:
+        if conn.in_transaction:
+            conn.rollback()
+        return _documentation_context_redirect()
+    except LookupError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        if str(error) == "Care task not found or not applicable.":
+            return str(error), 404
+        return "Shift not found", 404
+    except PermissionError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        if str(error).startswith("This Care result already exists"):
+            return render_record(str(error), 409)
+        cancelled_shift = conn.execute("""
+            SELECT status
+            FROM shifts
+            WHERE shift_id = ?
+        """, (shift_id,)).fetchone()
+        if (
+            cancelled_shift is not None
+            and cancelled_shift["status"] == SHIFT_CANCELLED_STATUS
+        ):
+            return _cancelled_shift_response()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return "The Care result could not be recorded. Please retry.", 500
+    finally:
         conn.close()
-
-        return redirect(url_for("shift_dashboard", shift_id=shift_id))
-
-    conn.close()
-
-    return render_template(
-        "shift_care_task_record.html",
-        shift=shift,
-        task=task
-    )
 
 @app.route(
     "/shift/<int:shift_id>/care-task-entry/<int:entry_id>/edit",
