@@ -837,12 +837,15 @@ class ShiftCancellationTests(unittest.TestCase):
             f"/shift/{shift_id}/end-shift",
             f"/shift/{shift_id}/care-task/1/record",
             f"/shift/{shift_id}/care-task-entry/1/edit",
-            f"/shift/{shift_id}/housekeeping-task/1/record",
-            f"/shift/{shift_id}/housekeeping-task-entry/1/edit"
+            f"/shift/{shift_id}/housekeeping-task/1/record"
         ):
             with self.subTest(path=path):
                 response = client.get(path)
                 self.assertEqual(response.status_code, 409)
+        housekeeping_edit_response = client.get(
+            f"/shift/{shift_id}/housekeeping-task-entry/1/edit"
+        )
+        self.assertEqual(housekeeping_edit_response.status_code, 404)
         food_fluid_response = client.get(
             f"/shift/{shift_id}/food-fluid"
         )

@@ -3096,6 +3096,10 @@ class DocumentationContextUnavailable(PermissionError):
     """The selected worker documentation context is no longer usable."""
 
 
+class AuthorizedCancelledHousekeepingEntry(LookupError):
+    """An authorized owner's Housekeeping entry belongs to a cancelled shift."""
+
+
 def _documentation_context_redirect():
     _clear_documentation_shift_id()
     flash(
@@ -3307,6 +3311,100 @@ def get_housekeeping_active_documentation_context(
     context["recorded_by_user_id"] = user_id
     context["editable"] = True
     return context
+
+
+def get_housekeeping_edit_context(conn, shift_id, entry_id, user_id):
+    """Resolve an authorized Current-context Housekeeping edit."""
+    raw_selected_id = session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+    selected_id = _session_documentation_shift_id()
+    if raw_selected_id is None or selected_id != shift_id:
+        raise DocumentationContextUnavailable()
+
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may edit documentation."
+        )
+
+    entry = conn.execute("""
+        SELECT
+            shte.*,
+            ht.task_name,
+            ht.comment_required_attempted,
+            ht.comment_required_not_completed,
+            s.client_id,
+            s.status AS shift_status,
+            c.client_name,
+            c.active AS client_active
+        FROM shift_housekeeping_task_entries shte
+        JOIN housekeeping_tasks ht
+          ON ht.housekeeping_task_id = shte.housekeeping_task_id
+        JOIN shifts s
+          ON s.shift_id = shte.shift_id
+        JOIN clients c
+          ON c.client_id = s.client_id
+        WHERE shte.entry_id = ?
+          AND shte.shift_id = ?
+          AND shte.completed_by_user_id = ?
+    """, (entry_id, shift_id, actor["user_id"])).fetchone()
+    if (
+        entry is not None
+        and entry["shift_status"] == SHIFT_CANCELLED_STATUS
+    ):
+        assignment = conn.execute("""
+            SELECT 1
+            FROM shift_staff
+            WHERE shift_id = ?
+              AND user_id = ?
+              AND active = 1
+              AND actual_start_time IS NOT NULL
+              AND TRIM(actual_start_time) <> ''
+              AND sign_on_at IS NOT NULL
+              AND actual_end_at_utc IS NULL
+            LIMIT 1
+        """, (shift_id, actor["user_id"])).fetchone()
+        if entry["client_active"] == 1 and assignment is not None:
+            raise AuthorizedCancelledHousekeepingEntry()
+
+    context, _ = get_worker_documentation_module_context(
+        conn,
+        shift_id,
+        user_id,
+        active_context_loader=get_housekeeping_active_documentation_context
+    )
+    if context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE:
+        raise DocumentationContextUnavailable()
+
+    entry = conn.execute("""
+        SELECT
+            shte.*,
+            ht.task_name,
+            ht.comment_required_attempted,
+            ht.comment_required_not_completed,
+            s.client_id,
+            s.status AS shift_status,
+            c.client_name,
+            c.active AS client_active
+        FROM shift_housekeeping_task_entries shte
+        JOIN housekeeping_tasks ht
+          ON ht.housekeeping_task_id = shte.housekeeping_task_id
+        JOIN shifts s
+          ON s.shift_id = shte.shift_id
+        JOIN clients c
+          ON c.client_id = s.client_id
+        WHERE shte.entry_id = ?
+          AND shte.shift_id = ?
+          AND shte.completed_by_user_id = ?
+    """, (
+        entry_id,
+        shift_id,
+        context["recorded_by_user_id"]
+    )).fetchone()
+    if entry is None or entry["client_id"] != context["client_id"]:
+        raise LookupError("Housekeeping task entry not found")
+    if entry["shift_status"] == SHIFT_CANCELLED_STATUS:
+        raise AuthorizedCancelledHousekeepingEntry()
+    return context, entry
 
 
 def require_active_shift_activity_context(conn, shift_id, user_id):
@@ -23171,150 +23269,153 @@ def shift_housekeeping_task_entry_edit(
     shift_id,
     entry_id
 ):
-
     if "user_id" not in session:
         return redirect(url_for("login"))
 
     conn = get_db()
+    context = None
+    entry = None
+    outcome = request.form.get("status", "")
+    comment = request.form.get("comment", "").strip()
 
-    shift = conn.execute("""
-        SELECT *
-        FROM shifts
-        WHERE shift_id = ?
-    """, (shift_id,)).fetchone()
-
-    entry = conn.execute("""
-        SELECT
-            shte.*,
-            ht.task_name,
-            ht.comment_required_attempted,
-            ht.comment_required_not_completed
-        FROM shift_housekeeping_task_entries shte
-
-        JOIN housekeeping_tasks ht
-            ON shte.housekeeping_task_id =
-               ht.housekeeping_task_id
-
-        WHERE shte.entry_id = ?
-          AND shte.shift_id = ?
-    """, (
-        entry_id,
-        shift_id
-    )).fetchone()
-
-    if shift is None:
-        conn.close()
-        return "Shift not found", 404
-    if _shift_is_cancelled(shift):
-        conn.close()
-        return _cancelled_shift_response()
-
-    if entry is None:
-        conn.close()
-        return "Housekeeping task entry not found", 404
-
-    if request.method == "POST":
-
-        outcome = request.form.get("status", "")
-        comment = request.form.get("comment", "").strip()
-
-        error = None
-
-        valid_outcomes = [
-            "Completed",
-            "Attempted",
-            "Not Completed",
-        ]
-
-        legacy_outcome_unchanged = (
-            entry["outcome"] == "Not Applicable"
-            and outcome == "Not Applicable"
+    def render_edit(error=None, response_status=200):
+        displayed_comment = (
+            comment
+            if request.method == "POST" or error is not None
+            else entry["comment"]
         )
+        selected_status = (
+            outcome
+            if request.method == "POST" or error is not None
+            else entry["outcome"]
+        )
+        return render_template(
+            "shift_housekeeping_task_edit.html",
+            entry=entry,
+            shift=context,
+            error=error,
+            selected_status=selected_status,
+            comment=displayed_comment
+        ), response_status
 
-        if outcome not in valid_outcomes and not legacy_outcome_unchanged:
-            error = "Please select a valid outcome."
-
-        elif (
-            outcome == "Attempted"
-            and entry["comment_required_attempted"] == 1
-            and not comment
-        ):
-            error = (
-                "A comment is required when this task is Attempted."
-            )
-
-        elif (
-            outcome == "Not Completed"
-            and entry["comment_required_not_completed"] == 1
-            and not comment
-        ):
-            error = (
-                "A comment is required when this task is Not Completed."
-            )
-
-        if error:
-            conn.close()
-
-            return render_template(
-                "shift_housekeeping_task_edit.html",
-                entry=entry,
-                shift=shift,
-                error=error,
-                selected_status=outcome,
-                comment=comment
-            )
-
-        conn.execute("""
-            UPDATE shift_housekeeping_task_entries
-            SET outcome = ?,
-                comment = ?
-            WHERE entry_id = ?
-              AND shift_id = ?
-        """, (
-            outcome,
-            comment,
-            entry_id,
-            shift_id
-        ))
-
-        log_activity(
+    def resolve_edit_context():
+        nonlocal context, entry
+        context, entry = get_housekeeping_edit_context(
             conn,
-            activity_class="HOUSEKEEPING",
-            activity_type="housekeeping_task_updated",
-            summary=(
-                f"{entry['task_name']} updated to "
-                f"'{outcome}'"
-            ),
-            user_id=session["user_id"],
-            client_id=shift["client_id"],
-            shift_id=shift_id,
-            related_table="shift_housekeeping_task_entries",
-            related_id=entry_id,
-            storyline_visible=True,
-            details=comment,
-            success=1
+            shift_id,
+            entry_id,
+            session["user_id"]
         )
 
-        conn.commit()
-        conn.close()
+    try:
+        if request.method == "POST":
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                resolve_edit_context()
 
-        return redirect(
-            url_for(
-                "shift_dashboard",
-                shift_id=shift_id
+                error = None
+                valid_outcomes = [
+                    "Completed",
+                    "Attempted",
+                    "Not Completed",
+                ]
+
+                legacy_outcome_unchanged = (
+                    entry["outcome"] == "Not Applicable"
+                    and outcome == "Not Applicable"
+                )
+
+                if outcome not in valid_outcomes and not legacy_outcome_unchanged:
+                    error = "Please select a valid outcome."
+                elif (
+                    outcome == "Attempted"
+                    and entry["comment_required_attempted"] == 1
+                    and not comment
+                ):
+                    error = (
+                        "A comment is required when this task is Attempted."
+                    )
+                elif (
+                    outcome == "Not Completed"
+                    and entry["comment_required_not_completed"] == 1
+                    and not comment
+                ):
+                    error = (
+                        "A comment is required when this task is Not Completed."
+                    )
+
+                if error:
+                    conn.rollback()
+                    return render_edit(error, 400)
+
+                updated = conn.execute("""
+                    UPDATE shift_housekeeping_task_entries
+                    SET outcome = ?,
+                        comment = ?
+                    WHERE entry_id = ?
+                      AND shift_id = ?
+                      AND housekeeping_task_id = ?
+                      AND completed_by_user_id = ?
+                """, (
+                    outcome,
+                    comment,
+                    entry_id,
+                    context["shift_id"],
+                    entry["housekeeping_task_id"],
+                    context["recorded_by_user_id"]
+                ))
+                if updated.rowcount != 1:
+                    raise LookupError("Housekeeping task entry not found")
+
+                log_activity(
+                    conn,
+                    activity_class="HOUSEKEEPING",
+                    activity_type="housekeeping_task_updated",
+                    summary=(
+                        f"{entry['task_name']} updated to "
+                        f"'{outcome}'"
+                    ),
+                    user_id=context["recorded_by_user_id"],
+                    client_id=context["client_id"],
+                    shift_id=context["shift_id"],
+                    related_table="shift_housekeeping_task_entries",
+                    related_id=entry_id,
+                    storyline_visible=True,
+                    details=comment,
+                    success=1
+                )
+                conn.commit()
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
+            return redirect(
+                url_for(
+                    "shift_dashboard",
+                    shift_id=context["shift_id"]
+                )
             )
+
+        resolve_edit_context()
+        return render_edit()
+    except AuthorizedCancelledHousekeepingEntry:
+        if conn.in_transaction:
+            conn.rollback()
+        return _cancelled_shift_response()
+    except (DocumentationContextUnavailable, PermissionError, LookupError):
+        if conn.in_transaction:
+            conn.rollback()
+        return "Housekeeping task entry not found", 404
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        return (
+            "The Housekeeping task entry could not be updated. Please retry.",
+            500
         )
-
-    conn.close()
-
-    return render_template(
-        "shift_housekeeping_task_edit.html",
-        entry=entry,
-        shift=shift,
-        error=None,
-        selected_status=entry["outcome"],
-        comment=entry["comment"]
-    )
+    finally:
+        conn.close()
 
 
 

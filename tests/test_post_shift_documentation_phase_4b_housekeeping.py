@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -233,6 +234,79 @@ class PostShiftDocumentationPhase4BHousekeepingTests(unittest.TestCase):
             data=values
         )
 
+    def edit(self, shift_id=10, entry_id=1, **data):
+        values = {"status": "Completed", "comment": "Edited"}
+        values.update(data)
+        return self.client.post(
+            f"/shift/{shift_id}/housekeeping-task-entry/{entry_id}/edit",
+            data=values
+        )
+
+    def assert_selected_status(self, response, expected):
+        selected = re.findall(
+            r'<option value="([^"]+)"\s+selected',
+            response.data.decode()
+        )
+        self.assertEqual(selected, [expected])
+
+    def insert_entry(
+        self,
+        entry_id=1,
+        shift_id=10,
+        task_id=1,
+        completed_by_user_id=1,
+        outcome="Completed",
+        comment="Original"
+    ):
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("""
+                INSERT INTO shift_housekeeping_task_entries
+                    (entry_id, shift_id, housekeeping_task_id, outcome,
+                     comment, completed_by_user_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                entry_id,
+                shift_id,
+                task_id,
+                outcome,
+                comment,
+                completed_by_user_id
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_assignment(
+        self,
+        shift_id,
+        user_id=1,
+        shift_staff_id=20,
+        active=1,
+        actual_start_time="07:00",
+        sign_on_at="2026-08-06T07:00:00Z",
+        actual_end_at_utc=None
+    ):
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("""
+                INSERT INTO shift_staff
+                    (shift_staff_id, shift_id, user_id, actual_start_time,
+                     actual_end_at_utc, sign_on_at, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                shift_staff_id,
+                shift_id,
+                user_id,
+                actual_start_time,
+                actual_end_at_utc,
+                sign_on_at,
+                active
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
     def rows(self, sql, parameters=()):
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
@@ -287,6 +361,569 @@ class PostShiftDocumentationPhase4BHousekeepingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Current Day Shift", response.data)
         self.assertIn(b"Client One", response.data)
+
+    def test_unauthenticated_edit_get_and_post_rejected(self):
+        self.insert_entry()
+        get_response = self.client.get(
+            "/shift/10/housekeeping-task-entry/1/edit"
+        )
+        post_response = self.edit()
+        self.assertEqual(get_response.status_code, 302)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(self.count("shift_housekeeping_task_entries"), 1)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_authorized_owner_current_edit_get_and_post_succeed(self):
+        self.insert_entry(comment="Original comment")
+        self.login(10)
+        with self.now():
+            get_response = self.client.get(
+                "/shift/10/housekeeping-task-entry/1/edit"
+            )
+            post_response = self.edit(
+                status="Attempted",
+                comment="Authorized edit"
+            )
+        self.assertEqual(get_response.status_code, 200)
+        self.assertIn(b"Original comment", get_response.data)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(
+            self.rows("""
+                SELECT shift_id, housekeeping_task_id, outcome, comment,
+                       completed_by_user_id
+                FROM shift_housekeeping_task_entries
+            """), [{
+                "shift_id": 10,
+                "housekeeping_task_id": 1,
+                "outcome": "Attempted",
+                "comment": "Authorized edit",
+                "completed_by_user_id": 1
+            }]
+        )
+        log = self.rows("SELECT * FROM activity_log")[0]
+        self.assertEqual(log["activity_class"], "HOUSEKEEPING")
+        self.assertEqual(log["activity_type"], "housekeeping_task_updated")
+        self.assertEqual(log["user_id"], 1)
+        self.assertEqual(log["client_id"], 1)
+        self.assertEqual(log["shift_id"], 10)
+        self.assertEqual(log["related_id"], 1)
+
+    def test_same_shift_coworker_edit_get_and_post_are_rejected(self):
+        self.insert_entry(comment="Do not disclose")
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("""
+                INSERT INTO shift_staff
+                    (shift_staff_id, shift_id, user_id, actual_start_time,
+                     sign_on_at, active)
+                VALUES (19, 10, 2, '07:00', '2026-08-06T07:00:00Z', 1)
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        self.login(10, user_id=2)
+        with self.now():
+            get_response = self.client.get(
+                "/shift/10/housekeeping-task-entry/1/edit"
+            )
+            post_response = self.edit(comment="Unauthorized")
+        self.assertEqual(get_response.status_code, 404)
+        self.assertEqual(post_response.status_code, 404)
+        self.assertNotIn(b"Do not disclose", get_response.data)
+        self.assertEqual(
+            self.rows("SELECT comment, completed_by_user_id FROM shift_housekeeping_task_entries"),
+            [{"comment": "Do not disclose", "completed_by_user_id": 1}]
+        )
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_different_shift_and_cross_client_edit_are_rejected(self):
+        self.insert_entry(shift_id=15, completed_by_user_id=1)
+        self.login(10)
+        with self.now():
+            cross_client = self.client.get(
+                "/shift/15/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(cross_client.status_code, 404)
+
+        self.login(15, user_id=2)
+        with self.now():
+            different_worker = self.client.get(
+                "/shift/15/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(different_worker.status_code, 404)
+        self.assertNotIn(b"Original", different_worker.data)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_management_user_cannot_use_worker_edit_route(self):
+        self.insert_entry()
+        self.login(10, user_id=3, role="Program Manager")
+        with self.now():
+            get_response = self.client.get(
+                "/shift/10/housekeeping-task-entry/1/edit"
+            )
+            post_response = self.edit()
+        self.assertEqual(get_response.status_code, 404)
+        self.assertEqual(post_response.status_code, 404)
+        self.assertNotIn(b"Original", get_response.data)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_nonexistent_and_mismatched_entry_routes_are_rejected(self):
+        self.login(10)
+        with self.now():
+            nonexistent = self.client.get(
+                "/shift/10/housekeeping-task-entry/999/edit"
+            )
+        self.insert_entry()
+        with self.now():
+            mismatched = self.client.get(
+                "/shift/11/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(nonexistent.status_code, 404)
+        self.assertEqual(mismatched.status_code, 404)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_shift_edit_preserves_safe_rejection(self):
+        self.insert_entry(shift_id=12)
+        self.add_assignment(12)
+        self.login(12)
+        with self.now():
+            response = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn(b"Original", response.data)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_shift_owner_get_and_post_keep_established_409(self):
+        self.insert_entry(shift_id=12)
+        self.add_assignment(12)
+        self.login(12)
+        with self.now():
+            get_response = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+            post_response = self.edit(
+                shift_id=12,
+                comment="Must not write"
+            )
+        self.assertEqual(get_response.status_code, 409)
+        self.assertEqual(post_response.status_code, 409)
+        self.assertNotIn(b"Original", get_response.data)
+        self.assertEqual(
+            self.rows("SELECT comment FROM shift_housekeeping_task_entries"),
+            [{"comment": "Original"}]
+        )
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_owner_without_current_context_get_and_post_are_404(self):
+        self.insert_entry(shift_id=12, comment="No context secret")
+        self.add_assignment(12)
+        self.login()
+        with self.now():
+            get_response = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+            post_response = self.edit(
+                shift_id=12,
+                comment="Unauthorized"
+            )
+        self.assertEqual(get_response.status_code, 404)
+        self.assertEqual(post_response.status_code, 404)
+        self.assertNotIn(b"No context secret", get_response.data)
+        self.assertNotIn(b"cancelled", get_response.data.lower())
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_owner_invalid_assignment_or_sign_on_is_404(self):
+        cases = (
+            {"active": 0},
+            {"actual_start_time": None},
+            {"sign_on_at": None},
+            {"actual_end_at_utc": "2026-08-06T15:00:00Z"},
+        )
+        for index, assignment in enumerate(cases, start=20):
+            with self.subTest(assignment=assignment):
+                self.insert_entry(
+                    entry_id=index,
+                    shift_id=12,
+                    comment="Invalid assignment secret"
+                )
+                self.add_assignment(
+                    12,
+                    shift_staff_id=index,
+                    **assignment
+                )
+                self.login(12)
+                with self.now():
+                    get_response = self.client.get(
+                        f"/shift/12/housekeeping-task-entry/{index}/edit"
+                    )
+                    post_response = self.edit(
+                        shift_id=12,
+                        entry_id=index,
+                        comment="Unauthorized"
+                    )
+                self.assertEqual(get_response.status_code, 404)
+                self.assertEqual(post_response.status_code, 404)
+                self.assertNotIn(b"Invalid assignment secret", get_response.data)
+                self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_owner_previous_forged_expired_and_switched_contexts_are_404(self):
+        self.insert_entry(shift_id=12, comment="Context secret")
+        self.add_assignment(12)
+
+        self.login(11)
+        with self.now():
+            previous = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(previous.status_code, 404)
+
+        self.login(12)
+        with self.client.session_transaction() as session:
+            session[app.DOCUMENTATION_CONTEXT_SESSION_KEY] = "forged"
+        with self.now():
+            forged = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(forged.status_code, 404)
+
+        self.login(12)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "UPDATE shift_staff SET active = 0 WHERE shift_id = 12"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.add_assignment(
+            12,
+            shift_staff_id=21,
+            actual_end_at_utc="2026-08-06T15:00:00Z"
+        )
+        with self.now(self.AFTER_WINDOW):
+            expired = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(expired.status_code, 404)
+
+        self.login(10)
+        with self.now():
+            switched = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(switched.status_code, 404)
+        self.assertNotIn(b"Context secret", switched.data)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_shift_same_shift_coworker_get_and_post_are_generic_404(self):
+        self.insert_entry(shift_id=12, comment="Cancelled secret")
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("""
+                INSERT INTO shift_staff
+                    (shift_staff_id, shift_id, user_id, actual_start_time,
+                     sign_on_at, active)
+                VALUES (19, 12, 2, '07:00', '2026-08-06T07:00:00Z', 1)
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        self.login(12, user_id=2)
+        with self.now():
+            get_response = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+            post_response = self.edit(
+                shift_id=12,
+                comment="Unauthorized"
+            )
+        self.assertEqual(get_response.status_code, 404)
+        self.assertEqual(post_response.status_code, 404)
+        self.assertNotIn(b"Cancelled secret", get_response.data)
+        self.assertNotIn(b"cancelled", get_response.data.lower())
+        self.assertEqual(
+            self.rows("SELECT comment, completed_by_user_id FROM shift_housekeeping_task_entries"),
+            [{"comment": "Cancelled secret", "completed_by_user_id": 1}]
+        )
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_shift_unrelated_and_management_users_receive_404(self):
+        self.insert_entry(shift_id=12, comment="Protected cancelled entry")
+
+        self.login(12, user_id=2)
+        with self.now():
+            unrelated = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(unrelated.status_code, 404)
+        self.assertNotIn(b"Protected cancelled entry", unrelated.data)
+
+        self.login(12, user_id=3, role="Program Manager")
+        with self.now():
+            management = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(management.status_code, 404)
+        self.assertNotIn(b"Protected cancelled entry", management.data)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_cancelled_shift_nonexistent_and_mismatched_entries_receive_404(self):
+        self.insert_entry(shift_id=10, comment="Different shift secret")
+        self.login(12)
+        with self.now():
+            nonexistent = self.client.get(
+                "/shift/12/housekeeping-task-entry/999/edit"
+            )
+            mismatched = self.client.get(
+                "/shift/12/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(nonexistent.status_code, 404)
+        self.assertEqual(mismatched.status_code, 404)
+        self.assertNotIn(b"Different shift secret", mismatched.data)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_owner_get_selects_each_existing_housekeeping_outcome(self):
+        for entry_id, outcome in enumerate(
+            ("Completed", "Attempted", "Not Completed"),
+            start=1
+        ):
+            with self.subTest(outcome=outcome):
+                self.insert_entry(
+                    entry_id=entry_id,
+                    outcome=outcome,
+                    comment=f"{outcome} comment"
+                )
+                self.login(10)
+                with self.now():
+                    response = self.client.get(
+                        f"/shift/10/housekeeping-task-entry/{entry_id}/edit"
+                    )
+                self.assertEqual(response.status_code, 200)
+                self.assert_selected_status(response, outcome)
+
+    def test_ineligible_assignment_and_missing_sign_on_are_rejected(self):
+        self.insert_entry(shift_id=17)
+        self.login(17)
+        with self.now():
+            cancelled_assignment = self.client.get(
+                "/shift/17/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(cancelled_assignment.status_code, 404)
+
+        self.insert_entry(entry_id=2, shift_id=16)
+        self.login(16)
+        with self.now():
+            missing_sign_on = self.client.get(
+                "/shift/16/housekeeping-task-entry/2/edit"
+            )
+        self.assertEqual(missing_sign_on.status_code, 404)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_missing_expired_forged_and_previous_contexts_are_rejected(self):
+        self.insert_entry()
+        self.login()
+        with self.now():
+            missing = self.client.get(
+                "/shift/10/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(missing.status_code, 404)
+
+        self.login(10)
+        with self.client.session_transaction() as session:
+            session[app.DOCUMENTATION_CONTEXT_SESSION_KEY] = "forged"
+        with self.now():
+            forged = self.client.get(
+                "/shift/10/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(forged.status_code, 404)
+
+        self.insert_entry(entry_id=2, shift_id=13)
+        self.login(13)
+        with self.now(self.AFTER_WINDOW):
+            expired = self.client.get(
+                "/shift/13/housekeeping-task-entry/2/edit"
+            )
+        self.assertEqual(expired.status_code, 404)
+
+        self.insert_entry(entry_id=3, shift_id=11)
+        self.login(11)
+        with self.now():
+            previous = self.client.get(
+                "/shift/11/housekeeping-task-entry/3/edit"
+            )
+        self.assertEqual(previous.status_code, 404)
+        self.assertNotIn(b"Original", previous.data)
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_context_switch_after_form_open_rejects_post(self):
+        self.insert_entry()
+        self.login(10)
+        with self.now():
+            opened = self.client.get(
+                "/shift/10/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(opened.status_code, 200)
+        self.login(11)
+        with self.now():
+            response = self.edit(comment="Stale form")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            self.rows("SELECT comment FROM shift_housekeeping_task_entries"),
+            [{"comment": "Original"}]
+        )
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_forged_browser_linkage_cannot_change_authoritative_edit(self):
+        self.insert_entry()
+        before = self.lifecycle_snapshot(10)
+        self.login(10)
+        with self.now():
+            response = self.edit(
+                status="Attempted",
+                comment="Authoritative",
+                user_id="2",
+                client_id="999",
+                shift_id_field="999",
+                housekeeping_task_id="999",
+                entry_id_field="999"
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.rows("""
+                SELECT shift_id, housekeeping_task_id, outcome, comment,
+                       completed_by_user_id
+                FROM shift_housekeeping_task_entries
+            """), [{
+                "shift_id": 10,
+                "housekeeping_task_id": 1,
+                "outcome": "Attempted",
+                "comment": "Authoritative",
+                "completed_by_user_id": 1
+            }]
+        )
+        self.assertEqual(self.lifecycle_snapshot(10), before)
+        log = self.rows("SELECT user_id, client_id, shift_id, related_id FROM activity_log")[0]
+        self.assertEqual(log, {
+            "user_id": 1,
+            "client_id": 1,
+            "shift_id": 10,
+            "related_id": 1
+        })
+
+    def test_repeated_authorized_edits_update_one_entry_and_log_each_change(self):
+        self.insert_entry()
+        self.login(10)
+        with self.now():
+            first = self.edit(status="Attempted", comment="First")
+            second = self.edit(status="Not Completed", comment="Second")
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 302)
+        self.assertEqual(self.count("shift_housekeeping_task_entries"), 1)
+        self.assertEqual(self.count("activity_log"), 2)
+        self.assertEqual(
+            self.rows("SELECT outcome, comment FROM shift_housekeeping_task_entries"),
+            [{"outcome": "Not Completed", "comment": "Second"}]
+        )
+
+    def test_edit_post_begins_immediate_before_authorization_update_log_and_commit(self):
+        self.insert_entry()
+        statements = []
+        self.login(10)
+        with self.trace_route_connection(statements):
+            with self.now():
+                response = self.edit(status="Attempted", comment="Traced")
+        self.assertEqual(response.status_code, 302)
+        begin_index = statements.index("BEGIN IMMEDIATE")
+        context_index = max(
+            index for index, statement in enumerate(statements)
+            if "FROM shift_staff ss" in statement
+        )
+        entry_index = max(
+            index for index, statement in enumerate(statements)
+            if "FROM shift_housekeeping_task_entries shte" in statement
+        )
+        update_index = next(
+            index for index, statement in enumerate(statements)
+            if "UPDATE shift_housekeeping_task_entries" in statement
+        )
+        activity_index = next(
+            index for index, statement in enumerate(statements)
+            if "INSERT INTO activity_log" in statement
+        )
+        commit_index = statements.index("COMMIT")
+        self.assertLess(begin_index, context_index)
+        self.assertLess(begin_index, entry_index)
+        self.assertLess(context_index, update_index)
+        self.assertLess(entry_index, update_index)
+        self.assertLess(update_index, activity_index)
+        self.assertLess(activity_index, commit_index)
+
+    def test_edit_post_revalidates_state_after_form_open(self):
+        self.insert_entry()
+        self.login(10)
+        with self.now():
+            opened = self.client.get(
+                "/shift/10/housekeeping-task-entry/1/edit"
+            )
+        self.assertEqual(opened.status_code, 200)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "UPDATE shift_staff SET active = 0 WHERE shift_id = 10 AND user_id = 1"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with self.now():
+            response = self.edit(comment="Should be rejected")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            self.rows("SELECT comment FROM shift_housekeeping_task_entries"),
+            [{"comment": "Original"}]
+        )
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_edit_logging_failure_rolls_back_source_update(self):
+        self.insert_entry()
+        self.login(10)
+        with mock.patch.object(
+            app,
+            "log_activity",
+            side_effect=RuntimeError("log failure")
+        ):
+            with self.now():
+                response = self.edit(comment="Must roll back")
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            self.rows("SELECT outcome, comment FROM shift_housekeeping_task_entries"),
+            [{"outcome": "Completed", "comment": "Original"}]
+        )
+        self.assertEqual(self.count("activity_log"), 0)
+
+    def test_edit_source_failure_rolls_back_without_success_log(self):
+        self.insert_entry()
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("""
+                CREATE TRIGGER fail_housekeeping_edit
+                BEFORE UPDATE ON shift_housekeeping_task_entries
+                BEGIN
+                    SELECT RAISE(ABORT, 'edit failure');
+                END
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+        self.login(10)
+        with self.now():
+            response = self.edit(comment="Must fail")
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            self.rows("SELECT outcome, comment FROM shift_housekeeping_task_entries"),
+            [{"outcome": "Completed", "comment": "Original"}]
+        )
+        self.assertEqual(self.count("activity_log"), 0)
 
     def test_get_nonexistent_shift_rejected_without_writes(self):
         before = self.lifecycle_snapshot(10)
