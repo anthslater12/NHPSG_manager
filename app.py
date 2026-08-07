@@ -2816,6 +2816,10 @@ SHIFT_AUTO_SIGN_ON_ROLES = frozenset({
 
 SHIFT_CANCELLED_STATUS = "Cancelled"
 SHIFT_CANCELLATION_REASON_CODE = "Shift Cancelled"
+POST_SHIFT_DOCUMENTATION_WINDOW = timedelta(hours=4)
+
+DOCUMENTATION_ACCESS_ACTIVE = "active_assignment"
+DOCUMENTATION_ACCESS_POST_SHIFT = "post_shift"
 
 
 class ShiftCancellationConflictError(RuntimeError):
@@ -2828,6 +2832,132 @@ class UserLifecycleConflictError(RuntimeError):
 
 def _shift_is_cancelled(shift):
     return shift is not None and shift["status"] == SHIFT_CANCELLED_STATUS
+
+
+def _documentation_utc_value(value):
+    """Return a valid UTC datetime or None without granting access."""
+    try:
+        return parse_staff_notice_utc_datetime(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_worker_documentation_assignments(
+    conn,
+    user_id,
+    now_utc=None
+):
+    """Return all shifts a Support Worker may document against.
+
+    This helper is deliberately read-only and is separate from lifecycle
+    authorization.  It uses the worker's own shift_staff assignment as the
+    authority, so a parent shift may remain open for another worker.
+    """
+    user = get_active_authenticated_user(conn, user_id)
+    if user["role"] != "Support Worker":
+        return []
+
+    current_utc = _documentation_utc_value(
+        now_utc if now_utc is not None else get_application_now_utc()
+    )
+    if current_utc is None:
+        return []
+
+    rows = conn.execute("""
+        SELECT
+            s.shift_id,
+            s.client_id,
+            s.shift_date,
+            s.shift_type,
+            s.status AS shift_status,
+            ss.shift_staff_id,
+            ss.user_id,
+            ss.active AS assignment_active,
+            ss.actual_start_time,
+            ss.sign_on_at,
+            ss.actual_end_at_utc,
+            ss.sign_off_at
+        FROM shift_staff ss
+        JOIN shifts s ON s.shift_id = ss.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        WHERE ss.user_id = ?
+          AND c.active = 1
+          AND s.status <> ?
+        ORDER BY s.shift_date DESC, s.shift_id DESC,
+                 ss.shift_staff_id DESC
+    """, (user["user_id"], SHIFT_CANCELLED_STATUS)).fetchall()
+
+    eligible = []
+    for row in rows:
+        assignment = dict(row)
+        has_work_evidence = (
+            isinstance(assignment["actual_start_time"], str)
+            and bool(assignment["actual_start_time"].strip())
+            and assignment["sign_on_at"] is not None
+        )
+        if not has_work_evidence:
+            continue
+
+        if assignment["assignment_active"] == 1:
+            if assignment["actual_end_at_utc"] is not None:
+                continue
+            assignment["documentation_access"] = (
+                DOCUMENTATION_ACCESS_ACTIVE
+            )
+            assignment["documentation_until_utc"] = None
+            eligible.append(assignment)
+            continue
+
+        if assignment["actual_end_at_utc"] is None:
+            continue
+        if assignment["sign_off_at"] is None:
+            continue
+
+        completed_at_utc = _documentation_utc_value(
+            assignment["actual_end_at_utc"]
+        )
+        if completed_at_utc is None:
+            continue
+
+        documentation_until_utc = (
+            completed_at_utc + POST_SHIFT_DOCUMENTATION_WINDOW
+        )
+        if current_utc > documentation_until_utc:
+            continue
+
+        assignment["documentation_access"] = (
+            DOCUMENTATION_ACCESS_POST_SHIFT
+        )
+        assignment["documentation_until_utc"] = documentation_until_utc
+        eligible.append(assignment)
+
+    return eligible
+
+
+def get_worker_documentation_shift_context(
+    conn,
+    shift_id,
+    user_id,
+    now_utc=None
+):
+    """Return one exact documentation context, or None if unauthorized."""
+    matches = [
+        assignment
+        for assignment in get_worker_documentation_assignments(
+            conn, user_id, now_utc=now_utc
+        )
+        if assignment["shift_id"] == shift_id
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def can_worker_document_shift(conn, shift_id, user_id, now_utc=None):
+    """Return whether the worker may document this exact shift."""
+    return get_worker_documentation_shift_context(
+        conn, shift_id, user_id, now_utc=now_utc
+    ) is not None
 
 
 def can_edit_shared_shift_note(conn, shift, user_id):
