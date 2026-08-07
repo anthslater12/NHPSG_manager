@@ -27,6 +27,7 @@ class PostShiftDocumentationAuthorizationTests(unittest.TestCase):
             );
             CREATE TABLE clients (
                 client_id INTEGER PRIMARY KEY,
+                client_name TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE shifts (
@@ -66,7 +67,9 @@ class PostShiftDocumentationAuthorizationTests(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO users (user_id, role) VALUES (3, 'Program Manager')"
         )
-        self.conn.execute("INSERT INTO clients (client_id) VALUES (10)")
+        self.conn.execute(
+            "INSERT INTO clients (client_id, client_name) VALUES (10, 'Test Client')"
+        )
         self.conn.commit()
 
     def tearDown(self):

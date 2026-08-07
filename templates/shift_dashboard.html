@@ -4,6 +4,8 @@
 
 {% set shift_cancelled = shift.status == "Cancelled" %}
 
+{% include "_documentation_context_banner.html" %}
+
 <div class="shift-dashboard-top-row">
 <div class="card shift-dashboard-summary-card">
     <h2>{{ shift.shift_type }} Shift</h2>

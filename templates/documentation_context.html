@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<section class="card documentation-context-page">
+    <h2>Choose documentation shift</h2>
+    <p>
+        Select the shift you need to document. This choice does not sign you
+        on, sign you off, reopen a shift, or change shift records.
+    </p>
+
+    <div class="documentation-context-options">
+        {% for context in contexts %}
+            <article class="documentation-context-option">
+                <div>
+                    <h3>
+                        {{ context.shift_label }}
+                    </h3>
+                    {% if context.date_display %}
+                        <p>{{ context.date_display }}</p>
+                    {% endif %}
+                    {% if context.client_name %}
+                        <p>Client: {{ context.client_name }}</p>
+                    {% endif %}
+                    {% if context.time_display %}
+                        <p>{{ context.time_display }}</p>
+                    {% endif %}
+                </div>
+                <form method="post" action="{{ url_for('documentation_context') }}">
+                    <input type="hidden" name="shift_id" value="{{ context.shift_id }}">
+                    <button type="submit">
+                        {% if context.period_label == "Current" %}
+                            Continue Current Shift
+                        {% else %}
+                            Finish Documentation for Previous Shift
+                        {% endif %}
+                    </button>
+                </form>
+            </article>
+        {% endfor %}
+    </div>
+
+    {% if not has_active %}
+        <form method="post" action="{{ url_for('documentation_context') }}">
+            <input type="hidden" name="action" value="start_new_shift">
+            <button type="submit">Start New Shift</button>
+        </form>
+    {% endif %}
+</section>
+
+{% endblock %}

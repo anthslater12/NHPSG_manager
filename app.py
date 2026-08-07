@@ -2817,6 +2817,7 @@ SHIFT_AUTO_SIGN_ON_ROLES = frozenset({
 SHIFT_CANCELLED_STATUS = "Cancelled"
 SHIFT_CANCELLATION_REASON_CODE = "Shift Cancelled"
 POST_SHIFT_DOCUMENTATION_WINDOW = timedelta(hours=4)
+DOCUMENTATION_CONTEXT_SESSION_KEY = "documentation_shift_id"
 
 DOCUMENTATION_ACCESS_ACTIVE = "active_assignment"
 DOCUMENTATION_ACCESS_POST_SHIFT = "post_shift"
@@ -2867,6 +2868,7 @@ def get_worker_documentation_assignments(
         SELECT
             s.shift_id,
             s.client_id,
+            c.client_name,
             s.shift_date,
             s.shift_type,
             s.status AS shift_status,
@@ -2875,6 +2877,7 @@ def get_worker_documentation_assignments(
             ss.active AS assignment_active,
             ss.actual_start_time,
             ss.sign_on_at,
+            s.scheduled_end_time,
             ss.actual_end_at_utc,
             ss.sign_off_at
         FROM shift_staff ss
@@ -2958,6 +2961,111 @@ def can_worker_document_shift(conn, shift_id, user_id, now_utc=None):
     return get_worker_documentation_shift_context(
         conn, shift_id, user_id, now_utc=now_utc
     ) is not None
+
+
+def _documentation_context_date(value):
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
+
+
+def _documentation_context_time(value):
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        parsed = datetime.strptime(value.strip(), "%H:%M")
+    except ValueError:
+        return ""
+    return parsed.strftime("%I:%M %p").lstrip("0")
+
+
+def _documentation_context_view(assignment):
+    """Return worker-safe presentation data derived from an assignment."""
+    context = dict(assignment)
+    is_active = (
+        context["documentation_access"] == DOCUMENTATION_ACCESS_ACTIVE
+    )
+    context["period_label"] = "Current" if is_active else "Previous"
+    context["date_display"] = _documentation_context_date(
+        context.get("shift_date")
+    )
+
+    start_display = _documentation_context_time(
+        context.get("actual_start_time")
+    )
+    end_display = _documentation_context_time(
+        context.get("scheduled_end_time")
+    )
+    if not is_active:
+        completed_at = _documentation_utc_value(
+            context.get("actual_end_at_utc")
+        )
+        if completed_at is not None:
+            end_display = completed_at.astimezone(
+                VANCOUVER_TIMEZONE
+            ).strftime("%I:%M %p").lstrip("0")
+    context["time_display"] = (
+        f"{start_display} - {end_display}"
+        if start_display and end_display
+        else ""
+    )
+    context["shift_label"] = (
+        f"{context['period_label']} {context['shift_type']} Shift"
+    )
+    return context
+
+
+def get_worker_documentation_context_state(
+    conn,
+    user_id,
+    selected_shift_id=None,
+    now_utc=None
+):
+    """Resolve the selected context and alternatives authoritatively."""
+    assignments = get_worker_documentation_assignments(
+        conn, user_id, now_utc=now_utc
+    )
+    selected = next(
+        (
+            assignment
+            for assignment in assignments
+            if selected_shift_id is not None
+            and assignment["shift_id"] == selected_shift_id
+        ),
+        None
+    )
+    return {
+        "selected": (
+            _documentation_context_view(selected) if selected else None
+        ),
+        "available": [
+            _documentation_context_view(assignment)
+            for assignment in assignments
+        ],
+        "has_active": any(
+            assignment["documentation_access"] == DOCUMENTATION_ACCESS_ACTIVE
+            for assignment in assignments
+        ),
+    }
+
+
+def _session_documentation_shift_id():
+    value = session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _store_documentation_shift_id(shift_id):
+    session[DOCUMENTATION_CONTEXT_SESSION_KEY] = int(shift_id)
+
+
+def _clear_documentation_shift_id():
+    session.pop(DOCUMENTATION_CONTEXT_SESSION_KEY, None)
 
 
 def can_edit_shared_shift_note(conn, shift, user_id):
@@ -14169,6 +14277,89 @@ def reset_user_password(user_id):
 # DASHBOARDS
 #####################################################################
 
+@app.route("/documentation-context", methods=["GET", "POST"])
+def documentation_context():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        user = get_active_authenticated_user(conn, session["user_id"])
+        if user["role"] not in SHIFT_AUTO_SIGN_ON_ROLES:
+            return "Access denied", 403
+        selected_id = _session_documentation_shift_id()
+        state = get_worker_documentation_context_state(
+            conn,
+            user["user_id"],
+            selected_shift_id=selected_id
+        )
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    if selected_id is not None and state["selected"] is None:
+        _clear_documentation_shift_id()
+        flash(
+            "Your selected documentation shift is no longer available."
+        )
+
+    if request.method == "POST":
+        action = request.form.get("action", "select")
+        requested_shift_id = request.form.get("shift_id", type=int)
+
+        if action == "start_new_shift":
+            if state["has_active"]:
+                return "A current shift is already active.", 409
+            _clear_documentation_shift_id()
+            try:
+                new_shift_id, start_checklist_completed = auto_sign_on_user(
+                    session["user_id"]
+                )
+            except StaffNoticeShiftSignOnError as error:
+                flash(str(error))
+                return redirect(url_for("dashboard"))
+            _store_documentation_shift_id(new_shift_id)
+            if not start_checklist_completed:
+                return redirect(url_for(
+                    "start_checklist", shift_id=new_shift_id
+                ))
+            return redirect(url_for(
+                "shift_dashboard", shift_id=new_shift_id
+            ))
+
+        conn = get_db()
+        try:
+            authorized = get_worker_documentation_shift_context(
+                conn,
+                requested_shift_id,
+                session["user_id"]
+            ) if requested_shift_id is not None else None
+        finally:
+            conn.close()
+
+        if authorized is None:
+            _clear_documentation_shift_id()
+            flash(
+                "That documentation shift is no longer available. "
+                "Please choose another shift."
+            )
+            return redirect(url_for("documentation_context"))
+
+        _store_documentation_shift_id(requested_shift_id)
+        return redirect(url_for(
+            "shift_dashboard", shift_id=requested_shift_id
+        ))
+
+    if not state["available"]:
+        return redirect(url_for("dashboard"))
+
+    return render_template(
+        "documentation_context.html",
+        contexts=state["available"],
+        has_active=state["has_active"]
+    )
+
 def get_dashboard_stats(current_user_id):
     conn = get_db()
 
@@ -14301,12 +14492,51 @@ def dashboard():
     if current_user["role"] not in SHIFT_AUTO_SIGN_ON_ROLES:
         return redirect(url_for("staff_notice_history"))
 
+    conn = get_db()
+    try:
+        raw_selected_id = session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+        selected_id = _session_documentation_shift_id()
+        if raw_selected_id is not None and selected_id is None:
+            _clear_documentation_shift_id()
+        state = get_worker_documentation_context_state(
+            conn,
+            current_user["user_id"],
+            selected_shift_id=selected_id
+        )
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    if selected_id is not None and state["selected"] is None:
+        _clear_documentation_shift_id()
+        flash(
+            "Your selected documentation shift is no longer available."
+        )
+
+    if state["selected"] is not None:
+        return redirect(url_for(
+            "shift_dashboard",
+            shift_id=state["selected"]["shift_id"]
+        ))
+
+    if state["available"]:
+        if len(state["available"]) == 1 and state["has_active"]:
+            active_context = state["available"][0]
+            _store_documentation_shift_id(active_context["shift_id"])
+            return redirect(url_for(
+                "shift_dashboard", shift_id=active_context["shift_id"]
+            ))
+        return redirect(url_for("documentation_context"))
+
     try:
         shift_id, start_checklist_completed = auto_sign_on_user(
             current_user["user_id"]
         )
     except StaffNoticeShiftSignOnError as error:
         return str(error), 503
+
+    _store_documentation_shift_id(shift_id)
 
     if not start_checklist_completed:
         return redirect(url_for("start_checklist", shift_id=shift_id))
@@ -15357,6 +15587,31 @@ def shift_dashboard(shift_id):
         - completed_housekeeping_tasks
     )
 
+    documentation_context = None
+    documentation_context_alternatives = []
+    if session.get("role") in SHIFT_AUTO_SIGN_ON_ROLES:
+        selected_id = _session_documentation_shift_id()
+        context_state = get_worker_documentation_context_state(
+            conn,
+            session["user_id"],
+            selected_shift_id=selected_id
+        )
+        if selected_id is not None and context_state["selected"] is None:
+            _clear_documentation_shift_id()
+            flash(
+                "Your selected documentation shift is no longer available."
+            )
+        elif (
+            context_state["selected"] is not None
+            and context_state["selected"]["shift_id"] == shift_id
+        ):
+            documentation_context = context_state["selected"]
+            documentation_context_alternatives = [
+                context
+                for context in context_state["available"]
+                if context["shift_id"] != shift_id
+            ]
+
     conn.close()
 
     return render_template(
@@ -15387,7 +15642,11 @@ def shift_dashboard(shift_id):
         housekeeping_task_lookup=housekeeping_task_lookup,
         total_housekeeping_tasks=total_housekeeping_tasks,
         completed_housekeeping_tasks=completed_housekeeping_tasks,
-        remaining_housekeeping_tasks=remaining_housekeeping_tasks
+        remaining_housekeeping_tasks=remaining_housekeeping_tasks,
+        documentation_context=documentation_context,
+        documentation_context_alternatives=(
+            documentation_context_alternatives
+        )
     )
     
 

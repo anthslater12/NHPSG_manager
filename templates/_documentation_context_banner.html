@@ -1,0 +1,26 @@
+{% if documentation_context %}
+<section class="documentation-context-banner" aria-label="Documentation context">
+    <div>
+        <strong>
+            Documentation context:
+            {{ documentation_context.shift_label }}
+            {% if documentation_context.date_display %}
+                — {{ documentation_context.date_display }}
+            {% endif %}
+        </strong>
+        {% if documentation_context.time_display %}
+            <span class="documentation-context-time">
+                {{ documentation_context.time_display }}
+            </span>
+        {% endif %}
+    </div>
+    {% if documentation_context_alternatives %}
+        <a
+            class="documentation-context-change"
+            href="{{ url_for('documentation_context') }}"
+        >
+            Change documentation shift
+        </a>
+    {% endif %}
+</section>
+{% endif %}
