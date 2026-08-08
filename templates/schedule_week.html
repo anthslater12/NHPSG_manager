@@ -6,10 +6,23 @@
     <p>Client: {{ client.client_name }}</p>
     <p>Week of {{ monday.isoformat() }} to {{ week_end.isoformat() }}</p>
 
+    {% if can_manage %}
+    <nav class="schedule-view-selector" aria-label="Planning view">
+        <span class="schedule-view-selector-label">Planning View:</span>
+        {% if staff_view %}
+        <a class="schedule-view-option" href="{{ url_for('schedule_week', client_id=client_id, monday=monday.isoformat(), view='shift') }}">Shift View</a>
+        <a class="schedule-view-option schedule-view-option-active" aria-current="page" href="{{ url_for('schedule_week', client_id=client_id, monday=monday.isoformat(), view='staff') }}">Staff View</a>
+        {% else %}
+        <a class="schedule-view-option schedule-view-option-active" aria-current="page" href="{{ url_for('schedule_week', client_id=client_id, monday=monday.isoformat(), view='shift') }}">Shift View</a>
+        <a class="schedule-view-option" href="{{ url_for('schedule_week', client_id=client_id, monday=monday.isoformat(), view='staff') }}">Staff View</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+
     <div class="schedule-navigation" aria-label="Schedule week navigation">
-        <a href="{{ url_for('schedule_week', client_id=client_id, monday=previous_monday.isoformat()) }}">Previous week</a>
-        <a href="{{ url_for('schedule_week', client_id=client_id, monday=current_monday.isoformat()) }}">Current week</a>
-        <a href="{{ url_for('schedule_week', client_id=client_id, monday=next_monday.isoformat()) }}">Next week</a>
+        <a href="{{ url_for('schedule_week', client_id=client_id, monday=previous_monday.isoformat(), view=('staff' if staff_view else none)) }}">Previous week</a>
+        <a href="{{ url_for('schedule_week', client_id=client_id, monday=current_monday.isoformat(), view=('staff' if staff_view else none)) }}">Current week</a>
+        <a href="{{ url_for('schedule_week', client_id=client_id, monday=next_monday.isoformat(), view=('staff' if staff_view else none)) }}">Next week</a>
     </div>
 
     {% if can_manage %}
@@ -20,7 +33,7 @@
     </p>
     {% endif %}
 
-    {% if can_manage and monday >= current_monday %}
+    {% if can_manage and not staff_view and monday >= current_monday %}
     <form method="post" action="{{ url_for('schedule_copy_previous_week', client_id=client_id, monday=monday.isoformat()) }}">
         <button type="submit">Copy Previous Week</button>
     </form>
@@ -29,9 +42,13 @@
     <form class="schedule-week-picker" method="get" action="{{ url_for('schedule_client_index', client_id=client_id) }}">
         <label class="schedule-week-picker-label" for="schedule-date">Go to week</label>
         <input class="schedule-week-picker-date" id="schedule-date" name="date" type="date" value="{{ monday.isoformat() }}">
+        {% if staff_view %}<input type="hidden" name="view" value="staff">{% endif %}
         <button class="schedule-week-picker-submit" type="submit">View week</button>
     </form>
 
+    {% if staff_view %}
+    {% include "schedule_staff_view.html" %}
+    {% else %}
     <div class="schedule-week-grid">
         {% for day in days %}
         <section class="schedule-day-card">
@@ -70,6 +87,7 @@
         </section>
         {% endfor %}
     </div>
+    {% endif %}
 
     {% if can_manage %}
     <section class="schedule-staff-summary" aria-labelledby="weekly-staff-summary-heading">

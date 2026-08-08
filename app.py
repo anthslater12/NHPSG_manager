@@ -616,6 +616,92 @@ def _schedule_effective_staff_order(conn, client_id, workers):
     ))
 
 
+def _schedule_staff_view_context(conn, week_start, client_id):
+    """Return the read-only Staff View matrix for one client and week."""
+    dates = [week_start + timedelta(days=offset) for offset in range(7)]
+    end_date = dates[-1]
+    workers = {}
+
+    for row in conn.execute("""
+        SELECT user_id, full_name
+        FROM users
+        WHERE active = 1 AND role = 'Support Worker'
+    """).fetchall():
+        workers[row["user_id"]] = {
+            "user_id": row["user_id"],
+            "full_name": row["full_name"],
+            "assignments": [[] for _ in dates],
+        }
+
+    rows = conn.execute("""
+        SELECT st.schedule_staff_id, st.user_id, u.full_name,
+               ss.shift_date, ss.shift_type,
+               COALESCE(NULLIF(TRIM(st.planned_start_time), ''),
+                        ss.planned_start_time) AS planned_start_time,
+               COALESCE(NULLIF(TRIM(st.planned_end_time), ''),
+                        ss.planned_end_time) AS planned_end_time
+        FROM schedule_staff AS st
+        JOIN schedule_shifts AS ss
+          ON ss.schedule_shift_id = st.schedule_shift_id
+        JOIN users AS u ON u.user_id = st.user_id
+        WHERE ss.client_id = ?
+          AND ss.shift_date BETWEEN ? AND ?
+    """, (client_id, week_start.isoformat(), end_date.isoformat())).fetchall()
+
+    date_indexes = {day.isoformat(): index for index, day in enumerate(dates)}
+    for row in rows:
+        start_minutes = _schedule_matrix_time_minutes(row["planned_start_time"])
+        end_minutes = _schedule_matrix_time_minutes(row["planned_end_time"])
+        day_index = date_indexes.get(row["shift_date"])
+        if start_minutes is None or end_minutes is None or day_index is None:
+            app.logger.warning(
+                "Skipping invalid Staff View assignment schedule_staff_id=%s",
+                row["schedule_staff_id"],
+            )
+            continue
+        worker = workers.setdefault(row["user_id"], {
+            "user_id": row["user_id"],
+            "full_name": row["full_name"],
+            "assignments": [[] for _ in dates],
+        })
+        worker["assignments"][day_index].append({
+            "start_display": _format_schedule_time(row["planned_start_time"]),
+            "end_display": _format_schedule_time(row["planned_end_time"]),
+            "start_minutes": start_minutes,
+            "end_minutes": end_minutes,
+            "shift_type": row["shift_type"],
+            "schedule_staff_id": row["schedule_staff_id"],
+            "overnight": (
+                row["shift_type"] == "Overnight"
+                and end_minutes < start_minutes
+            ),
+        })
+
+    matrix_workers = []
+    for worker in workers.values():
+        day_cells = []
+        for assignments in worker.pop("assignments"):
+            day_cells.append(sorted(assignments, key=lambda assignment: (
+                assignment["start_minutes"],
+                assignment["end_minutes"],
+                assignment["shift_type"],
+                assignment["schedule_staff_id"],
+            )))
+        worker["days"] = day_cells
+        matrix_workers.append(worker)
+
+    return {
+        "dates": [{
+            "weekday": day.strftime("%A"),
+            "date_display": f"{day.strftime('%b')} {day.day}",
+            "date_iso": day.isoformat(),
+        } for day in dates],
+        "workers": _schedule_effective_staff_order(
+            conn, client_id, matrix_workers
+        ),
+    }
+
+
 def _schedule_matrix_time_minutes(value):
     try:
         parsed = datetime.strptime(value, "%H:%M")
@@ -2347,10 +2433,15 @@ def schedule_week(client_id, monday):
         if client is None:
             return "Client not found", 404
         week_start = _parse_schedule_monday(monday)
+        staff_view = can_manage and request.args.get("view") == "staff"
         current_monday = get_schedule_operational_week_start(
             datetime.now(VANCOUVER_TIMEZONE)
         )
         days = _schedule_week_context(conn, week_start, client_id)
+        staff_view_context = (
+            _schedule_staff_view_context(conn, week_start, client_id)
+            if staff_view else None
+        )
         staff_summary = (
             _schedule_week_staff_summary(conn, week_start, client_id)
             if can_manage else []
@@ -2378,6 +2469,8 @@ def schedule_week(client_id, monday):
             next_monday=week_start + timedelta(days=7),
             current_monday=current_monday,
             staff_summary=staff_summary,
+            staff_view=staff_view,
+            staff_view_context=staff_view_context,
         )
     except PermissionError:
         return "Access denied", 403

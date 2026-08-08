@@ -1,0 +1,30 @@
+<section class="schedule-staff-view" aria-labelledby="schedule-staff-view-heading">
+    <h3 id="schedule-staff-view-heading">Staff View</h3>
+    <div class="schedule-staff-matrix-scroll" tabindex="0">
+        <table class="schedule-staff-matrix">
+            <caption class="visually-hidden">Staff assignments for the selected week</caption>
+            <thead>
+                <tr>
+                    <th scope="col">Staff</th>
+                    {% for day in staff_view_context.dates %}
+                    <th scope="col"><span>{{ day.weekday }}</span><time datetime="{{ day.date_iso }}">{{ day.date_display }}</time></th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for worker in staff_view_context.workers %}
+                <tr>
+                    <th scope="row">{{ worker.full_name }}</th>
+                    {% for assignments in worker.days %}
+                    <td>
+                        {% for assignment in assignments %}
+                        <span class="schedule-staff-matrix-assignment">{{ assignment.start_display|replace(" ", "") }}&ndash;{{ assignment.end_display|replace(" ", "") }}{% if assignment.overnight %} ND{% endif %}</span>
+                        {% endfor %}
+                    </td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>

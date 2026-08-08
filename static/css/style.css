@@ -380,6 +380,88 @@ td,th{
     margin-bottom: 16px;
 }
 
+.schedule-view-selector {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0 16px;
+}
+
+.schedule-view-selector-label {
+    font-weight: bold;
+}
+
+.schedule-view-option {
+    padding: 5px 10px;
+    border: 1px solid #7f9db9;
+    border-radius: 4px;
+    background: #f4f8fb;
+    text-decoration: none;
+}
+
+.schedule-view-option-active {
+    background: #004b87;
+    color: white;
+    font-weight: bold;
+}
+
+.schedule-staff-matrix-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid #d7e0e8;
+}
+
+.schedule-staff-matrix {
+    width: 100%;
+    min-width: 760px;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.schedule-staff-matrix th,
+.schedule-staff-matrix td {
+    padding: 10px 8px;
+    border: 1px solid #d7e0e8;
+    vertical-align: top;
+    text-align: left;
+}
+
+.schedule-staff-matrix thead th {
+    background: #f1f6fa;
+    text-align: center;
+}
+
+.schedule-staff-matrix th:first-child,
+.schedule-staff-matrix td:first-child {
+    width: 18%;
+}
+
+.schedule-staff-matrix thead th:not(:first-child) {
+    width: 11.71%;
+}
+
+.schedule-staff-matrix tbody th {
+    overflow-wrap: anywhere;
+}
+
+.schedule-staff-matrix thead th span,
+.schedule-staff-matrix thead th time {
+    display: block;
+}
+
+.schedule-staff-matrix thead th time {
+    margin-top: 3px;
+    font-weight: normal;
+    white-space: nowrap;
+}
+
+.schedule-staff-matrix-assignment {
+    display: block;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+
 .schedule-week-picker {
     display: flex;
     align-items: center;
