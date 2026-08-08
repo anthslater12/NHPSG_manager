@@ -66,5 +66,34 @@
         </section>
         {% endfor %}
     </div>
+
+    {% if can_manage %}
+    <section class="schedule-staff-summary" aria-labelledby="weekly-staff-summary-heading">
+        <h3 id="weekly-staff-summary-heading">Weekly Staff Summary</h3>
+        <p>Planned schedule totals for this week. These are not actual worked or payroll hours.</p>
+        {% if staff_summary %}
+        <table class="schedule-staff-summary-table">
+            <thead>
+                <tr>
+                    <th scope="col">Worker</th>
+                    <th scope="col">Scheduled Hours</th>
+                    <th scope="col">Shifts</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for worker in staff_summary %}
+                <tr>
+                    <td>{{ worker.full_name }}</td>
+                    <td>{{ worker.scheduled_hours_display }}</td>
+                    <td>{{ worker.shift_count }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No staff assignments for this client and week.</p>
+        {% endif %}
+    </section>
+    {% endif %}
 </div>
 {% endblock %}

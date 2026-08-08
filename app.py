@@ -513,6 +513,86 @@ def _schedule_week_context(conn, monday, client_id):
     } for day in dates]
 
 
+def _schedule_planned_duration_minutes(shift_type, start_value, end_value):
+    """Return a valid planned assignment duration, or None for bad legacy data."""
+    try:
+        start = datetime.strptime(start_value, "%H:%M")
+        end = datetime.strptime(end_value, "%H:%M")
+    except (TypeError, ValueError):
+        return None
+
+    start_minutes = start.hour * 60 + start.minute
+    end_minutes = end.hour * 60 + end.minute
+    if shift_type in ("Day", "Afternoon"):
+        duration = end_minutes - start_minutes
+    elif shift_type == "Overnight":
+        if end_minutes == start_minutes:
+            return None
+        duration = (
+            end_minutes - start_minutes
+            if end_minutes > start_minutes
+            else 24 * 60 - start_minutes + end_minutes
+        )
+    else:
+        return None
+    return duration if duration > 0 else None
+
+
+def _schedule_week_staff_summary(conn, week_start, client_id):
+    """Calculate management-only planned totals for one client and week."""
+    end_date = week_start + timedelta(days=6)
+    rows = conn.execute("""
+        SELECT st.user_id, u.full_name, ss.shift_type,
+               COALESCE(NULLIF(TRIM(st.planned_start_time), ''),
+                        ss.planned_start_time) AS planned_start_time,
+               COALESCE(NULLIF(TRIM(st.planned_end_time), ''),
+                        ss.planned_end_time) AS planned_end_time
+        FROM schedule_staff AS st
+        JOIN schedule_shifts AS ss
+          ON ss.schedule_shift_id = st.schedule_shift_id
+        JOIN users AS u ON u.user_id = st.user_id
+        WHERE ss.client_id = ?
+          AND ss.shift_date BETWEEN ? AND ?
+        ORDER BY u.full_name, st.user_id, st.schedule_staff_id
+    """, (client_id, week_start.isoformat(), end_date.isoformat())).fetchall()
+
+    totals = {}
+    for row in rows:
+        duration = _schedule_planned_duration_minutes(
+            row["shift_type"],
+            row["planned_start_time"],
+            row["planned_end_time"],
+        )
+        if duration is None:
+            app.logger.warning(
+                "Skipping invalid planned schedule duration for schedule_staff "
+                "assignment user_id=%s",
+                row["user_id"],
+            )
+            continue
+        total = totals.setdefault(row["user_id"], {
+            "user_id": row["user_id"],
+            "full_name": row["full_name"],
+            "scheduled_minutes": 0,
+            "shift_count": 0,
+        })
+        total["scheduled_minutes"] += duration
+        total["shift_count"] += 1
+
+    summary = []
+    for total in totals.values():
+        total = dict(total)
+        hours_display = f"{total['scheduled_minutes'] / 60:.2f}".rstrip("0").rstrip(".")
+        total["scheduled_hours_display"] = (
+            hours_display if "." in hours_display else f"{hours_display}.0"
+        )
+        summary.append(total)
+    return sorted(summary, key=lambda row: (
+        (row["full_name"] or "").casefold(),
+        row["user_id"],
+    ))
+
+
 def _schedule_shift_is_editable(shift_date, status, today=None):
     today = today or datetime.now(VANCOUVER_TIMEZONE).date()
     return shift_date >= today and status in ("Draft", "Published")
@@ -2150,6 +2230,10 @@ def schedule_week(client_id, monday):
             datetime.now(VANCOUVER_TIMEZONE)
         )
         days = _schedule_week_context(conn, week_start, client_id)
+        staff_summary = (
+            _schedule_week_staff_summary(conn, week_start, client_id)
+            if can_manage else []
+        )
         today = datetime.now(VANCOUVER_TIMEZONE).date()
         for day in days:
             for shift in day["shifts"]:
@@ -2172,6 +2256,7 @@ def schedule_week(client_id, monday):
             previous_monday=week_start - timedelta(days=7),
             next_monday=week_start + timedelta(days=7),
             current_monday=current_monday,
+            staff_summary=staff_summary,
         )
     except PermissionError:
         return "Access denied", 403

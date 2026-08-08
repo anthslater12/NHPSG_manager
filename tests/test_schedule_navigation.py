@@ -104,6 +104,59 @@ class ScheduleNavigationTests(unittest.TestCase):
             session["role"] = role
             session["full_name"] = "Test User"
 
+    def add_user(self, user_id, full_name, role="Support Worker", active=1):
+        conn = sqlite3.connect(app.DB_NAME)
+        try:
+            conn.execute(
+                "INSERT INTO users VALUES (?, ?, 'hash', ?, ?, ?)",
+                (user_id, full_name.lower().replace(" ", "_"), full_name,
+                 role, active),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_client(self, client_id, client_name):
+        conn = sqlite3.connect(app.DB_NAME)
+        try:
+            conn.execute(
+                "INSERT INTO clients VALUES (?, ?, 1)",
+                (client_id, client_name),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_shift(self, client_id=10, shift_date="2026-08-03",
+                  shift_type="Day", start="08:00", end="16:00"):
+        conn = sqlite3.connect(app.DB_NAME)
+        try:
+            shift_id = conn.execute("""
+                INSERT INTO schedule_shifts
+                (client_id, shift_date, shift_type, planned_start_time,
+                 planned_end_time, status, notes, created_by, created_at_utc,
+                 updated_by, updated_at_utc)
+                VALUES (?, ?, ?, ?, ?, 'Published', NULL, 1,
+                        '2026-08-01T15:00:00Z', 1, '2026-08-01T15:00:00Z')
+            """, (client_id, shift_date, shift_type, start, end)).lastrowid
+            conn.commit()
+            return shift_id
+        finally:
+            conn.close()
+
+    def add_assignment(self, shift_id, user_id, start=None, end=None):
+        conn = sqlite3.connect(app.DB_NAME)
+        try:
+            conn.execute("""
+                INSERT INTO schedule_staff
+                (schedule_shift_id, user_id, planned_start_time,
+                 planned_end_time, assigned_by, assigned_at_utc)
+                VALUES (?, ?, ?, ?, 1, '2026-08-01T15:00:00Z')
+            """, (shift_id, user_id, start, end))
+            conn.commit()
+        finally:
+            conn.close()
+
     def test_schedule_index_uses_current_vancouver_week(self):
         self.login()
         expected = app.get_schedule_operational_week_start(
@@ -134,6 +187,98 @@ class ScheduleNavigationTests(unittest.TestCase):
         self.assertIn(b"Dana Director", response.data)
         self.assertIn(b"Bring the communication book.", response.data)
         self.assertIn(b"Not scheduled", response.data)
+
+    def test_management_roles_see_weekly_staff_summary_and_support_workers_do_not(self):
+        for user_id, role in ((1, "Admin"), (4, "Director"),
+                              (5, "Program Manager")):
+            self.login(user_id, role)
+            page = self.client.get(
+                "/schedule/client/10/week/2026-08-03"
+            ).data
+            self.assertIn(b"Weekly Staff Summary", page)
+            self.assertIn(
+                b"Planned schedule totals for this week. These are not actual worked or payroll hours.",
+                page,
+            )
+        self.login(2, "Support Worker")
+        page = self.client.get("/schedule/client/10/week/2026-08-03").data
+        self.assertNotIn(b"Weekly Staff Summary", page)
+
+    def test_weekly_staff_summary_uses_worker_times_and_counts_assignments(self):
+        self.add_user(6, "Anne-Dalene Slater")
+        self.add_user(7, "Martin Lapensee")
+        day = self.add_shift(shift_date="2026-08-04", start="08:00", end="16:00")
+        afternoon = self.add_shift(
+            shift_date="2026-08-04", shift_type="Afternoon",
+            start="16:00", end="23:00"
+        )
+        overnight = self.add_shift(
+            shift_date="2026-08-05", shift_type="Overnight",
+            start="23:00", end="07:30"
+        )
+        quarter = self.add_shift(
+            shift_date="2026-08-06", start="10:00", end="10:15"
+        )
+        self.add_client(20, "Client Twenty")
+        other_client = self.add_shift(
+            client_id=20, start="00:00", end="23:59"
+        )
+        other_week = self.add_shift(
+            shift_date="2026-08-10", start="00:00", end="23:59"
+        )
+        self.add_assignment(day, 6, "09:00", "11:00")
+        self.add_assignment(afternoon, 6, "17:00", "19:00")
+        self.add_assignment(overnight, 6, "23:00", "07:30")
+        self.add_assignment(quarter, 7, "10:00", "10:15")
+        self.add_assignment(other_client, 6, "00:00", "23:59")
+        self.add_assignment(other_week, 6, "00:00", "23:59")
+
+        self.login()
+        page = self.client.get("/schedule/client/10/week/2026-08-03").data.decode()
+        self.assertIn("Anne-Dalene Slater", page)
+        self.assertIn("12.5", page)
+        self.assertIn("3", page)
+        self.assertIn("Martin Lapensee", page)
+        self.assertIn("0.25", page)
+        self.assertNotIn("Client Twenty", page)
+        self.assertNotIn("Inactive Worker", page)
+
+    def test_weekly_staff_summary_uses_parent_fallback_and_includes_inactive_history(self):
+        self.add_user(6, "Inactive Historical", active=0)
+        fallback_shift = self.add_shift(
+            shift_date="2026-08-04", start="07:30", end="15:30"
+        )
+        historical_shift = self.add_shift(
+            shift_date="2026-08-05", start="12:00", end="16:00"
+        )
+        invalid_shift = self.add_shift(
+            shift_date="2026-08-06", start="10:00", end="10:00"
+        )
+        self.add_assignment(fallback_shift, 2, None, None)
+        self.add_assignment(historical_shift, 6, "12:00", "16:00")
+        self.add_assignment(invalid_shift, 6, "10:00", "10:00")
+
+        self.login()
+        page = self.client.get("/schedule/client/10/week/2026-08-03").data.decode()
+        self.assertIn("Sam Worker", page)
+        self.assertIn("16.0", page)
+        self.assertIn("Inactive Historical", page)
+        self.assertIn("4.0", page)
+        summary = page.split("schedule-staff-summary-table", 1)[1]
+        self.assertEqual(summary.count("Inactive Historical"), 1)
+
+    def test_weekly_staff_summary_is_alphabetical_and_excludes_unassigned_workers(self):
+        self.add_user(6, "Zoe Unassigned")
+        self.add_user(7, "Aaron Assigned")
+        self.add_assignment(
+            self.add_shift(shift_date="2026-08-04"), 7, "08:00", "09:00"
+        )
+
+        self.login()
+        page = self.client.get("/schedule/client/10/week/2026-08-03").data.decode()
+        self.assertNotIn("Zoe Unassigned", page)
+        summary = page.split("schedule-staff-summary-table", 1)[1]
+        self.assertLess(summary.index("Aaron Assigned"), summary.index("Dana Director"))
 
     def test_workers_are_ordered_by_individual_start_and_overnight_next_day_is_worker_specific(self):
         self.login()
