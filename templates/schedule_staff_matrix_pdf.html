@@ -3,20 +3,20 @@
 <head>
     <meta charset="utf-8">
     <style>
-        @page { size: landscape; margin: 0.4in; }
-        body { font-family: Arial, sans-serif; color: #17212b; font-size: 9pt; }
+        @page { size: landscape; margin: 0.3in; }
+        body { font-family: Arial, sans-serif; color: #17212b; font-size: 8.5pt; }
         h1 { margin: 0 0 8pt; font-size: 17pt; }
         .matrix-week { text-align: center; font-size: 15pt; font-weight: bold; margin: 0 0 10pt; }
         .matrix-meta { display: flex; justify-content: space-between; margin-bottom: 12pt; }
         .matrix-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-        .matrix-table th, .matrix-table td { border: 1px solid #8b98a5; padding: 5pt; vertical-align: top; }
+        .matrix-table th, .matrix-table td { box-sizing: border-box; border: 1px solid #8b98a5; padding: 3.5pt; vertical-align: top; }
         .matrix-table th { background: #e8eef3; text-align: center; }
-        .matrix-table th:first-child, .matrix-table td:first-child { width: 19%; text-align: left; }
-        .matrix-table th:not(:first-child), .matrix-table td:not(:first-child) { width: 11.57%; }
+        .matrix-table th:first-child, .matrix-table td:first-child { width: 18%; text-align: left; }
+        .matrix-table th:not(:first-child), .matrix-table td:not(:first-child) { width: 11.71%; }
         .matrix-day { display: block; font-weight: bold; }
         .matrix-date { display: block; font-weight: normal; margin-top: 2pt; }
         .matrix-worker-name { font-weight: bold; overflow-wrap: anywhere; }
-        .matrix-assignment { display: block; white-space: nowrap; line-height: 1.35; }
+        .matrix-assignment { display: block; white-space: nowrap; font-size: 8pt; line-height: 1.2; }
         .matrix-legend { margin-top: 7pt; font-size: 8pt; }
     </style>
 </head>
