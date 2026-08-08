@@ -1079,7 +1079,10 @@ def _storyline_local_datetime(event_datetime, activity_datetime):
     except (TypeError, ValueError):
         pass
     try:
-        return datetime.strptime(activity_datetime, "%Y-%m-%d %H:%M:%S")
+        return datetime.strptime(
+            activity_datetime,
+            "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=VANCOUVER_TIMEZONE)
     except (TypeError, ValueError):
         return None
 
@@ -16480,24 +16483,18 @@ def client_storyline(client_id):
     activity_log_columns = {
         row[1] for row in conn.execute('PRAGMA table_info("activity_log")')
     }
-    effective_timestamp_sql = (
-        "COALESCE(al.event_datetime, al.activity_datetime)"
-        if "event_datetime" in activity_log_columns
-        else "al.activity_datetime"
-    )
     event_datetime_select = (
         "al.event_datetime" if "event_datetime" in activity_log_columns
         else "NULL AS event_datetime"
     )
     events = conn.execute(f"""
-        SELECT al.activity_datetime, {event_datetime_select},
+        SELECT al.activity_id, al.activity_datetime, {event_datetime_select},
                al.activity_type, al.summary, al.details
         FROM activity_log al
         WHERE {where_sql}
-        ORDER BY {effective_timestamp_sql} DESC, al.activity_id DESC
-        LIMIT ? OFFSET ?
-    """, parameters + [page_size, (page - 1) * page_size]).fetchall()
-    grouped_events = []
+        ORDER BY al.activity_id DESC
+    """, parameters).fetchall()
+    prepared_events = []
     for event in events:
         event = dict(event)
         event["label"] = _storyline_label(event["activity_type"])
@@ -16542,6 +16539,22 @@ def client_storyline(client_id):
             if event["local_datetime"] else ""
         )
         event["event_time"] = _storyline_time(event["local_datetime"])
+        prepared_events.append(event)
+
+    prepared_events.sort(
+        key=lambda event: (
+            event["local_datetime"] is not None,
+            event["local_datetime"] or datetime.min.replace(
+                tzinfo=VANCOUVER_TIMEZONE
+            ),
+            event["activity_id"]
+        ),
+        reverse=True
+    )
+    page_start = (page - 1) * page_size
+    page_events = prepared_events[page_start:page_start + page_size]
+    grouped_events = []
+    for event in page_events:
         if not grouped_events or grouped_events[-1]["heading"] != event["heading"]:
             grouped_events.append({"heading": event["heading"], "events": []})
         grouped_events[-1]["events"].append(event)

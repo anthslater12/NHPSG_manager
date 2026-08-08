@@ -1,7 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app
@@ -60,6 +60,19 @@ class ClientStorylineTests(unittest.TestCase):
         """, (when, event_type, user_id, client_id, summary, details, success, visible, event_datetime))
         conn.commit()
         conn.close()
+
+    def event_utc(self, day, hour, minute):
+        local = datetime(
+            day.year,
+            day.month,
+            day.day,
+            hour,
+            minute,
+            tzinfo=app.VANCOUVER_TIMEZONE
+        )
+        return local.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
 
     def test_authorized_worker_sees_only_visible_events_for_client(self):
         self.login()
@@ -337,18 +350,83 @@ class ClientStorylineTests(unittest.TestCase):
 
     def test_storyline_uses_event_time_for_display_order_and_vancouver_date(self):
         self.login()
+        today = datetime.now(app.VANCOUVER_TIMEZONE).date()
+        yesterday = today - timedelta(days=1)
+        event_datetime = self.event_utc(yesterday, 6, 0)
         self.add_event(
-            "sleep_woke_up", "Wake event", when="2026-08-03 14:20:00",
-            event_datetime="2026-08-03T13:00:00Z"
+            "sleep_woke_up", "Wake event", when=f"{today} 14:20:00",
+            event_datetime=event_datetime
         )
         self.add_event(
-            "incident_created", "Legacy event", when="2026-08-03 13:30:00"
+            "incident_created", "Legacy event", when=f"{yesterday} 13:30:00"
         )
         page = self.client.get("/client/1/storyline").data
         self.assertIn(b"06:00", page)
         self.assertIn(b"Yesterday", page)
-        self.assertLess(page.find(b"Wake event"), page.find(b"Legacy event"))
-        self.assertNotIn(b"2026-08-03T13:00:00Z", page)
+        self.assertLess(page.find(b"Legacy event"), page.find(b"Wake event"))
+        self.assertNotIn(event_datetime.encode(), page)
+
+    def test_storyline_is_globally_ordered_by_one_canonical_datetime(self):
+        self.login()
+        today = datetime.now(app.VANCOUVER_TIMEZONE).date()
+        yesterday = today - timedelta(days=1)
+        older_date = today - timedelta(days=2)
+
+        self.add_event(
+            "shift_activity_created", "Older 23:00",
+            when=f"{older_date} 23:00:00"
+        )
+        self.add_event(
+            "shift_activity_created", "Yesterday 15:08",
+            when=f"{today} 01:00:00",
+            event_datetime=self.event_utc(yesterday, 15, 8)
+        )
+        self.add_event(
+            "shift_activity_created", "Today 08:30",
+            when=f"{today} 08:30:00"
+        )
+        self.add_event(
+            "shift_activity_created", "Yesterday 15:11",
+            when=f"{yesterday} 15:11:00",
+            event_datetime=""
+        )
+        self.add_event(
+            "shift_activity_created", "Yesterday 15:38",
+            when=f"{today} 02:00:00",
+            event_datetime=self.event_utc(yesterday, 15, 38)
+        )
+        self.add_event(
+            "shift_activity_created", "Yesterday 15:09",
+            when=f"{today} 03:00:00",
+            event_datetime=self.event_utc(yesterday, 15, 9)
+        )
+        self.add_event(
+            "shift_activity_created", "Yesterday 05:20",
+            when=f"{yesterday} 05:20:00"
+        )
+
+        page = self.client.get("/client/1/storyline").data.decode()
+        self.assertEqual(page.count("<h3>Today</h3>"), 1)
+        self.assertEqual(page.count("<h3>Yesterday</h3>"), 1)
+        self.assertEqual(
+            page.count(
+                f"<h3>{older_date.strftime('%A, %B')} "
+                f"{older_date.day}, {older_date.year}</h3>"
+            ),
+            1
+        )
+        summaries = (
+            "Today 08:30",
+            "Yesterday 15:38",
+            "Yesterday 15:11",
+            "Yesterday 15:09",
+            "Yesterday 15:08",
+            "Yesterday 05:20",
+            "Older 23:00",
+        )
+        positions = [page.find(summary) for summary in summaries]
+        self.assertTrue(all(position >= 0 for position in positions))
+        self.assertEqual(positions, sorted(positions, reverse=False))
 
     def test_storyline_same_event_time_uses_activity_id_tie_breaker_and_malformed_falls_back(self):
         self.login()
