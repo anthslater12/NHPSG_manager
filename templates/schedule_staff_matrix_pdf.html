@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        @page { size: landscape; margin: 0.4in; }
+        body { font-family: Arial, sans-serif; color: #17212b; font-size: 9pt; }
+        h1 { margin: 0 0 8pt; font-size: 17pt; }
+        .matrix-week { text-align: center; font-size: 15pt; font-weight: bold; margin: 0 0 10pt; }
+        .matrix-meta { display: flex; justify-content: space-between; margin-bottom: 12pt; }
+        .matrix-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        .matrix-table th, .matrix-table td { border: 1px solid #8b98a5; padding: 5pt; vertical-align: top; }
+        .matrix-table th { background: #e8eef3; text-align: center; }
+        .matrix-table th:first-child, .matrix-table td:first-child { width: 19%; text-align: left; }
+        .matrix-table th:not(:first-child), .matrix-table td:not(:first-child) { width: 11.57%; }
+        .matrix-day { display: block; font-weight: bold; }
+        .matrix-date { display: block; font-weight: normal; margin-top: 2pt; }
+        .matrix-worker-name { font-weight: bold; overflow-wrap: anywhere; }
+        .matrix-assignment { display: block; white-space: nowrap; line-height: 1.35; }
+        .matrix-legend { margin-top: 7pt; font-size: 8pt; }
+    </style>
+</head>
+<body>
+    <h1>NHPSG Manager &mdash; Staff Schedule Matrix</h1>
+    <div class="matrix-week">Week: {{ monday.isoformat() }} to {{ week_end.isoformat() }}</div>
+    <div class="matrix-meta">
+        <span><strong>Client:</strong> {{ client.client_name }}</span>
+        <span><strong>Generated:</strong> {{ generated_at }}</span>
+    </div>
+
+    <table class="matrix-table">
+        <thead>
+            <tr>
+                <th scope="col">Staff</th>
+                {% for day in matrix.dates %}
+                <th scope="col"><span class="matrix-day">{{ day.weekday }}</span><span class="matrix-date">{{ day.date_display }}</span></th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for worker in matrix.workers %}
+            <tr>
+                <td class="matrix-worker-name">{{ worker.full_name }}</td>
+                {% for assignments in worker.days %}
+                <td>
+                    {% for assignment in assignments %}
+                    <span class="matrix-assignment">{{ assignment.start_display|replace(" ", "") }}&ndash;{{ assignment.end_display|replace(" ", "") }}{% if assignment.overnight %} ND{% endif %}</span>
+                    {% endfor %}
+                </td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <div class="matrix-legend">ND = next day</div>
+</body>
+</html>

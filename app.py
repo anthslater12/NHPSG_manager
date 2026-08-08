@@ -593,6 +593,104 @@ def _schedule_week_staff_summary(conn, week_start, client_id):
     ))
 
 
+def _schedule_matrix_time_minutes(value):
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except (TypeError, ValueError):
+        return None
+    return parsed.hour * 60 + parsed.minute
+
+
+def _schedule_staff_matrix_context(conn, week_start, client_id):
+    """Return worker rows and day cells for the staff-oriented Schedule PDF."""
+    dates = [week_start + timedelta(days=offset) for offset in range(7)]
+    end_date = dates[-1]
+    workers = {}
+
+    for row in conn.execute("""
+        SELECT user_id, full_name
+        FROM users
+        WHERE active = 1 AND role = 'Support Worker'
+        ORDER BY full_name, user_id
+    """).fetchall():
+        workers[row["user_id"]] = {
+            "user_id": row["user_id"],
+            "full_name": row["full_name"],
+            "assignments": [[] for _ in dates],
+        }
+
+    rows = conn.execute("""
+        SELECT st.schedule_staff_id, st.user_id, u.full_name,
+               ss.shift_date, ss.shift_type,
+               COALESCE(NULLIF(TRIM(st.planned_start_time), ''),
+                        ss.planned_start_time) AS planned_start_time,
+               COALESCE(NULLIF(TRIM(st.planned_end_time), ''),
+                        ss.planned_end_time) AS planned_end_time
+        FROM schedule_staff AS st
+        JOIN schedule_shifts AS ss
+          ON ss.schedule_shift_id = st.schedule_shift_id
+        JOIN users AS u ON u.user_id = st.user_id
+        WHERE ss.client_id = ?
+          AND ss.shift_date BETWEEN ? AND ?
+        ORDER BY u.full_name, st.user_id, ss.shift_date,
+                 st.planned_start_time, st.schedule_staff_id
+    """, (client_id, week_start.isoformat(), end_date.isoformat())).fetchall()
+
+    date_indexes = {day.isoformat(): index for index, day in enumerate(dates)}
+    for row in rows:
+        start_minutes = _schedule_matrix_time_minutes(row["planned_start_time"])
+        end_minutes = _schedule_matrix_time_minutes(row["planned_end_time"])
+        day_index = date_indexes.get(row["shift_date"])
+        if start_minutes is None or end_minutes is None or day_index is None:
+            app.logger.warning(
+                "Skipping invalid staff matrix assignment schedule_staff_id=%s",
+                row["schedule_staff_id"],
+            )
+            continue
+        worker = workers.setdefault(row["user_id"], {
+            "user_id": row["user_id"],
+            "full_name": row["full_name"],
+            "assignments": [[] for _ in dates],
+        })
+        worker["assignments"][day_index].append({
+            "start_display": _format_schedule_time(row["planned_start_time"]),
+            "end_display": _format_schedule_time(row["planned_end_time"]),
+            "start_minutes": start_minutes,
+            "end_minutes": end_minutes,
+            "shift_type": row["shift_type"],
+            "schedule_staff_id": row["schedule_staff_id"],
+            "overnight": (
+                row["shift_type"] == "Overnight"
+                and end_minutes < start_minutes
+            ),
+        })
+
+    matrix_workers = []
+    for worker in workers.values():
+        day_cells = []
+        for assignments in worker.pop("assignments"):
+            day_cells.append(sorted(assignments, key=lambda assignment: (
+                assignment["start_minutes"],
+                assignment["end_minutes"],
+                assignment["shift_type"],
+                assignment["schedule_staff_id"],
+            )))
+        worker["days"] = day_cells
+        matrix_workers.append(worker)
+
+    return {
+        "dates": [{
+            "weekday": day.strftime("%A"),
+            "date_display": f"{day.strftime('%b')} {day.day}",
+            "date_iso": day.isoformat(),
+        } for day in dates],
+        "workers": sorted(matrix_workers, key=lambda worker: (
+            (worker["full_name"] or "").casefold(),
+            worker["user_id"],
+        )),
+    }
+
+
 def _schedule_shift_is_editable(shift_date, status, today=None):
     today = today or datetime.now(VANCOUVER_TIMEZONE).date()
     return shift_date >= today and status in ("Draft", "Published")
@@ -2306,6 +2404,53 @@ def schedule_week_pdf(client_id, monday):
         response.mimetype = "application/pdf"
         response.headers["Content-Disposition"] = (
             f"inline; filename=\"{_schedule_pdf_filename(client['client_name'], week_start)}\""
+        )
+        return response
+    finally:
+        conn.close()
+
+
+@app.route("/schedule/client/<int:client_id>/week/<monday>/staff-matrix-pdf")
+def schedule_staff_matrix_pdf(client_id, monday):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        try:
+            week_start = _parse_schedule_monday(monday)
+        except ValueError as error:
+            return str(error), 404
+        client = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            return "Client not found", 404
+        html = render_template(
+            "schedule_staff_matrix_pdf.html",
+            client=client,
+            monday=week_start,
+            week_end=week_start + timedelta(days=6),
+            matrix=_schedule_staff_matrix_context(conn, week_start, client_id),
+            generated_at=datetime.now(VANCOUVER_TIMEZONE).strftime(
+                "%Y-%m-%d %H:%M %Z"
+            ),
+        )
+        try:
+            pdf_bytes = _generate_schedule_pdf(html)
+        except Exception:
+            app.logger.exception("Staff Matrix PDF generation failed.")
+            return "Staff Matrix PDF could not be generated.", 500
+        response = app.make_response(pdf_bytes)
+        response.mimetype = "application/pdf"
+        response.headers["Content-Disposition"] = (
+            "inline; filename=\""
+            f"NHPSG_Staff_Matrix_{re.sub(r'[^A-Za-z0-9_-]+', '_', client['client_name']).strip('._-') or 'Client'}_"
+            f"{week_start.isoformat()}.pdf\""
         )
         return response
     finally:

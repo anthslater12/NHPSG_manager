@@ -105,20 +105,137 @@ class SchedulePdfExportTests(unittest.TestCase):
         monday = monday or self.monday
         return f"/schedule/client/{client_id}/week/{monday}/pdf"
 
+    def matrix_pdf_url(self, client_id=10, monday=None):
+        monday = monday or self.monday
+        return f"/schedule/client/{client_id}/week/{monday}/staff-matrix-pdf"
+
+    def add_shift(self, client_id=10, shift_date=None, shift_type="Day",
+                  start="08:00", end="16:00"):
+        shift_date = shift_date or self.monday.isoformat()
+        conn = sqlite3.connect(app.DB_NAME)
+        try:
+            shift_id = conn.execute("""
+                INSERT INTO schedule_shifts
+                (client_id, shift_date, shift_type, planned_start_time,
+                 planned_end_time, status, notes, created_by, created_at_utc,
+                 updated_by, updated_at_utc)
+                VALUES (?, ?, ?, ?, ?, 'Published', NULL, 1,
+                        '2026-08-01T15:00:00Z', 1, '2026-08-01T15:00:00Z')
+            """, (client_id, shift_date, shift_type, start, end)).lastrowid
+            conn.commit()
+            return shift_id
+        finally:
+            conn.close()
+
+    def add_assignment(self, shift_id, user_id, start, end):
+        conn = sqlite3.connect(app.DB_NAME)
+        try:
+            conn.execute("""
+                INSERT INTO schedule_staff
+                (schedule_shift_id, user_id, planned_start_time,
+                 planned_end_time, assigned_by, assigned_at_utc)
+                VALUES (?, ?, ?, ?, 1, '2026-08-01T15:00:00Z')
+            """, (shift_id, user_id, start, end))
+            conn.commit()
+        finally:
+            conn.close()
+
     def test_management_roles_see_export_and_worker_does_not(self):
         for user_id, role in ((1, "Admin"), (2, "Director"), (3, "Program Manager")):
             self.login(user_id, role)
             page = self.client.get(f"/schedule/client/10/week/{self.monday}")
-            self.assertIn(b"Export PDF", page.data)
+            self.assertIn(b"Export Weekly Schedule PDF", page.data)
+            self.assertIn(b"Export Staff Matrix PDF", page.data)
+            self.assertEqual(page.data.count(b'target="_blank"'), 2)
+            self.assertEqual(page.data.count(b'rel="noopener"'), 2)
         self.login(4, "Support Worker")
         page = self.client.get(f"/schedule/client/10/week/{self.monday}")
-        self.assertNotIn(b"Export PDF", page.data)
+        self.assertNotIn(b"Export Weekly Schedule PDF", page.data)
+        self.assertNotIn(b"Export Staff Matrix PDF", page.data)
         self.assertEqual(self.client.get(self.pdf_url()).status_code, 403)
         self.login(5, "Program Manager")
         self.assertEqual(self.client.get(self.pdf_url()).status_code, 403)
         with self.client.session_transaction() as session:
             session.clear()
         self.assertEqual(self.client.get(self.pdf_url()).status_code, 302)
+
+    def test_staff_matrix_pdf_contains_worker_rows_and_seven_day_columns(self):
+        self.login()
+        with patch.object(app, "_generate_schedule_pdf", side_effect=self.fake_renderer):
+            response = self.client.get(self.matrix_pdf_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/pdf")
+        self.assertTrue(response.data.startswith(b"%PDF-1.7"))
+        self.assertIn("NHPSG Manager &mdash; Staff Schedule Matrix", self.last_html)
+        self.assertIn("Client / Ten &lt;Test&gt;", self.last_html)
+        self.assertEqual(self.last_html.count('<th scope="col">'), 8)
+        self.assertIn('class="matrix-worker-name">Dana Director</td>', self.last_html)
+        self.assertIn('class="matrix-worker-name">Sam Worker</td>', self.last_html)
+        self.assertIn("Monday", self.last_html)
+        self.assertIn("Sunday", self.last_html)
+        self.assertIn("10:00PM&ndash;5:00AM ND", self.last_html)
+        self.assertIn("11:00PM&ndash;6:30AM ND", self.last_html)
+        self.assertIn("ND = next day", self.last_html)
+        self.assertNotIn("Weekly Staff Summary", self.last_html)
+        self.assertNotIn("Scheduled Hours", self.last_html)
+        self.assertNotIn("Shifts", self.last_html)
+
+    def test_staff_matrix_pdf_orders_multiple_assignments_and_leaves_unscheduled_blank(self):
+        first = self.add_shift(
+            shift_date=(self.monday + timedelta(days=1)).isoformat(),
+            shift_type="Day", start="07:00", end="15:00"
+        )
+        second = self.add_shift(
+            shift_date=(self.monday + timedelta(days=1)).isoformat(),
+            shift_type="Afternoon", start="15:00", end="23:00"
+        )
+        self.add_assignment(first, 4, "07:30", "15:00")
+        self.add_assignment(second, 4, "15:00", "23:00")
+        self.login()
+        with patch.object(app, "_generate_schedule_pdf", side_effect=self.fake_renderer):
+            self.client.get(self.matrix_pdf_url())
+        sam_row = re.search(
+            r'<tr>\s*<td class="matrix-worker-name">Sam Worker</td>(.*?)</tr>',
+            self.last_html,
+            flags=re.DOTALL,
+        ).group(1)
+        self.assertLess(
+            sam_row.index("7:30AM&ndash;3:00PM"),
+            sam_row.index("3:00PM&ndash;11:00PM"),
+        )
+        self.assertEqual(sam_row.count("<span class=\"matrix-assignment\">"), 3)
+        self.assertIn("<td>\n                    \n                </td>", sam_row)
+
+    def test_staff_matrix_pdf_scopes_client_week_and_keeps_inactive_assigned_worker(self):
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "INSERT INTO users VALUES (6, 'inactive-worker', 'hash', 'Inactive Worker', 'Support Worker', 0)"
+        )
+        conn.commit()
+        conn.close()
+        historical = self.add_shift(
+            shift_date=(self.monday + timedelta(days=4)).isoformat(),
+            shift_type="Day", start="09:00", end="17:00"
+        )
+        self.add_assignment(historical, 6, "09:15", "16:45")
+        other_client = self.add_shift(
+            client_id=20, shift_date=self.monday.isoformat(),
+            shift_type="Day", start="00:00", end="23:59"
+        )
+        self.add_assignment(other_client, 4, "00:00", "23:59")
+        other_week = self.add_shift(
+            shift_date=(self.monday + timedelta(days=7)).isoformat(),
+            shift_type="Day", start="00:00", end="23:59"
+        )
+        self.add_assignment(other_week, 4, "00:00", "23:59")
+        self.login()
+        with patch.object(app, "_generate_schedule_pdf", side_effect=self.fake_renderer):
+            self.client.get(self.matrix_pdf_url())
+        self.assertIn("Inactive Worker", self.last_html)
+        self.assertIn("9:15AM&ndash;4:45PM", self.last_html)
+        self.assertNotIn("11:59PM", self.last_html)
+        self.assertNotIn("Client Twenty", self.last_html)
+        self.assertNotIn("00:00", self.last_html)
 
     def test_pdf_response_headers_filename_and_selected_client_html(self):
         self.login()
