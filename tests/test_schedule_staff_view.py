@@ -33,6 +33,22 @@ class ScheduleStaffViewTests(unittest.TestCase):
                 client_name TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1
             );
+            CREATE TABLE activity_log (
+                activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                activity_datetime TEXT,
+                activity_class TEXT,
+                activity_type TEXT,
+                user_id INTEGER,
+                client_id INTEGER,
+                shift_id INTEGER,
+                related_table TEXT,
+                related_id INTEGER,
+                summary TEXT,
+                details TEXT,
+                success INTEGER NOT NULL DEFAULT 1,
+                storyline_visible INTEGER NOT NULL DEFAULT 0,
+                event_datetime TEXT
+            );
             INSERT INTO users VALUES
                 (1, 'admin', 'hash', 'Alex Manager', 'Admin', 1),
                 (2, 'anne', 'hash', 'Anne Worker', 'Support Worker', 1),
@@ -102,6 +118,26 @@ class ScheduleStaffViewTests(unittest.TestCase):
             f"/schedule/client/10/week/2026-08-03{query}"
         )
 
+    def staff_new_url(self, user_id=2, shift_date="2026-08-09"):
+        return (
+            f"/schedule/client/10/week/2026-08-03/staff/"
+            f"{user_id}/new/{shift_date}"
+        )
+
+    def staff_edit_url(self, assignment_id):
+        return (
+            f"/schedule/client/10/week/2026-08-03/"
+            f"staff-assignment/{assignment_id}/edit"
+        )
+
+    def rows(self, sql, params=()):
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
     def test_management_view_selection_and_summary(self):
         response = self.page()
         self.assertEqual(response.status_code, 200)
@@ -170,7 +206,7 @@ class ScheduleStaffViewTests(unittest.TestCase):
         self.assertIn("9:00AM&ndash;11:00AM", page)
         self.assertIn("5:00PM&ndash;7:00PM", page)
         self.assertIn("11:00PM&ndash;7:30AM ND", page)
-        self.assertNotIn("Add", page)
+        self.assertIn("+ Add", page)
         self.assertNotIn("Move Up", page)
         self.assertNotIn("Move Down", page)
 
@@ -184,6 +220,156 @@ class ScheduleStaffViewTests(unittest.TestCase):
         self.add_assignment(shift, 2)
         response = self.page()
         self.assertIn(b"/schedule/shift/", response.data)
+
+    def test_add_form_is_bound_to_worker_and_date_and_roles_can_add(self):
+        for user_id in (1, 6, 7):
+            self.login(user_id)
+            response = self.client.get(self.staff_new_url(2))
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Anne Worker", response.data)
+            self.assertIn(b"Sunday, Aug 9, 2026", response.data)
+            self.assertIn(b"Select shift type", response.data)
+
+    def test_add_creates_new_parent_and_assignment_with_activity_log(self):
+        self.login()
+        response = self.client.post(
+            self.staff_new_url(2),
+            data={
+                "shift_type": "Overnight",
+                "planned_start_time": "23:00",
+                "planned_end_time": "07:30",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("view=staff", response.location)
+        parent = self.rows("SELECT * FROM schedule_shifts")[0]
+        assignment = self.rows("SELECT * FROM schedule_staff")[0]
+        self.assertEqual(parent["shift_type"], "Overnight")
+        self.assertEqual(parent["planned_start_time"], "23:00")
+        self.assertEqual(parent["planned_end_time"], "07:30")
+        self.assertEqual(assignment["planned_start_time"], "23:00")
+        self.assertEqual(assignment["planned_end_time"], "07:30")
+        self.assertEqual(
+            [row["activity_type"] for row in self.rows(
+                "SELECT activity_type FROM activity_log ORDER BY activity_id"
+            )],
+            ["schedule_shift_created", "schedule_staff_assigned"],
+        )
+        shift_view = self.client.get("/schedule/client/10/week/2026-08-03")
+        self.assertIn(b"Anne Worker", shift_view.data)
+        self.assertIn(b"11:00PM&ndash;7:30AM", shift_view.data)
+        self.assertIn(b"8.5", shift_view.data)
+
+    def test_add_reuses_parent_and_duplicate_redirects_to_edit(self):
+        parent_id = self.add_shift(shift_date="2026-08-09", start="08:00", end="16:00")
+        self.login()
+        data = {
+            "shift_type": "Day",
+            "planned_start_time": "09:00",
+            "planned_end_time": "17:00",
+        }
+        response = self.client.post(self.staff_new_url(2), data=data)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(len(self.rows("SELECT * FROM schedule_shifts")), 1)
+        assignment_id = self.rows("SELECT schedule_staff_id FROM schedule_staff")[0][0]
+        self.assertEqual(self.rows("SELECT schedule_shift_id FROM schedule_staff")[0][0], parent_id)
+        response = self.client.post(self.staff_new_url(2), data=data)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"staff-assignment/{assignment_id}/edit", response.location)
+        self.assertEqual(len(self.rows("SELECT * FROM schedule_staff")), 1)
+
+    def test_edit_changes_only_target_assignment_and_preserves_parent(self):
+        parent_id = self.add_shift(
+            shift_date="2026-08-09", start="08:00", end="16:00"
+        )
+        self.add_assignment(parent_id, 2, "09:00", "11:00")
+        self.add_assignment(parent_id, 3, "12:00", "14:00")
+        assignment_id = self.rows(
+            "SELECT schedule_staff_id FROM schedule_staff WHERE user_id = 2"
+        )[0][0]
+        self.login()
+        response = self.client.post(
+            self.staff_edit_url(assignment_id),
+            data={
+                "shift_type": "Day",
+                "planned_start_time": "10:00",
+                "planned_end_time": "15:00",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("view=staff", response.location)
+        parent = self.rows("SELECT * FROM schedule_shifts WHERE schedule_shift_id = ?", (parent_id,))[0]
+        self.assertEqual((parent["planned_start_time"], parent["planned_end_time"]), ("08:00", "16:00"))
+        rows = self.rows("SELECT user_id, planned_start_time, planned_end_time FROM schedule_staff ORDER BY user_id")
+        self.assertEqual([(row[0], row[1], row[2]) for row in rows], [(2, "10:00", "15:00"), (3, "12:00", "14:00")])
+
+    def test_validation_and_past_closed_cancelled_protection(self):
+        self.login()
+        response = self.client.post(
+            self.staff_new_url(2),
+            data={"shift_type": "", "planned_start_time": "10:00", "planned_end_time": "10:00"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"A valid shift type is required", response.data)
+        response = self.client.post(
+            self.staff_new_url(2),
+            data={"shift_type": "Overnight", "planned_start_time": "22:00", "planned_end_time": "22:00"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"cannot be equal", response.data)
+
+        for shift_type in ("Day", "Afternoon"):
+            response = self.client.post(
+                self.staff_new_url(2),
+                data={
+                    "shift_type": shift_type,
+                    "planned_start_time": "16:00",
+                    "planned_end_time": "08:00",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"must be later", response.data)
+
+        response = self.client.post(
+            self.staff_new_url(2),
+            data={
+                "shift_type": "Overnight",
+                "planned_start_time": "22:00",
+                "planned_end_time": "06:00",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        closed_id = self.add_shift(shift_date="2026-08-09")
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute("UPDATE schedule_shifts SET status = 'Closed' WHERE schedule_shift_id = ?", (closed_id,))
+        conn.commit()
+        conn.close()
+        response = self.client.post(
+            self.staff_new_url(2),
+            data={"shift_type": "Day", "planned_start_time": "08:00", "planned_end_time": "16:00"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+        cancelled_id = self.add_shift(
+            shift_date="2026-08-09", shift_type="Afternoon"
+        )
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "UPDATE schedule_shifts SET status = 'Cancelled' WHERE schedule_shift_id = ?",
+            (cancelled_id,),
+        )
+        conn.commit()
+        conn.close()
+        response = self.client.post(
+            self.staff_new_url(2),
+            data={
+                "shift_type": "Afternoon",
+                "planned_start_time": "16:00",
+                "planned_end_time": "23:00",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
 
 
 if __name__ == "__main__":

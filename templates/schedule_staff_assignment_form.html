@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card schedule-form-card schedule-staff-assignment-form-card">
+    <h2>{% if editing %}Edit Staff Assignment{% else %}Add Staff Assignment{% endif %}</h2>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <dl class="schedule-staff-assignment-context">
+        <dt>Worker</dt>
+        <dd>{{ worker.full_name }}</dd>
+        <dt>Date</dt>
+        <dd>{{ shift_date.strftime("%A, %b") }} {{ shift_date.day }}, {{ shift_date.year }}</dd>
+    </dl>
+
+    <form method="post">
+        <div class="schedule-form-grid">
+            <div>
+                <label for="staff-assignment-type">Shift Type</label>
+                {% if editing %}
+                <p id="staff-assignment-type">{{ values.shift_type }}</p>
+                <input type="hidden" name="shift_type" value="{{ values.shift_type }}">
+                {% else %}
+                <select id="staff-assignment-type" name="shift_type" required>
+                    <option value="">Select shift type</option>
+                    {% for shift_type in ("Day", "Afternoon", "Overnight") %}
+                    <option value="{{ shift_type }}"{% if values.shift_type == shift_type %} selected{% endif %}>{{ shift_type }}</option>
+                    {% endfor %}
+                </select>
+                {% endif %}
+            </div>
+
+            <div>
+                <label for="staff-assignment-start">Planned Start</label>
+                <input id="staff-assignment-start" name="planned_start_time" type="time" value="{{ values.planned_start_time }}" required>
+            </div>
+
+            <div>
+                <label for="staff-assignment-end">Planned End</label>
+                <input id="staff-assignment-end" name="planned_end_time" type="time" value="{{ values.planned_end_time }}" required>
+            </div>
+        </div>
+
+        <button type="submit">{% if editing %}Save changes{% else %}Add assignment{% endif %}</button>
+        <a href="{{ url_for('schedule_week', client_id=client.client_id, monday=monday.isoformat(), view='staff') }}">Cancel</a>
+    </form>
+</div>
+{% endblock %}

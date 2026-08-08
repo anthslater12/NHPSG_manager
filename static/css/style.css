@@ -462,6 +462,34 @@ td,th{
     line-height: 1.4;
 }
 
+.schedule-staff-matrix-action,
+.schedule-staff-matrix-add {
+    margin-left: 6px;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.schedule-staff-matrix-add {
+    display: inline-block;
+    margin-top: 8px;
+    margin-left: 0;
+}
+
+.schedule-staff-assignment-context {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 14px;
+    margin: 0 0 18px;
+}
+
+.schedule-staff-assignment-context dt {
+    font-weight: bold;
+}
+
+.schedule-staff-assignment-context dd {
+    margin: 0;
+}
+
 .schedule-week-picker {
     display: flex;
     align-items: center;

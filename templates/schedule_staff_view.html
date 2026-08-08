@@ -16,10 +16,26 @@
                 <tr>
                     <th scope="row">{{ worker.full_name }}</th>
                     {% for assignments in worker.days %}
+                    {% set day = staff_view_context.dates[loop.index0] %}
                     <td>
                         {% for assignment in assignments %}
-                        <span class="schedule-staff-matrix-assignment">{{ assignment.start_display|replace(" ", "") }}&ndash;{{ assignment.end_display|replace(" ", "") }}{% if assignment.overnight %} ND{% endif %}</span>
+                        <span class="schedule-staff-matrix-assignment">
+                            {{ assignment.start_display|replace(" ", "") }}&ndash;{{ assignment.end_display|replace(" ", "") }}{% if assignment.overnight %} ND{% endif %}
+                            {% if day.date_iso >= today.isoformat() and assignment.status in ("Draft", "Published") %}
+                            <a class="schedule-staff-matrix-action" href="{{ url_for('schedule_staff_assignment_edit', client_id=client_id, monday=monday.isoformat(), schedule_staff_id=assignment.schedule_staff_id) }}">Edit</a>
+                            {% endif %}
+                        </span>
                         {% endfor %}
+                        {% set assigned_types = assignments|map(attribute="shift_type")|list %}
+                        {% set addable = namespace(value=false) %}
+                        {% if worker.active and day.date_iso >= today.isoformat() %}
+                        {% for shift_type in ("Day", "Afternoon", "Overnight") %}
+                        {% if shift_type not in assigned_types %}{% set addable.value = true %}{% endif %}
+                        {% endfor %}
+                        {% endif %}
+                        {% if addable.value %}
+                        <a class="schedule-staff-matrix-add" href="{{ url_for('schedule_staff_assignment_new', client_id=client_id, monday=monday.isoformat(), user_id=worker.user_id, shift_date=day.date_iso) }}">+ Add</a>
+                        {% endif %}
                     </td>
                     {% endfor %}
                 </tr>
