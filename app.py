@@ -799,10 +799,9 @@ def _schedule_staff_matrix_context(conn, week_start, client_id):
             "date_display": f"{day.strftime('%b')} {day.day}",
             "date_iso": day.isoformat(),
         } for day in dates],
-        "workers": sorted(matrix_workers, key=lambda worker: (
-            (worker["full_name"] or "").casefold(),
-            worker["user_id"],
-        )),
+        "workers": _schedule_effective_staff_order(
+            conn, client_id, matrix_workers
+        ),
     }
 
 

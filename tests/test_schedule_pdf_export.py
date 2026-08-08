@@ -12,6 +12,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import add_schedule_tables
+import add_schedule_staff_order
 import app
 
 
@@ -59,6 +60,7 @@ class SchedulePdfExportTests(unittest.TestCase):
         """)
         conn.commit()
         add_schedule_tables.migrate(conn)
+        add_schedule_staff_order.migrate(conn)
         conn.execute("""
             INSERT INTO schedule_shifts
             (client_id, shift_date, shift_type, planned_start_time,
@@ -136,6 +138,18 @@ class SchedulePdfExportTests(unittest.TestCase):
                  planned_end_time, assigned_by, assigned_at_utc)
                 VALUES (?, ?, ?, ?, 1, '2026-08-01T15:00:00Z')
             """, (shift_id, user_id, start, end))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_order(self, client_id, user_id, display_order):
+        conn = sqlite3.connect(app.DB_NAME)
+        try:
+            conn.execute("""
+                INSERT INTO schedule_staff_order
+                (client_id, user_id, display_order, updated_by, updated_at_utc)
+                VALUES (?, ?, ?, 1, '2026-08-01T15:00:00Z')
+            """, (client_id, user_id, display_order))
             conn.commit()
         finally:
             conn.close()
@@ -236,6 +250,59 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.assertNotIn("11:59PM", self.last_html)
         self.assertNotIn("Client Twenty", self.last_html)
         self.assertNotIn("00:00", self.last_html)
+
+    def test_staff_matrix_pdf_uses_client_order_and_matches_staff_view(self):
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.executemany(
+            "INSERT INTO users VALUES (?, ?, 'hash', ?, 'Support Worker', 1)",
+            ((6, "anne", "Anne Worker"), (7, "martin", "Martin Worker")),
+        )
+        conn.commit()
+        conn.close()
+        self.add_order(10, 7, 1)
+        self.add_order(10, 4, 2)
+
+        self.login()
+        with patch.object(app, "_generate_schedule_pdf", side_effect=self.fake_renderer):
+            self.client.get(self.matrix_pdf_url())
+        pdf_workers = re.findall(
+            r'<td class="matrix-worker-name">(.*?)</td>', self.last_html
+        )
+        staff_html = self.client.get(
+            f"/schedule/client/10/week/{self.monday}?view=staff"
+        ).data.decode()
+        staff_body = staff_html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+        staff_workers = re.findall(
+            r'class="schedule-staff-matrix-worker-name">([^<]+)', staff_body
+        )
+        self.assertEqual(
+            pdf_workers,
+            ["Martin Worker", "Sam Worker", "Anne Worker", "Dana Director"],
+        )
+        self.assertEqual(staff_workers, pdf_workers)
+
+        self.add_order(20, 4, 1)
+        self.add_order(20, 7, 2)
+        self.add_order(20, 6, 3)
+        with patch.object(app, "_generate_schedule_pdf", side_effect=self.fake_renderer):
+            self.client.get(self.matrix_pdf_url(client_id=20))
+        client_b_workers = re.findall(
+            r'<td class="matrix-worker-name">(.*?)</td>', self.last_html
+        )
+        self.assertEqual(client_b_workers, ["Sam Worker", "Martin Worker", "Anne Worker"])
+
+    def test_staff_matrix_order_rows_do_not_surface_unassigned_inactive_workers(self):
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "INSERT INTO users VALUES (6, 'inactive-worker', 'hash', 'Inactive Worker', 'Support Worker', 0)"
+        )
+        conn.commit()
+        conn.close()
+        self.add_order(10, 6, 1)
+        self.login()
+        with patch.object(app, "_generate_schedule_pdf", side_effect=self.fake_renderer):
+            self.client.get(self.matrix_pdf_url())
+        self.assertNotIn("Inactive Worker", self.last_html)
 
     def test_pdf_response_headers_filename_and_selected_client_html(self):
         self.login()
