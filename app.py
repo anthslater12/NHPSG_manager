@@ -141,7 +141,6 @@ def session_timeout():
 
 @app.context_processor
 def inject_session_timeout_settings():
-
     return {
         "session_timeout_seconds": SESSION_TIMEOUT_SECONDS,
         "session_warning_seconds": SESSION_WARNING_SECONDS
@@ -693,14 +692,18 @@ def _schedule_staff_view_context(conn, week_start, client_id):
         worker["days"] = day_cells
         matrix_workers.append(worker)
 
+    ordered_workers = _schedule_effective_staff_order(
+        conn, client_id, matrix_workers
+    )
     return {
         "dates": [{
             "weekday": day.strftime("%A"),
             "date_display": f"{day.strftime('%b')} {day.day}",
             "date_iso": day.isoformat(),
         } for day in dates],
-        "workers": _schedule_effective_staff_order(
-            conn, client_id, matrix_workers
+        "workers": ordered_workers,
+        "order_signature": "|".join(
+            str(worker["user_id"]) for worker in ordered_workers
         ),
     }
 
@@ -2712,6 +2715,149 @@ def schedule_staff_assignment_edit(client_id, monday, schedule_staff_id):
         )
     finally:
         conn.close()
+
+
+def _schedule_staff_order_redirect(client_id, monday, message=None):
+    if message:
+        flash(message)
+    return redirect(url_for(
+        "schedule_week", client_id=client_id, monday=monday,
+        view="staff",
+    ))
+
+
+def _schedule_staff_order_move(client_id, user_id, direction):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        client = conn.execute("""
+            SELECT client_id FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            return "Client not found", 404
+        try:
+            monday = _parse_schedule_monday(request.form.get("monday"))
+        except ValueError as error:
+            return str(error), 400
+
+        staff_view = _schedule_staff_view_context(conn, monday, client_id)
+        workers = staff_view["workers"]
+        current_signature = staff_view["order_signature"]
+        submitted_signature = (request.form.get("expected_order_signature") or "").strip()
+        if submitted_signature != current_signature:
+            return _schedule_staff_order_redirect(
+                client_id, monday.isoformat(),
+                "Staff order changed elsewhere. The current order was reloaded.",
+            )
+        worker_ids = [worker["user_id"] for worker in workers]
+        if user_id not in worker_ids:
+            return _schedule_staff_order_redirect(
+                client_id, monday.isoformat(),
+                "That worker is not in the selected Staff View.",
+            )
+        current_index = worker_ids.index(user_id)
+        adjacent_index = current_index + direction
+        if adjacent_index < 0 or adjacent_index >= len(worker_ids):
+            return _schedule_staff_order_redirect(
+                client_id, monday.isoformat(), "Staff order is already at the boundary."
+            )
+
+        worker_ids[current_index], worker_ids[adjacent_index] = (
+            worker_ids[adjacent_index], worker_ids[current_index]
+        )
+        existing_rows = conn.execute("""
+            SELECT user_id, display_order
+            FROM schedule_staff_order
+            WHERE client_id = ?
+            ORDER BY display_order, user_id
+        """, (client_id,)).fetchall()
+        final_ids = list(worker_ids)
+        final_ids.extend(
+            row["user_id"] for row in existing_rows
+            if row["user_id"] not in worker_ids
+        )
+        now_utc = serialize_behaviour_utc(
+            datetime.now(timezone.utc).replace(microsecond=0)
+        )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            offset = max(1000000, len(final_ids) + len(existing_rows) + 100)
+            conn.execute("""
+                UPDATE schedule_staff_order
+                SET display_order = display_order + ?
+                WHERE client_id = ?
+            """, (offset, client_id))
+            existing_user_ids = {row["user_id"] for row in existing_rows}
+            for display_order, target_user_id in enumerate(final_ids, start=1):
+                if target_user_id in existing_user_ids:
+                    conn.execute("""
+                        UPDATE schedule_staff_order
+                        SET display_order = ?, updated_by = ?, updated_at_utc = ?
+                        WHERE client_id = ? AND user_id = ?
+                    """, (
+                        display_order, session["user_id"], now_utc,
+                        client_id, target_user_id,
+                    ))
+                else:
+                    conn.execute("""
+                        INSERT INTO schedule_staff_order
+                        (client_id, user_id, display_order, updated_by, updated_at_utc)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        client_id, target_user_id, display_order,
+                        session["user_id"], now_utc,
+                    ))
+            log_activity(
+                conn, "SCHEDULE", "schedule_staff_order_changed",
+                "Staff View worker order changed",
+                user_id=session["user_id"], client_id=client_id,
+                related_table="schedule_staff_order", related_id=user_id,
+                details=(
+                    f"Moved worker user ID: {user_id}\n"
+                    f"Direction: {'down' if direction > 0 else 'up'}\n"
+                    f"New position: {adjacent_index + 1}"
+                ), storyline_visible=False,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return _schedule_staff_order_redirect(
+            client_id, monday.isoformat(), "Staff order updated."
+        )
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return _schedule_staff_order_redirect(
+            client_id, request.form.get("monday", ""),
+            "Staff order could not be updated.",
+        )
+    except Exception:
+        conn.rollback()
+        return "Staff order could not be updated.", 500
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/schedule/client/<int:client_id>/staff-order/<int:user_id>/move-up",
+    methods=["POST"],
+)
+def schedule_staff_order_move_up(client_id, user_id):
+    return _schedule_staff_order_move(client_id, user_id, -1)
+
+
+@app.route(
+    "/schedule/client/<int:client_id>/staff-order/<int:user_id>/move-down",
+    methods=["POST"],
+)
+def schedule_staff_order_move_down(client_id, user_id):
+    return _schedule_staff_order_move(client_id, user_id, 1)
 
 
 @app.route("/schedule/client/<int:client_id>/week/<monday>")

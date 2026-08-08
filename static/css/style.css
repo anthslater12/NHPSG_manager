@@ -445,6 +445,27 @@ td,th{
     overflow-wrap: anywhere;
 }
 
+.schedule-staff-matrix-worker-name {
+    display: inline;
+}
+
+.schedule-staff-order-controls {
+    display: inline-flex;
+    gap: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
+.schedule-staff-order-controls form {
+    display: inline;
+    margin: 0;
+}
+
+.schedule-staff-order-controls button {
+    padding: 2px 5px;
+    font-size: 0.78em;
+}
+
 .schedule-staff-matrix thead th span,
 .schedule-staff-matrix thead th time {
     display: block;

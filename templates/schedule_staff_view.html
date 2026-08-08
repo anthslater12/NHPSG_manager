@@ -14,7 +14,23 @@
             <tbody>
                 {% for worker in staff_view_context.workers %}
                 <tr>
-                    <th scope="row">{{ worker.full_name }}</th>
+                    <th scope="row">
+                        <span class="schedule-staff-matrix-worker-name">{{ worker.full_name }}</span>
+                        {% if can_manage %}
+                        <span class="schedule-staff-order-controls" aria-label="Reorder {{ worker.full_name }}">
+                            <form method="post" action="{{ url_for('schedule_staff_order_move_up', client_id=client_id, user_id=worker.user_id) }}">
+                                <input type="hidden" name="monday" value="{{ monday.isoformat() }}">
+                                <input type="hidden" name="expected_order_signature" value="{{ staff_view_context.order_signature }}">
+                                <button type="submit"{% if loop.first %} disabled aria-disabled="true"{% endif %}>Up</button>
+                            </form>
+                            <form method="post" action="{{ url_for('schedule_staff_order_move_down', client_id=client_id, user_id=worker.user_id) }}">
+                                <input type="hidden" name="monday" value="{{ monday.isoformat() }}">
+                                <input type="hidden" name="expected_order_signature" value="{{ staff_view_context.order_signature }}">
+                                <button type="submit"{% if loop.last %} disabled aria-disabled="true"{% endif %}>Down</button>
+                            </form>
+                        </span>
+                        {% endif %}
+                    </th>
                     {% for assignments in worker.days %}
                     {% set day = staff_view_context.dates[loop.index0] %}
                     <td>

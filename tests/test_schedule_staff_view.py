@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -138,6 +139,26 @@ class ScheduleStaffViewTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def order_signature(self):
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.row_factory = sqlite3.Row
+        try:
+            return app._schedule_staff_view_context(
+                conn, date(2026, 8, 3), 10
+            )["order_signature"]
+        finally:
+            conn.close()
+
+    def move(self, user_id, direction, signature=None):
+        self.login()
+        return self.client.post(
+            f"/schedule/client/10/staff-order/{user_id}/move-{direction}",
+            data={
+                "monday": "2026-08-03",
+                "expected_order_signature": signature or self.order_signature(),
+            },
+        )
+
     def test_management_view_selection_and_summary(self):
         response = self.page()
         self.assertEqual(response.status_code, 200)
@@ -166,6 +187,83 @@ class ScheduleStaffViewTests(unittest.TestCase):
         self.assertNotIn(b"schedule-staff-view-heading", response.data)
         self.assertNotIn(b"Planning View:", response.data)
         self.assertNotIn(b"Weekly Staff Summary", response.data)
+
+    def test_management_roles_see_order_controls_but_support_worker_does_not(self):
+        for user_id in (1, 6, 7):
+            response = self.page(user_id, "?view=staff")
+            self.assertIn(b"schedule-staff-order-controls", response.data)
+        response = self.page(8, "?view=staff")
+        self.assertNotIn(b"schedule-staff-order-controls", response.data)
+
+    def test_move_up_down_persists_contiguous_order_and_logs(self):
+        response = self.move(2, "down")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("view=staff", response.location)
+        rows = self.rows(
+            "SELECT user_id, display_order FROM schedule_staff_order "
+            "WHERE client_id = 10 ORDER BY display_order"
+        )
+        self.assertEqual([(row[0], row[1]) for row in rows], [(8, 1), (2, 2), (3, 3)])
+        self.assertEqual([row[1] for row in rows], list(range(1, 4)))
+        self.assertEqual(
+            self.rows(
+                "SELECT activity_type FROM activity_log "
+                "WHERE activity_type = 'schedule_staff_order_changed'"
+            )[0][0],
+            "schedule_staff_order_changed",
+        )
+        response = self.move(2, "up")
+        self.assertEqual(response.status_code, 302)
+        rows = self.rows(
+            "SELECT user_id, display_order FROM schedule_staff_order "
+            "WHERE client_id = 10 ORDER BY display_order"
+        )
+        self.assertEqual([(row[0], row[1]) for row in rows], [(2, 1), (8, 2), (3, 3)])
+        self.assertEqual(
+            self.client.get("/schedule/client/10/week/2026-08-10?view=staff").status_code,
+            200,
+        )
+
+    def test_boundary_stale_and_client_scope_requests_are_safe(self):
+        signature = self.order_signature()
+        response = self.move(2, "up", signature)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.rows("SELECT * FROM schedule_staff_order"), [])
+        self.assertEqual(
+            self.rows(
+                "SELECT * FROM activity_log "
+                "WHERE activity_type = 'schedule_staff_order_changed'"
+            ),
+            [],
+        )
+
+        response = self.move(2, "down", "stale-signature")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("view=staff", response.location)
+        self.assertEqual(self.rows("SELECT * FROM schedule_staff_order"), [])
+
+        self.login()
+        response = self.client.post(
+            "/schedule/client/999/staff-order/2/move-down",
+            data={"monday": "2026-08-03", "expected_order_signature": signature},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_unordered_worker_can_be_moved_and_inactive_history_is_preserved(self):
+        inactive_shift = self.add_shift(shift_date="2026-08-09", shift_type="Afternoon")
+        self.add_assignment(inactive_shift, 4, "16:00", "23:00")
+        self.set_order(10, 2, 1)
+        response = self.page(query="?view=staff")
+        self.assertIn(b"Historical Worker", response.data)
+        signature = self.order_signature()
+        response = self.move(4, "up", signature)
+        self.assertEqual(response.status_code, 302)
+        rows = self.rows(
+            "SELECT user_id, display_order FROM schedule_staff_order "
+            "WHERE client_id = 10 ORDER BY display_order"
+        )
+        self.assertEqual([row[1] for row in rows], list(range(1, len(rows) + 1)))
+        self.assertIn(4, [row[0] for row in rows])
 
     def test_matrix_columns_worker_inclusion_and_client_scoping(self):
         shift = self.add_shift()
