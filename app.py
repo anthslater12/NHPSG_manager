@@ -593,6 +593,29 @@ def _schedule_week_staff_summary(conn, week_start, client_id):
     ))
 
 
+def _schedule_effective_staff_order(conn, client_id, workers):
+    """Order a supplied worker set using saved per-client preferences."""
+    saved_order = {
+        row["user_id"]: row["display_order"]
+        for row in conn.execute("""
+            SELECT user_id, display_order
+            FROM schedule_staff_order
+            WHERE client_id = ?
+        """, (client_id,)).fetchall()
+    }
+    ordered_workers = []
+    for worker in workers:
+        worker = dict(worker)
+        worker["display_order"] = saved_order.get(worker["user_id"])
+        ordered_workers.append(worker)
+    return sorted(ordered_workers, key=lambda worker: (
+        worker["display_order"] is None,
+        worker["display_order"] if worker["display_order"] is not None else 0,
+        (worker.get("full_name") or "").casefold(),
+        worker["user_id"],
+    ))
+
+
 def _schedule_matrix_time_minutes(value):
     try:
         parsed = datetime.strptime(value, "%H:%M")
