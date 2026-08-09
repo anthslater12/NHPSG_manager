@@ -446,18 +446,17 @@ td,th{
 }
 
 .schedule-staff-matrix-worker-name {
-    display: inline;
+    display: block;
 }
 
 .schedule-staff-order-controls {
-    display: inline-flex;
+    display: flex;
     gap: 3px;
-    margin-left: 6px;
-    vertical-align: middle;
+    margin-top: 5px;
 }
 
 .schedule-staff-order-controls form {
-    display: inline;
+    display: block;
     margin: 0;
 }
 
@@ -471,7 +470,13 @@ td,th{
     display: block;
 }
 
+.schedule-staff-matrix thead th span {
+    color: #17324d;
+    font-weight: 600;
+}
+
 .schedule-staff-matrix thead th time {
+    color: #2b4358;
     margin-top: 3px;
     font-weight: normal;
     white-space: nowrap;
@@ -479,21 +484,34 @@ td,th{
 
 .schedule-staff-matrix-assignment {
     display: block;
+    margin-bottom: 8px;
+}
+
+.schedule-staff-matrix-time {
+    display: block;
+    line-height: 1.3;
     white-space: nowrap;
-    line-height: 1.4;
+}
+
+.schedule-staff-matrix-assignment-actions {
+    display: flex;
+    align-items: center;
+    margin-top: 3px;
 }
 
 .schedule-staff-matrix-action,
 .schedule-staff-matrix-add {
-    margin-left: 6px;
     font-size: 0.85em;
     white-space: nowrap;
 }
 
+.schedule-staff-matrix-cell-add {
+    display: flex;
+    margin-top: 4px;
+}
+
 .schedule-staff-matrix-add {
     display: inline-block;
-    margin-top: 8px;
-    margin-left: 0;
 }
 
 .schedule-staff-assignment-context {

@@ -15,9 +15,9 @@
                 {% for worker in staff_view_context.workers %}
                 <tr>
                     <th scope="row">
-                        <span class="schedule-staff-matrix-worker-name">{{ worker.full_name }}</span>
+                        <div class="schedule-staff-matrix-worker-name">{{ worker.full_name }}</div>
                         {% if can_manage %}
-                        <span class="schedule-staff-order-controls" aria-label="Reorder {{ worker.full_name }}">
+                        <div class="schedule-staff-order-controls" aria-label="Reorder {{ worker.full_name }}">
                             <form method="post" action="{{ url_for('schedule_staff_order_move_up', client_id=client_id, user_id=worker.user_id) }}">
                                 <input type="hidden" name="monday" value="{{ monday.isoformat() }}">
                                 <input type="hidden" name="expected_order_signature" value="{{ staff_view_context.order_signature }}">
@@ -28,19 +28,19 @@
                                 <input type="hidden" name="expected_order_signature" value="{{ staff_view_context.order_signature }}">
                                 <button type="submit"{% if loop.last %} disabled aria-disabled="true"{% endif %}>Down</button>
                             </form>
-                        </span>
+                        </div>
                         {% endif %}
                     </th>
                     {% for assignments in worker.days %}
                     {% set day = staff_view_context.dates[loop.index0] %}
                     <td>
                         {% for assignment in assignments %}
-                        <span class="schedule-staff-matrix-assignment">
-                            {{ assignment.start_display|replace(" ", "") }}&ndash;{{ assignment.end_display|replace(" ", "") }}{% if assignment.overnight %} ND{% endif %}
+                        <div class="schedule-staff-matrix-assignment">
+                            <span class="schedule-staff-matrix-time">{{ assignment.start_display|replace(" ", "") }}&ndash;{{ assignment.end_display|replace(" ", "") }}{% if assignment.overnight %} ND{% endif %}</span>
                             {% if day.date_iso >= today.isoformat() and assignment.status in ("Draft", "Published") %}
-                            <a class="schedule-staff-matrix-action" href="{{ url_for('schedule_staff_assignment_edit', client_id=client_id, monday=monday.isoformat(), schedule_staff_id=assignment.schedule_staff_id) }}">Edit</a>
+                            <div class="schedule-staff-matrix-assignment-actions"><a class="schedule-staff-matrix-action" href="{{ url_for('schedule_staff_assignment_edit', client_id=client_id, monday=monday.isoformat(), schedule_staff_id=assignment.schedule_staff_id) }}">Edit</a></div>
                             {% endif %}
-                        </span>
+                        </div>
                         {% endfor %}
                         {% set assigned_types = assignments|map(attribute="shift_type")|list %}
                         {% set addable = namespace(value=false) %}
@@ -50,7 +50,7 @@
                         {% endfor %}
                         {% endif %}
                         {% if addable.value %}
-                        <a class="schedule-staff-matrix-add" href="{{ url_for('schedule_staff_assignment_new', client_id=client_id, monday=monday.isoformat(), user_id=worker.user_id, shift_date=day.date_iso) }}">+ Add</a>
+                        <div class="schedule-staff-matrix-cell-add"><a class="schedule-staff-matrix-add" href="{{ url_for('schedule_staff_assignment_new', client_id=client_id, monday=monday.isoformat(), user_id=worker.user_id, shift_date=day.date_iso) }}">+ Add</a></div>
                         {% endif %}
                     </td>
                     {% endfor %}
