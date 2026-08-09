@@ -496,13 +496,28 @@ td,th{
 .schedule-staff-matrix-assignment-actions {
     display: flex;
     align-items: center;
+    gap: 10px;
     margin-top: 3px;
 }
 
+.schedule-staff-remove-form {
+    display: inline;
+    margin: 0;
+}
+
 .schedule-staff-matrix-action,
-.schedule-staff-matrix-add {
+.schedule-staff-matrix-add,
+.schedule-staff-matrix-remove {
     font-size: 0.85em;
     white-space: nowrap;
+}
+
+.schedule-staff-matrix-remove {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #8b1e1e;
+    cursor: pointer;
 }
 
 .schedule-staff-matrix-cell-add {

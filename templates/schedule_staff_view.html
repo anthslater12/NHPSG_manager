@@ -13,17 +13,17 @@
             </thead>
             <tbody>
                 {% for worker in staff_view_context.workers %}
-                <tr>
+                <tr id="schedule-staff-worker-{{ worker.user_id }}" data-schedule-staff-worker-row>
                     <th scope="row">
                         <div class="schedule-staff-matrix-worker-name">{{ worker.full_name }}</div>
                         {% if can_manage %}
                         <div class="schedule-staff-order-controls" aria-label="Reorder {{ worker.full_name }}">
-                            <form method="post" action="{{ url_for('schedule_staff_order_move_up', client_id=client_id, user_id=worker.user_id) }}">
+                            <form class="schedule-staff-position-action" method="post" action="{{ url_for('schedule_staff_order_move_up', client_id=client_id, user_id=worker.user_id) }}">
                                 <input type="hidden" name="monday" value="{{ monday.isoformat() }}">
                                 <input type="hidden" name="expected_order_signature" value="{{ staff_view_context.order_signature }}">
                                 <button type="submit"{% if loop.first %} disabled aria-disabled="true"{% endif %}>Up</button>
                             </form>
-                            <form method="post" action="{{ url_for('schedule_staff_order_move_down', client_id=client_id, user_id=worker.user_id) }}">
+                            <form class="schedule-staff-position-action" method="post" action="{{ url_for('schedule_staff_order_move_down', client_id=client_id, user_id=worker.user_id) }}">
                                 <input type="hidden" name="monday" value="{{ monday.isoformat() }}">
                                 <input type="hidden" name="expected_order_signature" value="{{ staff_view_context.order_signature }}">
                                 <button type="submit"{% if loop.last %} disabled aria-disabled="true"{% endif %}>Down</button>
@@ -38,7 +38,12 @@
                         <div class="schedule-staff-matrix-assignment">
                             <span class="schedule-staff-matrix-time">{{ assignment.start_display|replace(" ", "") }}&ndash;{{ assignment.end_display|replace(" ", "") }}{% if assignment.overnight %} ND{% endif %}</span>
                             {% if day.date_iso >= today.isoformat() and assignment.status in ("Draft", "Published") %}
-                            <div class="schedule-staff-matrix-assignment-actions"><a class="schedule-staff-matrix-action" href="{{ url_for('schedule_staff_assignment_edit', client_id=client_id, monday=monday.isoformat(), schedule_staff_id=assignment.schedule_staff_id) }}">Edit</a></div>
+                            <div class="schedule-staff-matrix-assignment-actions">
+                                <a class="schedule-staff-matrix-action schedule-staff-position-action" href="{{ url_for('schedule_staff_assignment_edit', client_id=client_id, monday=monday.isoformat(), schedule_staff_id=assignment.schedule_staff_id) }}">Edit</a>
+                                <form class="schedule-staff-remove-form schedule-staff-position-action" method="post" action="{{ url_for('schedule_staff_assignment_remove', client_id=client_id, monday=monday.isoformat(), schedule_staff_id=assignment.schedule_staff_id) }}">
+                                    <button class="schedule-staff-matrix-remove" type="submit" data-confirm-remove="Remove {{ worker.full_name }} from {{ day.weekday }} {{ assignment.shift_type }} shift?">&times;</button>
+                                </form>
+                            </div>
                             {% endif %}
                         </div>
                         {% endfor %}
@@ -50,7 +55,7 @@
                         {% endfor %}
                         {% endif %}
                         {% if addable.value %}
-                        <div class="schedule-staff-matrix-cell-add"><a class="schedule-staff-matrix-add" href="{{ url_for('schedule_staff_assignment_new', client_id=client_id, monday=monday.isoformat(), user_id=worker.user_id, shift_date=day.date_iso) }}">+ Add</a></div>
+                        <div class="schedule-staff-matrix-cell-add"><a class="schedule-staff-matrix-add schedule-staff-position-action" href="{{ url_for('schedule_staff_assignment_new', client_id=client_id, monday=monday.isoformat(), user_id=worker.user_id, shift_date=day.date_iso) }}">+ Add</a></div>
                         {% endif %}
                     </td>
                     {% endfor %}
@@ -60,3 +65,91 @@
         </table>
     </div>
 </section>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var staffView = document.querySelector('.schedule-staff-view');
+    if (!staffView) {
+        return;
+    }
+
+    var storageKey = 'schedule-staff-view-position';
+    var clientId = '{{ client_id }}';
+    var monday = '{{ monday.isoformat() }}';
+    var savedPosition = sessionStorage.getItem(storageKey);
+
+    function clearSavedPosition() {
+        sessionStorage.removeItem(storageKey);
+    }
+
+    if (savedPosition) {
+        try {
+            var positionData = JSON.parse(savedPosition);
+            var matchesContext = positionData.clientId === clientId
+                && positionData.monday === monday;
+            var row = matchesContext
+                ? document.getElementById(positionData.rowId)
+                : null;
+            var scrollContainer = staffView.querySelector(
+                '.schedule-staff-matrix-scroll'
+            );
+            if (row && scrollContainer && Number.isFinite(positionData.viewportTop)
+                && Number.isFinite(positionData.scrollLeft)) {
+                requestAnimationFrame(function() {
+                    requestAnimationFrame(function() {
+                        var currentTop = row.getBoundingClientRect().top;
+                        window.scrollBy(0, currentTop - positionData.viewportTop);
+                        scrollContainer.scrollLeft = positionData.scrollLeft;
+                        clearSavedPosition();
+                    });
+                });
+            } else {
+                clearSavedPosition();
+            }
+        } catch (error) {
+            clearSavedPosition();
+        }
+    }
+
+    function savePosition(action) {
+        var row = action.closest('[data-schedule-staff-worker-row]');
+        var scrollContainer = staffView.querySelector(
+            '.schedule-staff-matrix-scroll'
+        );
+        if (!row || !scrollContainer) {
+            return;
+        }
+        sessionStorage.setItem(storageKey, JSON.stringify({
+            clientId: clientId,
+            monday: monday,
+            rowId: row.id,
+            viewportTop: row.getBoundingClientRect().top,
+            scrollLeft: scrollContainer.scrollLeft,
+            savedAt: Date.now()
+        }));
+    }
+
+    document.addEventListener('submit', function(event) {
+        var button = event.submitter;
+        if (!button || !button.hasAttribute('data-confirm-remove')) {
+            var form = event.target.closest('.schedule-staff-position-action');
+            if (form) {
+                savePosition(form);
+            }
+            return;
+        }
+        if (!window.confirm(button.getAttribute('data-confirm-remove'))) {
+            event.preventDefault();
+            return;
+        }
+        savePosition(event.target);
+    });
+
+    document.addEventListener('click', function(event) {
+        var link = event.target.closest('a.schedule-staff-position-action');
+        if (link) {
+            savePosition(link);
+        }
+    });
+});
+</script>

@@ -131,6 +131,12 @@ class ScheduleStaffViewTests(unittest.TestCase):
             f"staff-assignment/{assignment_id}/edit"
         )
 
+    def staff_remove_url(self, assignment_id, client_id=10, monday="2026-08-03"):
+        return (
+            f"/schedule/client/{client_id}/week/{monday}/"
+            f"staff-assignment/{assignment_id}/remove"
+        )
+
     def rows(self, sql, params=()):
         conn = sqlite3.connect(app.DB_NAME)
         conn.row_factory = sqlite3.Row
@@ -400,6 +406,139 @@ class ScheduleStaffViewTests(unittest.TestCase):
         self.assertEqual((parent["planned_start_time"], parent["planned_end_time"]), ("08:00", "16:00"))
         rows = self.rows("SELECT user_id, planned_start_time, planned_end_time FROM schedule_staff ORDER BY user_id")
         self.assertEqual([(row[0], row[1], row[2]) for row in rows], [(2, "10:00", "15:00"), (3, "12:00", "14:00")])
+
+    def test_staff_view_remove_deletes_only_assignment_and_preserves_parent(self):
+        parent_id = self.add_shift(
+            shift_date="2026-08-09", start="08:00", end="16:00"
+        )
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "UPDATE schedule_shifts SET status = 'Published', notes = 'Keep this note' "
+            "WHERE schedule_shift_id = ?", (parent_id,)
+        )
+        conn.commit()
+        conn.close()
+        self.add_assignment(parent_id, 2, "09:00", "11:00")
+        self.add_assignment(parent_id, 3, "12:00", "14:00")
+        assignment_id = self.rows(
+            "SELECT schedule_staff_id FROM schedule_staff WHERE user_id = 2"
+        )[0][0]
+        self.login()
+        response = self.client.post(self.staff_remove_url(assignment_id))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("view=staff", response.location)
+        self.assertEqual(
+            [row[0] for row in self.rows("SELECT user_id FROM schedule_staff")],
+            [3],
+        )
+        parent = self.rows(
+            "SELECT status, planned_start_time, planned_end_time, notes "
+            "FROM schedule_shifts WHERE schedule_shift_id = ?", (parent_id,)
+        )[0]
+        self.assertEqual(
+            tuple(parent), ("Published", "08:00", "16:00", "Keep this note")
+        )
+        log = self.rows(
+            "SELECT activity_type, related_table, related_id, details, storyline_visible "
+            "FROM activity_log WHERE activity_type = 'schedule_staff_removed'"
+        )[0]
+        self.assertEqual(tuple(log), (
+            "schedule_staff_removed", "schedule_staff", assignment_id,
+            "Worker user ID: 2", 0,
+        ))
+
+    def test_staff_view_remove_last_assignment_keeps_parent_and_replay_is_safe(self):
+        parent_id = self.add_shift(shift_date="2026-08-09")
+        self.add_assignment(parent_id, 2, "09:00", "11:00")
+        assignment_id = self.rows("SELECT schedule_staff_id FROM schedule_staff")[0][0]
+        self.login()
+        response = self.client.post(self.staff_remove_url(assignment_id))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.rows("SELECT * FROM schedule_staff"), [])
+        self.assertEqual(
+            len(self.rows("SELECT * FROM schedule_shifts WHERE schedule_shift_id = ?", (parent_id,))),
+            1,
+        )
+        response = self.client.post(self.staff_remove_url(assignment_id))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            len(self.rows("SELECT * FROM activity_log WHERE activity_type = 'schedule_staff_removed'")),
+            1,
+        )
+
+    def test_staff_view_remove_roles_and_scope_protection(self):
+        for user_id in (1, 6, 7):
+            shift_type = {1: "Day", 6: "Afternoon", 7: "Overnight"}[user_id]
+            parent_id = self.add_shift(shift_date="2026-08-09", shift_type=shift_type)
+            self.add_assignment(parent_id, 2)
+            assignment_id = self.rows(
+                "SELECT schedule_staff_id FROM schedule_staff ORDER BY schedule_staff_id DESC"
+            )[0][0]
+            self.login(user_id)
+            response = self.client.post(self.staff_remove_url(assignment_id))
+            self.assertEqual(response.status_code, 302)
+
+        parent_id = self.add_shift(shift_date="2026-08-09", client_id=20)
+        self.add_assignment(parent_id, 2)
+        assignment_id = self.rows(
+            "SELECT schedule_staff_id FROM schedule_staff ORDER BY schedule_staff_id DESC"
+        )[0][0]
+        self.login()
+        self.assertEqual(self.client.post(self.staff_remove_url(assignment_id)).status_code, 404)
+        parent_id = self.add_shift(shift_date="2026-08-10")
+        self.add_assignment(parent_id, 2)
+        assignment_id = self.rows(
+            "SELECT schedule_staff_id FROM schedule_staff ORDER BY schedule_staff_id DESC"
+        )[0][0]
+        self.assertEqual(
+            self.client.post(self.staff_remove_url(assignment_id, monday="2026-08-03")).status_code,
+            400,
+        )
+
+        self.login(8)
+        self.assertEqual(self.client.post(self.staff_remove_url(assignment_id)).status_code, 403)
+
+    def test_staff_view_remove_rejects_past_closed_and_cancelled(self):
+        cases = (
+            ("2026-08-08", "Day", "Published"),
+            ("2026-08-09", "Afternoon", "Closed"),
+            ("2026-08-09", "Overnight", "Cancelled"),
+        )
+        self.login()
+        for shift_date, shift_type, status in cases:
+            parent_id = self.add_shift(
+                shift_date=shift_date, shift_type=shift_type
+            )
+            self.add_assignment(parent_id, 2)
+            conn = sqlite3.connect(app.DB_NAME)
+            conn.execute(
+                "UPDATE schedule_shifts SET status = ? WHERE schedule_shift_id = ?",
+                (status, parent_id),
+            )
+            conn.commit()
+            conn.close()
+            assignment_id = self.rows(
+                "SELECT schedule_staff_id FROM schedule_staff ORDER BY schedule_staff_id DESC"
+            )[0][0]
+            response = self.client.post(self.staff_remove_url(assignment_id))
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            len(self.rows("SELECT * FROM schedule_staff")), 3
+        )
+
+    def test_staff_view_remove_ui_and_position_markup(self):
+        parent_id = self.add_shift(shift_date="2026-08-09")
+        self.add_assignment(parent_id, 2)
+        page = self.page(query="?view=staff").data.decode()
+        self.assertIn('id="schedule-staff-worker-2"', page)
+        self.assertIn('method="post"', page)
+        self.assertIn("staff-assignment/1/remove", page)
+        self.assertIn("data-confirm-remove=\"Remove Anne Worker", page)
+        self.assertIn("schedule-staff-matrix-add", page)
+        self.assertIn("schedule-staff-view-position", page)
+        self.assertIn("viewportTop", page)
+        self.assertIn("scrollLeft", page)
+        self.assertIn("requestAnimationFrame", page)
 
     def test_validation_and_past_closed_cancelled_protection(self):
         self.login()

@@ -2716,6 +2716,79 @@ def schedule_staff_assignment_edit(client_id, monday, schedule_staff_id):
         conn.close()
 
 
+@app.route(
+    "/schedule/client/<int:client_id>/week/<monday>/staff-assignment/<int:schedule_staff_id>/remove",
+    methods=["POST"],
+)
+def schedule_staff_assignment_remove(client_id, monday, schedule_staff_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            user = _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        client = conn.execute("""
+            SELECT client_id FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            return "Client not found", 404
+        try:
+            week_start = _parse_schedule_monday(monday)
+        except ValueError as error:
+            return str(error), 404
+        existing = conn.execute("""
+            SELECT st.schedule_staff_id, st.user_id, u.full_name,
+                   ss.schedule_shift_id, ss.client_id, ss.shift_date,
+                   ss.shift_type, ss.status
+            FROM schedule_staff AS st
+            JOIN schedule_shifts AS ss ON ss.schedule_shift_id = st.schedule_shift_id
+            JOIN users AS u ON u.user_id = st.user_id
+            WHERE st.schedule_staff_id = ?
+        """, (schedule_staff_id,)).fetchone()
+        if existing is None or existing["client_id"] != client_id:
+            return "Assignment not found", 404
+        try:
+            selected_date = date.fromisoformat(existing["shift_date"])
+        except ValueError:
+            return "Assignment not found", 404
+        if not week_start <= selected_date <= week_start + timedelta(days=6):
+            return "Assignment is outside the selected week.", 400
+        if not _schedule_shift_is_editable(selected_date, existing["status"]):
+            return "Schedule is not editable.", 403
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            deleted = conn.execute(
+                "DELETE FROM schedule_staff WHERE schedule_staff_id = ?",
+                (schedule_staff_id,),
+            )
+            if deleted.rowcount != 1:
+                conn.rollback()
+                return "Assignment not found", 404
+            log_activity(
+                conn, "SCHEDULE", "schedule_staff_removed",
+                f"Staff removed from schedule shift {existing['schedule_shift_id']}",
+                user_id=user["user_id"], client_id=client_id,
+                related_table="schedule_staff", related_id=schedule_staff_id,
+                details=f"Worker user ID: {existing['user_id']}",
+                storyline_visible=False,
+            )
+            conn.commit()
+            flash("Staff assignment removed.")
+            return redirect(url_for(
+                "schedule_week", client_id=client_id,
+                monday=week_start.isoformat(), view="staff",
+            ))
+        except Exception:
+            conn.rollback()
+            return "Schedule could not be updated.", 500
+    finally:
+        conn.close()
+
+
 def _schedule_staff_order_redirect(client_id, monday, message=None):
     if message:
         flash(message)
