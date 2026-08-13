@@ -873,6 +873,16 @@ td,th{
     margin-bottom: 4px;
 }
 
+.shift-dashboard-notices-card.staff-notices-action-required {
+    border: 2px solid #b42318;
+    background: #fff1f0;
+}
+
+.staff-notices-action-required-message {
+    color: #8f1d14;
+    font-weight: 600;
+}
+
 .shift-dashboard-notice-list {
     margin: 10px 0 12px 20px;
     padding: 0;

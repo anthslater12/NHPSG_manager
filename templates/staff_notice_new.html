@@ -32,6 +32,10 @@
             >
         {% endif %}
 
+        {# Compatibility value for old drafts; guided_schedule_path remains
+           the only schedule value interpreted when supplied. #}
+        <input type="hidden" name="one_time_due_local" value="{{ form_data.one_time_due_local }}">
+
         <h3>Notice</h3>
 
         <label for="title">Title</label>
@@ -106,7 +110,7 @@
 
         <h3>Audience</h3>
 
-        <p>Select at least one audience rule.</p>
+        <p>Who should receive this notice? Select one or more audiences.</p>
 
         <div class="checkbox-group">
             {% for rule_type in audience_rule_types %}
@@ -117,7 +121,7 @@
                         value="{{ rule_type }}"
                         {% if rule_type in form_data.audience_rule_types %}checked{% endif %}
                     >
-                    <span>{{ rule_type }}</span>
+                    <span>{% if rule_type == "Selected Individual" %}One specific person{% elif rule_type == "All Support Workers" %}All Support Workers{% elif rule_type == "Selected Role" %}Staff in selected roles{% elif rule_type == "Applicable Shift Staff" %}Staff associated with selected shifts{% else %}Organization-wide{% endif %}</span>
                 </label>
             {% endfor %}
         </div>
@@ -150,158 +154,49 @@
             {% endfor %}
         </select>
 
-        <h3>Schedule</h3>
+        <h3>When should this notice apply?</h3>
+        <p id="schedule-help">Choose a plain-language delivery path. A draft is not published or delivered until it is published.</p>
+        <label class="checkbox-option">
+            <input type="checkbox" name="schedule_enabled" id="schedule_enabled" value="1" {% if form_data.schedule_enabled %}checked{% endif %}>
+            <span>Use this delivery schedule</span>
+        </label>
+        <label for="guided_schedule_path">Delivery schedule</label>
+        <select id="guided_schedule_path" name="guided_schedule_path" required aria-describedby="schedule-help">
+            {% for path, label in guided_schedule_paths.items() %}
+                <option value="{{ path }}" {% if form_data.guided_schedule_path == path %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
 
-        <div class="checkbox-group">
-            <label class="checkbox-option">
-                <input
-                    type="checkbox"
-                    name="schedule_enabled"
-                    value="1"
-                    {% if form_data.schedule_enabled %}checked{% endif %}
-                >
-                <span>Schedule configured</span>
-            </label>
+        <div id="guided-calendar-date">
+            <label for="guided_calendar_date">Calendar date</label>
+            <input type="date" id="guided_calendar_date" name="guided_calendar_date" value="{{ form_data.guided_calendar_date }}">
         </div>
-
-        <label for="occurrence_basis">Occurrence Basis</label>
-        <select id="occurrence_basis" name="occurrence_basis">
-            <option value="">Select occurrence basis</option>
-            {% for value in occurrence_bases %}
-                <option
-                    value="{{ value }}"
-                    {% if form_data.occurrence_basis == value %}selected{% endif %}
-                >
-                    {{ value }}
-                </option>
-            {% endfor %}
-        </select>
-
-        <label for="recurrence_pattern">Recurrence Pattern</label>
-        <select id="recurrence_pattern" name="recurrence_pattern">
-            <option value="">Select recurrence pattern</option>
-            {% for value in recurrence_patterns %}
-                <option
-                    value="{{ value }}"
-                    {% if form_data.recurrence_pattern == value %}selected{% endif %}
-                >
-                    {{ value }}
-                </option>
-            {% endfor %}
-        </select>
-
-        <label for="shift_applicability">Shift Applicability</label>
-        <select id="shift_applicability" name="shift_applicability">
-            <option value="">Select shift applicability</option>
-            {% for value in shift_applicability_values %}
-                <option
-                    value="{{ value }}"
-                    {% if form_data.shift_applicability == value %}selected{% endif %}
-                >
-                    {{ value }}
-                </option>
-            {% endfor %}
-        </select>
-
-        <label for="interval_days">Interval Days</label>
-        <input
-            type="number"
-            id="interval_days"
-            name="interval_days"
-            min="2"
-            value="{{ form_data.interval_days }}"
-        >
-
-        <label for="recurrence_anchor_date">Recurrence Anchor Date</label>
-        <input
-            type="date"
-            id="recurrence_anchor_date"
-            name="recurrence_anchor_date"
-            value="{{ form_data.recurrence_anchor_date }}"
-        >
-
-        <label for="specific_calendar_date">Specific Calendar Date</label>
-        <input
-            type="date"
-            id="specific_calendar_date"
-            name="specific_calendar_date"
-            value="{{ form_data.specific_calendar_date }}"
-        >
-
-        <label for="specific_shift_client_id">Specific Shift Client</label>
-        <select
-            id="specific_shift_client_id"
-            name="specific_shift_client_id"
-        >
-            <option value="">Select client</option>
-            {% for client in clients %}
-                <option
-                    value="{{ client.client_id }}"
-                    {% if form_data.specific_shift_client_id|string == client.client_id|string %}selected{% endif %}
-                >
-                    {{ client.client_name }}{% if not client.active %} (Inactive){% endif %}
-                </option>
-            {% endfor %}
-        </select>
-
-        <label for="specific_shift_date">Specific Shift Date</label>
-        <input
-            type="date"
-            id="specific_shift_date"
-            name="specific_shift_date"
-            value="{{ form_data.specific_shift_date }}"
-        >
-
-        <label for="specific_shift_type">Specific Shift Type</label>
-        <select id="specific_shift_type" name="specific_shift_type">
-            <option value="">Select shift type</option>
-            {% for shift_type in shift_types %}
-                <option
-                    value="{{ shift_type }}"
-                    {% if form_data.specific_shift_type == shift_type %}selected{% endif %}
-                >
-                    {{ shift_type }}
-                </option>
-            {% endfor %}
-        </select>
-
-        <label for="one_time_due_local">One-Time Due Date and Time</label>
-        <input
-            type="datetime-local"
-            id="one_time_due_local"
-            name="one_time_due_local"
-            value="{{ form_data.one_time_due_local }}"
-        >
-
-        <fieldset class="checkbox-group">
-            <legend>Selected Shift Types</legend>
-            {% for shift_type in shift_types %}
-                <label class="checkbox-option">
-                    <input
-                        type="checkbox"
-                        name="shift_types"
-                        value="{{ shift_type }}"
-                        {% if shift_type in form_data.shift_types %}checked{% endif %}
-                    >
-                    <span>{{ shift_type }}</span>
-                </label>
-            {% endfor %}
-        </fieldset>
-
-        <fieldset class="checkbox-group">
-            <legend>Selected Weekdays</legend>
-            {% for weekday_number, weekday_name in weekdays %}
-                <label class="checkbox-option">
-                    <input
-                        type="checkbox"
-                        name="weekdays"
-                        value="{{ weekday_number }}"
-                        {% if weekday_number|string in form_data.weekdays %}checked{% endif %}
-                    >
-                    <span>{{ weekday_name }}</span>
-                </label>
-            {% endfor %}
-        </fieldset>
+        <div id="guided-due">
+            <label for="guided_due_local">Date and time</label>
+            <input type="datetime-local" id="guided_due_local" name="guided_due_local" value="{{ form_data.guided_due_local }}">
+        </div>
+        <div id="guided-interval">
+            <label for="guided_interval_days">Number of days</label>
+            <input type="number" min="2" id="guided_interval_days" name="guided_interval_days" value="{{ form_data.guided_interval_days }}">
+        </div>
+        <div id="guided-anchor">
+            <label for="guided_anchor_date">Start repeating on</label>
+            <input type="date" id="guided_anchor_date" name="guided_anchor_date" value="{{ form_data.guided_anchor_date }}">
+        </div>
+        <div id="guided-specific-shift">
+            <label for="guided_shift_client_id">Client</label>
+            <select id="guided_shift_client_id" name="guided_shift_client_id">
+                <option value="">Select client</option>
+                {% for client in clients %}<option value="{{ client.client_id }}" {% if form_data.guided_shift_client_id|string == client.client_id|string %}selected{% endif %}>{{ client.client_name }}</option>{% endfor %}
+            </select>
+            <label for="guided_shift_date">Shift date</label>
+            <input type="date" id="guided_shift_date" name="guided_shift_date" value="{{ form_data.guided_shift_date }}">
+            <label for="guided_shift_type">Shift type</label>
+            <select id="guided_shift_type" name="guided_shift_type"><option value="">Select shift type</option>{% for value in shift_types %}<option value="{{ value }}" {% if form_data.guided_shift_type == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select>
+        </div>
+        <fieldset id="guided-shift-types" class="checkbox-group"><legend>Shift types</legend>{% for value in shift_types %}<label class="checkbox-option"><input type="checkbox" name="shift_types" value="{{ value }}" {% if value in form_data.shift_types %}checked{% endif %}><span>{{ value }}</span></label>{% endfor %}</fieldset>
+        <fieldset id="guided-weekdays" class="checkbox-group"><legend>Weekdays</legend>{% for number, name in weekdays %}<label class="checkbox-option"><input type="checkbox" name="weekdays" value="{{ number }}" {% if number|string in form_data.weekdays %}checked{% endif %}><span>{{ name }}</span></label>{% endfor %}</fieldset>
+        <p id="guided-summary" role="status" aria-live="polite"></p>
 
         <button type="submit">
             {% if notice %}Save Draft{% else %}Create Draft{% endif %}
@@ -315,6 +210,50 @@
         </a>
 
     </form>
+
+    <script>
+    (() => {
+        const path = document.getElementById('guided_schedule_path');
+        const enabled = document.getElementById('schedule_enabled');
+        const sections = {
+            'guided-calendar-date': ['calendar_once'],
+            'guided-due': ['one_time'],
+            'guided-interval': ['calendar_interval', 'shift_interval_every', 'shift_interval_types'],
+            'guided-anchor': ['calendar_daily', 'calendar_interval', 'calendar_weekdays', 'shift_daily_every', 'shift_daily_types', 'shift_interval_every', 'shift_interval_types', 'shift_weekdays_every', 'shift_weekdays_types'],
+            'guided-specific-shift': ['shift_once_specific'],
+            'guided-shift-types': ['shift_once_types', 'shift_daily_types', 'shift_interval_types', 'shift_weekdays_types'],
+            'guided-weekdays': ['calendar_weekdays', 'shift_weekdays_every', 'shift_weekdays_types']
+        };
+        const clear = (box) => box.querySelectorAll('input, select').forEach(control => {
+            if (control.type === 'checkbox' || control.type === 'radio') control.checked = false;
+            else control.value = '';
+        });
+        const update = () => {
+            const selected = path.value;
+            enabled.checked = selected !== 'none';
+            Object.entries(sections).forEach(([id, paths]) => {
+                const box = document.getElementById(id);
+                const visible = paths.includes(selected);
+                box.hidden = !visible;
+                if (!visible) clear(box);
+            });
+            const person = document.querySelector('input[name="audience_rule_types"][value="Selected Individual"]');
+            const roles = document.querySelector('input[name="audience_rule_types"][value="Selected Role"]');
+            document.getElementById('selected_user_ids').closest('label')?.toggleAttribute('hidden', !person?.checked);
+            document.getElementById('selected_roles').closest('label')?.toggleAttribute('hidden', !roles?.checked);
+            const name = document.querySelector('#selected_user_ids option:checked')?.textContent.trim().split(' — ')[0];
+            const client = document.querySelector('#guided_shift_client_id option:checked')?.textContent.trim();
+            const date = document.getElementById('guided_shift_date').value || document.getElementById('guided_calendar_date').value;
+            const type = document.getElementById('guided_shift_type').value;
+            let summary = selected === 'none' ? 'This draft has no delivery schedule.' : 'Choose the details for this delivery schedule.';
+            if (selected === 'shift_once_specific' && name && client && date && type) summary = `This notice is for ${name} for ${client}'s ${type} shift on ${date}.`;
+            document.getElementById('guided-summary').textContent = summary;
+        };
+        path.addEventListener('change', update);
+        document.querySelectorAll('form input, form select').forEach(control => control.addEventListener('change', update));
+        update();
+    })();
+    </script>
 
 </div>
 

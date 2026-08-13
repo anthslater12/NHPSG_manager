@@ -20,8 +20,15 @@
     {% endif %}
 </div>
 
-<div class="card shift-dashboard-summary-card shift-dashboard-notices-card">
+<div class="card shift-dashboard-summary-card shift-dashboard-notices-card{% if staff_notice_outstanding_count > 0 %} staff-notices-action-required{% endif %}">
     <h3>Staff Notices</h3>
+
+    {% if staff_notice_outstanding_count > 0 %}
+        <p class="staff-notices-action-required-message">
+            <strong>Action required:</strong>
+            {{ staff_notice_outstanding_count }}
+        </p>
+    {% endif %}
 
     <p>
         <strong>Outstanding:</strong>

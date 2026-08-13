@@ -4892,6 +4892,43 @@ STAFF_NOTICE_SCHEDULE_COMBINATIONS = frozenset({
     ("Shift", "Selected Weekdays", "Selected Shift Types")
 })
 
+# Stable UI identifiers.  These deliberately map one-to-one to the existing
+# schedule combinations; the scheduling engine remains the authority.
+STAFF_NOTICE_GUIDED_SCHEDULES = {
+    "none": None,
+    "one_time": ("One Time", "Once", "None"),
+    "calendar_once": ("Calendar", "Once", "None"),
+    "calendar_daily": ("Calendar", "Daily", "None"),
+    "calendar_interval": ("Calendar", "Interval Days", "None"),
+    "calendar_weekdays": ("Calendar", "Selected Weekdays", "None"),
+    "shift_once_every": ("Shift", "Once", "Every Shift"),
+    "shift_once_types": ("Shift", "Once", "Selected Shift Types"),
+    "shift_once_specific": ("Shift", "Once", "Specific Shift"),
+    "shift_daily_every": ("Shift", "Daily", "Every Shift"),
+    "shift_daily_types": ("Shift", "Daily", "Selected Shift Types"),
+    "shift_interval_every": ("Shift", "Interval Days", "Every Shift"),
+    "shift_interval_types": ("Shift", "Interval Days", "Selected Shift Types"),
+    "shift_weekdays_every": ("Shift", "Selected Weekdays", "Every Shift"),
+    "shift_weekdays_types": ("Shift", "Selected Weekdays", "Selected Shift Types")
+}
+STAFF_NOTICE_GUIDED_SCHEDULE_LABELS = {
+    "none": "No delivery schedule",
+    "one_time": "Once at a specific date and time",
+    "calendar_once": "Once on a calendar date",
+    "calendar_daily": "Every day",
+    "calendar_interval": "Every chosen number of days",
+    "calendar_weekdays": "On selected weekdays",
+    "shift_once_every": "Once for every shift",
+    "shift_once_types": "Once for selected shift types",
+    "shift_once_specific": "Once for one specific shift",
+    "shift_daily_every": "Every day for every shift",
+    "shift_daily_types": "Every day for selected shift types",
+    "shift_interval_every": "Every chosen number of days for every shift",
+    "shift_interval_types": "Every chosen number of days for selected shift types",
+    "shift_weekdays_every": "On selected weekdays for every shift",
+    "shift_weekdays_types": "On selected weekdays for selected shift types"
+}
+
 STAFF_NOTICE_DRAFT_KEYS = frozenset({
     "title",
     "notice_text",
@@ -4949,6 +4986,14 @@ STAFF_NOTICE_MANAGEMENT_FORM_KEYS = frozenset({
     "one_time_due_local",
     "shift_types",
     "weekdays",
+    "guided_schedule_path",
+    "guided_calendar_date",
+    "guided_shift_client_id",
+    "guided_shift_date",
+    "guided_shift_type",
+    "guided_due_local",
+    "guided_interval_days",
+    "guided_anchor_date",
     "expected_updated_at_utc"
 })
 
@@ -4987,7 +5032,15 @@ STAFF_NOTICE_SCALAR_FORM_KEYS = frozenset({
     "specific_shift_client_id",
     "specific_shift_date",
     "specific_shift_type",
-    "one_time_due_local"
+    "one_time_due_local",
+    "guided_schedule_path",
+    "guided_calendar_date",
+    "guided_shift_client_id",
+    "guided_shift_date",
+    "guided_shift_type",
+    "guided_due_local",
+    "guided_interval_days",
+    "guided_anchor_date"
 })
 
 STAFF_NOTICE_CHECKBOX_FORM_KEYS = frozenset({
@@ -6563,6 +6616,70 @@ def build_staff_notice_draft_payload_from_form(form, *, edit=False):
         "audience_rules": audience_rules
     }
 
+    guided_path = scalar_values["guided_schedule_path"].strip()
+    if guided_path:
+        if guided_path not in STAFF_NOTICE_GUIDED_SCHEDULES:
+            raise ValueError("Invalid Staff Notice guided schedule path.")
+
+        combination = STAFF_NOTICE_GUIDED_SCHEDULES[guided_path]
+        if combination is None:
+            payload["schedule"] = None
+            return payload
+
+        occurrence_basis, recurrence_pattern, shift_applicability = combination
+        schedule = {
+            "occurrence_basis": occurrence_basis,
+            "recurrence_pattern": recurrence_pattern,
+            "shift_applicability": shift_applicability
+        }
+
+        # Guided controls are copied only for the selected path.  This makes
+        # stale or tampered hidden values harmless before final normalization.
+        if recurrence_pattern == "Interval Days":
+            value = scalar_values["guided_interval_days"].strip()
+            if value:
+                try:
+                    schedule["interval_days"] = int(value)
+                except ValueError as error:
+                    raise ValueError(
+                        "Staff Notice interval days must be a whole number."
+                    ) from error
+        if recurrence_pattern == "Selected Weekdays":
+            schedule["weekdays"] = [
+                int(value) for value in form.getlist("weekdays")
+            ]
+            if any(value < 0 or value > 6 for value in schedule["weekdays"]):
+                raise ValueError("Invalid Staff Notice weekday.")
+        if recurrence_pattern != "Once":
+            anchor = scalar_values["guided_anchor_date"].strip()
+            if anchor:
+                schedule["recurrence_anchor_date"] = anchor
+        if shift_applicability == "Selected Shift Types":
+            schedule["shift_types"] = form.getlist("shift_types")
+        if guided_path == "calendar_once":
+            schedule["specific_calendar_date"] = scalar_values[
+                "guided_calendar_date"
+            ].strip()
+        if guided_path == "one_time":
+            schedule["one_time_due_local"] = scalar_values[
+                "guided_due_local"
+            ].strip()
+        if guided_path == "shift_once_specific":
+            schedule.update({
+                "specific_shift_client_id": _staff_notice_form_identifier(
+                    scalar_values["guided_shift_client_id"],
+                    "Specific-shift client"
+                ),
+                "specific_shift_date": scalar_values[
+                    "guided_shift_date"
+                ].strip(),
+                "specific_shift_type": scalar_values[
+                    "guided_shift_type"
+                ].strip()
+            })
+        payload["schedule"] = schedule
+        return payload
+
     schedule_fields = (
         "occurrence_basis",
         "recurrence_pattern",
@@ -7265,6 +7382,18 @@ def _staff_notice_form_data_from_record(notice):
             selected_user_ids.append(str(rule["user_id"]))
 
     schedule = notice["schedule"] or {}
+    combination = (
+        schedule.get("occurrence_basis"),
+        schedule.get("recurrence_pattern"),
+        schedule.get("shift_applicability")
+    ) if notice["schedule"] else None
+    guided_path = next(
+        (
+            path for path, value in STAFF_NOTICE_GUIDED_SCHEDULES.items()
+            if value == combination
+        ),
+        "none"
+    )
     return {
         "title": notice["title"],
         "notice_text": notice["notice_text"],
@@ -7314,6 +7443,21 @@ def _staff_notice_form_data_from_record(notice):
         ),
         "shift_types": list(notice["shift_types"]),
         "weekdays": [str(value) for value in notice["weekdays"]]
+        ,"guided_schedule_path": guided_path
+        ,"guided_calendar_date": schedule.get("specific_calendar_date") or ""
+        ,"guided_shift_client_id": str(schedule.get("specific_shift_client_id") or "")
+        ,"guided_shift_date": schedule.get("specific_shift_date") or ""
+        ,"guided_shift_type": schedule.get("specific_shift_type") or ""
+        ,"guided_due_local": (
+            format_staff_notice_local_datetime(
+                schedule.get("one_time_due_at_utc"),
+                STAFF_NOTICE_LOCAL_DATETIME_FORMAT
+            ) if schedule.get("one_time_due_at_utc") else ""
+        )
+        ,"guided_interval_days": str(schedule.get("interval_days") or "")
+        ,"guided_anchor_date": schedule.get("recurrence_anchor_date") or ""
+        ,"guided_shift_types": list(notice["shift_types"])
+        ,"guided_weekdays": [str(value) for value in notice["weekdays"]]
     }
 
 
@@ -12462,7 +12606,8 @@ def _staff_notice_management_choices(conn, notice=None):
             (4, "Friday"),
             (5, "Saturday"),
             (6, "Sunday")
-        )
+        ),
+        "guided_schedule_paths": STAFF_NOTICE_GUIDED_SCHEDULE_LABELS
     }
 
 
@@ -12647,7 +12792,17 @@ def staff_notice_new():
             "specific_shift_type": "",
             "one_time_due_local": "",
             "shift_types": [],
-            "weekdays": []
+            "weekdays": [],
+            "guided_schedule_path": "none",
+            "guided_calendar_date": "",
+            "guided_shift_client_id": "",
+            "guided_shift_date": "",
+            "guided_shift_type": "",
+            "guided_due_local": "",
+            "guided_interval_days": "",
+            "guided_anchor_date": "",
+            "guided_shift_types": [],
+            "guided_weekdays": []
         }
     )
 

@@ -3272,6 +3272,117 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             response.data
         )
 
+    def _worker_dashboard_response(self, shift_id):
+        client = app.app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["user_id"] = 2
+            session_data["role"] = "Support Worker"
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
+        ), mock.patch.object(
+            app,
+            "get_active_food_fluid_shift_context",
+            side_effect=PermissionError
+        ), mock.patch.object(
+            app,
+            "get_active_sleep_shift_context",
+            side_effect=PermissionError
+        ):
+            return client.get(f"/shift/{shift_id}")
+
+    def test_worker_dashboard_action_required_for_unviewed_and_viewed_required(self):
+        for viewed_at in (None, "2026-08-03T15:00:00Z"):
+            with self.subTest(viewed_at=viewed_at):
+                fixture = self.create_recipient_notice(
+                    title="Action-required dashboard notice"
+                )
+                self.recipient_request("/staff-notices")
+                if viewed_at is not None:
+                    conn = self.open_database()
+                    try:
+                        conn.execute("""
+                            UPDATE staff_notice_deliveries
+                            SET first_viewed_at_utc = ?, viewed_by_user_id = 2
+                            WHERE delivery_id = ?
+                        """, (viewed_at, self.delivery_rows(fixture)[0]["delivery_id"]))
+                        conn.commit()
+                    finally:
+                        conn.close()
+                shift_id = self.seed_shift()
+                self.seed_shift_staff(shift_id, 2)
+                response = self._worker_dashboard_response(shift_id)
+                html = response.get_data(as_text=True)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(
+                    "shift-dashboard-notices-card staff-notices-action-required",
+                    html
+                )
+                self.assertIn("Action required:", html)
+                self.assertRegex(html, r"Action required:</strong>\s+[1-9]")
+
+    def test_worker_dashboard_omits_action_required_for_acknowledged_cancelled_and_nlr(self):
+        for status in ("acknowledged", "Cancelled", "No Longer Required"):
+            fixture = self.create_recipient_notice(title=f"{status} notice")
+            self.recipient_request("/staff-notices")
+            delivery_id = self.delivery_rows(fixture)[0]["delivery_id"]
+            conn = self.open_database()
+            try:
+                if status == "acknowledged":
+                    conn.close()
+                    self.seed_staff_notice_acknowledgement(
+                        delivery_id,
+                        2,
+                        "2026-08-03T15:30:00Z"
+                    )
+                    conn = None
+                else:
+                    conn.execute("""
+                        UPDATE staff_notice_deliveries
+                        SET requirement_status = ?
+                        WHERE delivery_id = ?
+                    """, (status, delivery_id))
+                if conn is not None:
+                    conn.commit()
+            finally:
+                if conn is not None:
+                    conn.close()
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+        response = self._worker_dashboard_response(shift_id)
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(
+            "shift-dashboard-notices-card staff-notices-action-required",
+            html
+        )
+        self.assertNotIn("Action required:", html)
+
+    def test_worker_dashboard_action_required_text_is_not_colour_dependent(self):
+        self.create_recipient_notice(title="Accessible action notice")
+        self.recipient_request("/staff-notices")
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+        response = self._worker_dashboard_response(shift_id)
+        html = response.get_data(as_text=True)
+        self.assertIn("Action required:", html)
+        self.assertRegex(
+            html,
+            r"Action required:</strong>\s*1"
+        )
+
+    def test_worker_dashboard_action_required_render_does_not_record_view(self):
+        fixture = self.create_recipient_notice(title="No view dashboard notice")
+        self.recipient_request("/staff-notices")
+        delivery_id = self.delivery_rows(fixture)[0]["delivery_id"]
+        shift_id = self.seed_shift()
+        self.seed_shift_staff(shift_id, 2)
+        response = self._worker_dashboard_response(shift_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.delivery_rows(fixture)[0]["first_viewed_at_utc"])
+        self.assertEqual(delivery_id, self.delivery_rows(fixture)[0]["delivery_id"])
+
     def test_recipient_list_groups_statuses_without_recording_view(self):
         fixtures = [
             self.create_recipient_notice(title="Not Viewed Notice"),
