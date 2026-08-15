@@ -482,6 +482,67 @@ def _schedule_week_visible_to_support(publication_state):
     return bool(publication_state.get("is_fully_published"))
 
 
+def _schedule_week_return_to_draft(
+    conn, client_id, week_start, actor_user_id, previous_state,
+    triggering_event,
+):
+    """Return published rows in a client/week to Draft within the caller's transaction."""
+    if previous_state not in {"Published", "Mixed"}:
+        return 0
+    end_date = week_start + timedelta(days=6)
+    published_rows = conn.execute("""
+        SELECT schedule_shift_id
+        FROM schedule_shifts
+        WHERE client_id = ?
+          AND shift_date BETWEEN ? AND ?
+          AND status = 'Published'
+        ORDER BY shift_date, schedule_shift_id
+    """, (
+        client_id, week_start.isoformat(), end_date.isoformat(),
+    )).fetchall()
+    if not published_rows:
+        return 0
+
+    now_utc = serialize_behaviour_utc(
+        datetime.now(timezone.utc).replace(microsecond=0)
+    )
+    updated = conn.execute("""
+        UPDATE schedule_shifts
+        SET status = 'Draft', updated_by = ?, updated_at_utc = ?
+        WHERE client_id = ?
+          AND shift_date BETWEEN ? AND ?
+          AND status = 'Published'
+    """, (
+        actor_user_id, now_utc, client_id,
+        week_start.isoformat(), end_date.isoformat(),
+    ))
+    if updated.rowcount < 1:
+        return 0
+
+    resulting_state = _schedule_week_publication_state(
+        conn, week_start, client_id
+    )
+    log_activity(
+        conn, "SCHEDULE", "schedule_week_returned_to_draft",
+        "Published schedule week returned to Draft",
+        user_id=actor_user_id, client_id=client_id,
+        related_table="schedule_shifts",
+        related_id=published_rows[0]["schedule_shift_id"],
+        details=(
+            f"Client ID: {client_id}\n"
+            f"Week start: {week_start.isoformat()}\n"
+            f"Week end: {end_date.isoformat()}\n"
+            f"Triggering event: {triggering_event}\n"
+            f"Published rows returned to Draft: {updated.rowcount}\n"
+            f"Previous state: {previous_state}\n"
+            f"Resulting state: {resulting_state['state']}\n"
+            f"Actor user ID: {actor_user_id}"
+        ),
+        storyline_visible=False,
+    )
+    return updated.rowcount
+
+
 def _format_schedule_time(value):
     parsed = datetime.strptime(value, "%H:%M")
     return parsed.strftime("%I:%M %p").lstrip("0")
@@ -2244,6 +2305,11 @@ def schedule_shift_new(client_id):
                 )
                 try:
                     conn.execute("BEGIN")
+                    previous_publication_state = _schedule_week_publication_state(
+                        conn, values["shift_date"] - timedelta(
+                            days=values["shift_date"].weekday()
+                        ), values["client_id"]
+                    )
                     cursor = conn.execute("""
                         INSERT INTO schedule_shifts
                         (client_id, shift_date, shift_type,
@@ -2292,6 +2358,14 @@ def schedule_shift_new(client_id):
                             ),
                             storyline_visible=False,
                         )
+                    _schedule_week_return_to_draft(
+                        conn, values["client_id"],
+                        values["shift_date"] - timedelta(
+                            days=values["shift_date"].weekday()
+                        ), user["user_id"],
+                        previous_publication_state["state"],
+                        "schedule_shift_created",
+                    )
                     conn.commit()
                     flash("Scheduled shift created.")
                     monday = values["shift_date"] - timedelta(
@@ -2363,6 +2437,12 @@ def schedule_shift_edit(schedule_shift_id):
                 )
                 try:
                     conn.execute("BEGIN")
+                    week_start = existing_date - timedelta(
+                        days=existing_date.weekday()
+                    )
+                    previous_publication_state = _schedule_week_publication_state(
+                        conn, week_start, existing["client_id"]
+                    )
                     conn.execute("""
                         UPDATE schedule_shifts
                         SET planned_start_time = ?, planned_end_time = ?,
@@ -2461,6 +2541,11 @@ def schedule_shift_edit(schedule_shift_id):
                             related_table="schedule_staff", related_id=assignment_id,
                             details=f"Worker user ID: {worker_id}", storyline_visible=False,
                         )
+                    _schedule_week_return_to_draft(
+                        conn, existing["client_id"], week_start,
+                        user["user_id"], previous_publication_state["state"],
+                        "schedule_shift_updated",
+                    )
                     conn.commit()
                     flash("Scheduled shift updated.")
                     monday = existing_date - timedelta(days=existing_date.weekday())
@@ -2585,6 +2670,9 @@ def schedule_staff_assignment_new(client_id, monday, user_id, shift_date):
                 )
                 try:
                     conn.execute("BEGIN")
+                    previous_publication_state = _schedule_week_publication_state(
+                        conn, week_start, client_id
+                    )
                     parent = conn.execute("""
                         SELECT * FROM schedule_shifts
                         WHERE client_id = ? AND shift_date = ? AND shift_type = ?
@@ -2654,6 +2742,11 @@ def schedule_staff_assignment_new(client_id, monday, user_id, shift_date):
                             f"Planned hours: {values['planned_start_time']}-"
                             f"{values['planned_end_time']}"
                         ), storyline_visible=False,
+                    )
+                    _schedule_week_return_to_draft(
+                        conn, client_id, week_start, user["user_id"],
+                        previous_publication_state["state"],
+                        "schedule_staff_assigned",
                     )
                     conn.commit()
                     flash("Staff assignment created.")
@@ -2731,6 +2824,9 @@ def schedule_staff_assignment_edit(client_id, monday, schedule_staff_id):
                 )
                 try:
                     conn.execute("BEGIN")
+                    previous_publication_state = _schedule_week_publication_state(
+                        conn, week_start, client_id
+                    )
                     conn.execute("""
                         UPDATE schedule_staff
                         SET planned_start_time = ?, planned_end_time = ?
@@ -2739,10 +2835,11 @@ def schedule_staff_assignment_edit(client_id, monday, schedule_staff_id):
                         values["planned_start_time"], values["planned_end_time"],
                         schedule_staff_id,
                     ))
-                    if (
+                    hours_changed = (
                         values["planned_start_time"] != existing["planned_start_time"]
                         or values["planned_end_time"] != existing["planned_end_time"]
-                    ):
+                    )
+                    if hours_changed:
                         log_activity(
                             conn, "SCHEDULE", "schedule_staff_hours_updated",
                             f"Planned hours updated for {existing['full_name']}",
@@ -2755,6 +2852,11 @@ def schedule_staff_assignment_edit(client_id, monday, schedule_staff_id):
                                 existing["schedule_shift_id"], existing["shift_date"],
                                 existing["shift_type"],
                             ), storyline_visible=False,
+                        )
+                        _schedule_week_return_to_draft(
+                            conn, client_id, week_start, user["user_id"],
+                            previous_publication_state["state"],
+                            "schedule_staff_hours_updated",
                         )
                     conn.commit()
                     flash("Staff assignment updated.")
@@ -2829,6 +2931,9 @@ def schedule_staff_assignment_remove(client_id, monday, schedule_staff_id):
 
         try:
             conn.execute("BEGIN IMMEDIATE")
+            previous_publication_state = _schedule_week_publication_state(
+                conn, week_start, client_id
+            )
             deleted = conn.execute(
                 "DELETE FROM schedule_staff WHERE schedule_staff_id = ?",
                 (schedule_staff_id,),
@@ -2843,6 +2948,11 @@ def schedule_staff_assignment_remove(client_id, monday, schedule_staff_id):
                 related_table="schedule_staff", related_id=schedule_staff_id,
                 details=f"Worker user ID: {existing['user_id']}",
                 storyline_visible=False,
+            )
+            _schedule_week_return_to_draft(
+                conn, client_id, week_start, user["user_id"],
+                previous_publication_state["state"],
+                "schedule_staff_removed",
             )
             conn.commit()
             flash("Staff assignment removed.")
