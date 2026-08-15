@@ -2304,7 +2304,14 @@ def schedule_shift_new(client_id):
                     datetime.now(timezone.utc).replace(microsecond=0)
                 )
                 try:
-                    conn.execute("BEGIN")
+                    conn.execute("BEGIN IMMEDIATE")
+                    revalidated_client = conn.execute("""
+                        SELECT client_id FROM clients
+                        WHERE client_id = ? AND active = 1
+                    """, (client_id,)).fetchone()
+                    if revalidated_client is None:
+                        conn.rollback()
+                        return "Client not found", 404
                     previous_publication_state = _schedule_week_publication_state(
                         conn, values["shift_date"] - timedelta(
                             days=values["shift_date"].weekday()
@@ -2436,12 +2443,34 @@ def schedule_shift_edit(schedule_shift_id):
                     datetime.now(timezone.utc).replace(microsecond=0)
                 )
                 try:
-                    conn.execute("BEGIN")
+                    conn.execute("BEGIN IMMEDIATE")
+                    authoritative = conn.execute("""
+                        SELECT * FROM schedule_shifts
+                        WHERE schedule_shift_id = ?
+                    """, (schedule_shift_id,)).fetchone()
+                    if authoritative is None:
+                        conn.rollback()
+                        return "Schedule not found", 404
+                    if authoritative["client_id"] != existing["client_id"]:
+                        conn.rollback()
+                        return "Schedule not found", 404
+                    authoritative_date = date.fromisoformat(
+                        authoritative["shift_date"]
+                    )
+                    if not _schedule_shift_is_editable(
+                        authoritative_date, authoritative["status"]
+                    ):
+                        conn.rollback()
+                        return "Schedule is not editable.", 403
                     week_start = existing_date - timedelta(
                         days=existing_date.weekday()
                     )
                     previous_publication_state = _schedule_week_publication_state(
-                        conn, week_start, existing["client_id"]
+                        conn,
+                        authoritative_date - timedelta(
+                            days=authoritative_date.weekday()
+                        ),
+                        authoritative["client_id"],
                     )
                     conn.execute("""
                         UPDATE schedule_shifts
@@ -2456,8 +2485,8 @@ def schedule_shift_edit(schedule_shift_id):
                     ))
                     log_activity(
                         conn, "SCHEDULE", "schedule_shift_updated",
-                        f"Schedule shift updated: {existing['shift_type']} on {existing['shift_date']}",
-                        user_id=user["user_id"], client_id=existing["client_id"],
+                        f"Schedule shift updated: {authoritative['shift_type']} on {authoritative['shift_date']}",
+                        user_id=user["user_id"], client_id=authoritative["client_id"],
                         related_table="schedule_shifts", related_id=schedule_shift_id,
                         details=_schedule_log_details(values), storyline_visible=False,
                     )
@@ -2484,7 +2513,7 @@ def schedule_shift_edit(schedule_shift_id):
                         log_activity(
                             conn, "SCHEDULE", "schedule_staff_assigned",
                             f"Staff assigned to schedule shift {schedule_shift_id}",
-                            user_id=user["user_id"], client_id=existing["client_id"],
+                            user_id=user["user_id"], client_id=authoritative["client_id"],
                             related_table="schedule_staff", related_id=assignment.lastrowid,
                             details=(
                                 f"Worker user ID: {worker_id}\n"
@@ -2515,7 +2544,7 @@ def schedule_shift_edit(schedule_shift_id):
                                 conn, "SCHEDULE", "schedule_staff_hours_updated",
                                 f"Planned hours updated for {old_assignment['full_name']}",
                                 user_id=user["user_id"],
-                                client_id=existing["client_id"],
+                                client_id=authoritative["client_id"],
                                 related_table="schedule_staff",
                                 related_id=old_assignment["schedule_staff_id"],
                                 details=_schedule_staff_hours_details(
@@ -2523,8 +2552,8 @@ def schedule_shift_edit(schedule_shift_id):
                                     old_start, old_end,
                                     worker_hours["planned_start_time"],
                                     worker_hours["planned_end_time"],
-                                    schedule_shift_id, existing["shift_date"],
-                                    existing["shift_type"],
+                                    schedule_shift_id, authoritative["shift_date"],
+                                    authoritative["shift_type"],
                                 ),
                                 storyline_visible=False,
                             )
@@ -2537,12 +2566,15 @@ def schedule_shift_edit(schedule_shift_id):
                         log_activity(
                             conn, "SCHEDULE", "schedule_staff_removed",
                             f"Staff removed from schedule shift {schedule_shift_id}",
-                            user_id=user["user_id"], client_id=existing["client_id"],
+                            user_id=user["user_id"], client_id=authoritative["client_id"],
                             related_table="schedule_staff", related_id=assignment_id,
                             details=f"Worker user ID: {worker_id}", storyline_visible=False,
                         )
                     _schedule_week_return_to_draft(
-                        conn, existing["client_id"], week_start,
+                        conn, authoritative["client_id"],
+                        authoritative_date - timedelta(
+                            days=authoritative_date.weekday()
+                        ),
                         user["user_id"], previous_publication_state["state"],
                         "schedule_shift_updated",
                     )
@@ -2550,7 +2582,7 @@ def schedule_shift_edit(schedule_shift_id):
                     flash("Scheduled shift updated.")
                     monday = existing_date - timedelta(days=existing_date.weekday())
                     return redirect(url_for(
-                        "schedule_week", client_id=existing["client_id"],
+                        "schedule_week", client_id=authoritative["client_id"],
                         monday=monday.isoformat()
                     ))
                 except sqlite3.IntegrityError:
@@ -2823,9 +2855,45 @@ def schedule_staff_assignment_edit(client_id, monday, schedule_staff_id):
                     datetime.now(timezone.utc).replace(microsecond=0)
                 )
                 try:
-                    conn.execute("BEGIN")
+                    conn.execute("BEGIN IMMEDIATE")
+                    authoritative = conn.execute("""
+                        SELECT st.schedule_staff_id, st.user_id,
+                               st.planned_start_time, st.planned_end_time,
+                               u.full_name, u.active AS worker_active,
+                               ss.schedule_shift_id, ss.client_id, ss.shift_date,
+                               ss.shift_type, ss.status, c.client_name,
+                               c.active AS client_active
+                        FROM schedule_staff AS st
+                        JOIN schedule_shifts AS ss
+                          ON ss.schedule_shift_id = st.schedule_shift_id
+                        JOIN users AS u ON u.user_id = st.user_id
+                        JOIN clients AS c ON c.client_id = ss.client_id
+                        WHERE st.schedule_staff_id = ?
+                    """, (schedule_staff_id,)).fetchone()
+                    if authoritative is None:
+                        conn.rollback()
+                        return "Assignment not found", 404
+                    if (
+                        authoritative["client_id"] != client_id
+                        or authoritative["client_id"] != existing["client_id"]
+                        or authoritative["user_id"] != existing["user_id"]
+                        or not authoritative["client_active"]
+                    ):
+                        conn.rollback()
+                        return "Assignment not found", 404
+                    authoritative_date = date.fromisoformat(
+                        authoritative["shift_date"]
+                    )
+                    if not week_start <= authoritative_date <= week_start + timedelta(days=6):
+                        conn.rollback()
+                        return "Assignment is outside the selected week.", 400
+                    if not _schedule_shift_is_editable(
+                        authoritative_date, authoritative["status"]
+                    ):
+                        conn.rollback()
+                        return "Schedule is not editable.", 403
                     previous_publication_state = _schedule_week_publication_state(
-                        conn, week_start, client_id
+                        conn, week_start, authoritative["client_id"]
                     )
                     conn.execute("""
                         UPDATE schedule_staff
@@ -2836,21 +2904,21 @@ def schedule_staff_assignment_edit(client_id, monday, schedule_staff_id):
                         schedule_staff_id,
                     ))
                     hours_changed = (
-                        values["planned_start_time"] != existing["planned_start_time"]
-                        or values["planned_end_time"] != existing["planned_end_time"]
+                        values["planned_start_time"] != authoritative["planned_start_time"]
+                        or values["planned_end_time"] != authoritative["planned_end_time"]
                     )
                     if hours_changed:
                         log_activity(
                             conn, "SCHEDULE", "schedule_staff_hours_updated",
-                            f"Planned hours updated for {existing['full_name']}",
+                            f"Planned hours updated for {authoritative['full_name']}",
                             user_id=user["user_id"], client_id=client_id,
                             related_table="schedule_staff", related_id=schedule_staff_id,
                             details=_schedule_staff_hours_details(
-                                existing["user_id"], existing["full_name"],
-                                existing["planned_start_time"], existing["planned_end_time"],
+                                authoritative["user_id"], authoritative["full_name"],
+                                authoritative["planned_start_time"], authoritative["planned_end_time"],
                                 values["planned_start_time"], values["planned_end_time"],
-                                existing["schedule_shift_id"], existing["shift_date"],
-                                existing["shift_type"],
+                                authoritative["schedule_shift_id"], authoritative["shift_date"],
+                                authoritative["shift_type"],
                             ), storyline_visible=False,
                         )
                         _schedule_week_return_to_draft(
@@ -2931,6 +2999,37 @@ def schedule_staff_assignment_remove(client_id, monday, schedule_staff_id):
 
         try:
             conn.execute("BEGIN IMMEDIATE")
+            authoritative = conn.execute("""
+                SELECT st.schedule_staff_id, st.user_id, u.full_name,
+                       ss.schedule_shift_id, ss.client_id, ss.shift_date,
+                       ss.shift_type, ss.status, c.active AS client_active
+                FROM schedule_staff AS st
+                JOIN schedule_shifts AS ss
+                  ON ss.schedule_shift_id = st.schedule_shift_id
+                JOIN users AS u ON u.user_id = st.user_id
+                JOIN clients AS c ON c.client_id = ss.client_id
+                WHERE st.schedule_staff_id = ?
+            """, (schedule_staff_id,)).fetchone()
+            if authoritative is None:
+                conn.rollback()
+                return "Assignment not found", 404
+            if (
+                authoritative["client_id"] != client_id
+                or not authoritative["client_active"]
+            ):
+                conn.rollback()
+                return "Assignment not found", 404
+            authoritative_date = date.fromisoformat(
+                authoritative["shift_date"]
+            )
+            if not week_start <= authoritative_date <= week_start + timedelta(days=6):
+                conn.rollback()
+                return "Assignment is outside the selected week.", 400
+            if not _schedule_shift_is_editable(
+                authoritative_date, authoritative["status"]
+            ):
+                conn.rollback()
+                return "Schedule is not editable.", 403
             previous_publication_state = _schedule_week_publication_state(
                 conn, week_start, client_id
             )
@@ -2943,10 +3042,10 @@ def schedule_staff_assignment_remove(client_id, monday, schedule_staff_id):
                 return "Assignment not found", 404
             log_activity(
                 conn, "SCHEDULE", "schedule_staff_removed",
-                f"Staff removed from schedule shift {existing['schedule_shift_id']}",
+                f"Staff removed from schedule shift {authoritative['schedule_shift_id']}",
                 user_id=user["user_id"], client_id=client_id,
                 related_table="schedule_staff", related_id=schedule_staff_id,
-                details=f"Worker user ID: {existing['user_id']}",
+                details=f"Worker user ID: {authoritative['user_id']}",
                 storyline_visible=False,
             )
             _schedule_week_return_to_draft(
@@ -3153,6 +3252,16 @@ def schedule_week_publish(client_id, monday):
         )
         try:
             conn.execute("BEGIN IMMEDIATE")
+            current_monday = get_schedule_operational_week_start(
+                datetime.now(VANCOUVER_TIMEZONE)
+            )
+            if week_start < current_monday:
+                conn.rollback()
+                flash("A past schedule week cannot be published.")
+                return redirect(url_for(
+                    "schedule_week", client_id=client_id,
+                    monday=week_start.isoformat(),
+                ))
             client = conn.execute("""
                 SELECT client_id, client_name FROM clients
                 WHERE client_id = ? AND active = 1
@@ -3451,6 +3560,16 @@ def schedule_copy_previous_week(client_id, monday):
         )
         try:
             conn.execute("BEGIN IMMEDIATE")
+            current_monday = get_schedule_operational_week_start(
+                datetime.now(VANCOUVER_TIMEZONE)
+            )
+            if destination_monday < current_monday:
+                conn.rollback()
+                flash("A past schedule week cannot be populated.")
+                return redirect(url_for(
+                    "schedule_week", client_id=client_id,
+                    monday=destination_monday.isoformat()
+                ))
             revalidated_client = conn.execute("""
                 SELECT client_id FROM clients
                 WHERE client_id = ? AND active = 1
