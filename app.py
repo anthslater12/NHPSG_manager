@@ -3503,7 +3503,7 @@ def schedule_copy_previous_week(client_id, monday):
                 """, (
                     client_id, destination_date.isoformat(), source["shift_type"],
                     source["planned_start_time"], source["planned_end_time"],
-                    source["status"], source["notes"], user["user_id"],
+                    "Draft", source["notes"], user["user_id"],
                     now_utc, user["user_id"], now_utc,
                 ))
                 destination_shift_id = cursor.lastrowid
