@@ -3000,6 +3000,133 @@ def schedule_staff_order_move_down(client_id, user_id):
     return _schedule_staff_order_move(client_id, user_id, 1)
 
 
+@app.route(
+    "/schedule/client/<int:client_id>/week/<monday>/publish",
+    methods=["POST"],
+)
+def schedule_week_publish(client_id, monday):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    conn = get_db()
+    try:
+        try:
+            user = _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+        try:
+            week_start = _parse_schedule_monday(monday)
+        except ValueError as error:
+            flash(str(error))
+            return redirect(url_for("schedule_index"))
+
+        client = conn.execute("""
+            SELECT client_id, client_name FROM clients
+            WHERE client_id = ? AND active = 1
+        """, (client_id,)).fetchone()
+        if client is None:
+            flash("The selected client is not active.")
+            return redirect(url_for("schedule_index"))
+
+        current_monday = get_schedule_operational_week_start(
+            datetime.now(VANCOUVER_TIMEZONE)
+        )
+        if week_start < current_monday:
+            flash("A past schedule week cannot be published.")
+            return redirect(url_for(
+                "schedule_week", client_id=client_id,
+                monday=week_start.isoformat(),
+            ))
+
+        end_date = week_start + timedelta(days=6)
+        now_utc = serialize_behaviour_utc(
+            datetime.now(timezone.utc).replace(microsecond=0)
+        )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            client = conn.execute("""
+                SELECT client_id, client_name FROM clients
+                WHERE client_id = ? AND active = 1
+            """, (client_id,)).fetchone()
+            if client is None:
+                conn.rollback()
+                flash("The selected client is no longer active.")
+                return redirect(url_for("schedule_index"))
+
+            publication_state = _schedule_week_publication_state(
+                conn, week_start, client_id
+            )
+            if publication_state["state"] != "Draft":
+                messages = {
+                    "Empty": "This week has no schedule rows to publish.",
+                    "Published": "This schedule week is already published.",
+                    "Mixed": (
+                        "This schedule week has mixed statuses and cannot be published."
+                    ),
+                }
+                conn.rollback()
+                flash(messages.get(
+                    publication_state["state"],
+                    "This schedule week cannot be published.",
+                ))
+                return redirect(url_for(
+                    "schedule_week", client_id=client_id,
+                    monday=week_start.isoformat(),
+                ))
+
+            first_row = conn.execute("""
+                SELECT schedule_shift_id
+                FROM schedule_shifts
+                WHERE client_id = ? AND shift_date BETWEEN ? AND ?
+                  AND status = 'Draft'
+                ORDER BY shift_date, schedule_shift_id
+                LIMIT 1
+            """, (
+                client_id, week_start.isoformat(), end_date.isoformat(),
+            )).fetchone()
+            updated = conn.execute("""
+                UPDATE schedule_shifts
+                SET status = 'Published', updated_by = ?, updated_at_utc = ?
+                WHERE client_id = ? AND shift_date BETWEEN ? AND ?
+                  AND status = 'Draft'
+            """, (
+                user["user_id"], now_utc, client_id,
+                week_start.isoformat(), end_date.isoformat(),
+            ))
+            if first_row is None or updated.rowcount < 1:
+                raise RuntimeError("No Draft schedule rows were published.")
+
+            log_activity(
+                conn, "SCHEDULE", "schedule_week_published",
+                f"Schedule week published for {client['client_name']}",
+                user_id=user["user_id"], client_id=client_id,
+                related_table="schedule_shifts",
+                related_id=first_row["schedule_shift_id"],
+                details=(
+                    f"Client ID: {client_id}\n"
+                    f"Week start: {week_start.isoformat()}\n"
+                    f"Week end: {end_date.isoformat()}\n"
+                    f"Shifts published: {updated.rowcount}\n"
+                    "Previous state: Draft\n"
+                    "Resulting state: Published"
+                ),
+                storyline_visible=False,
+            )
+            conn.commit()
+            flash(
+                f"Published {updated.rowcount} schedule shift(s) for "
+                f"{client['client_name']}."
+            )
+            return redirect(url_for(
+                "schedule_week", client_id=client_id,
+                monday=week_start.isoformat(),
+            ))
+        except Exception:
+            conn.rollback()
+            return "Schedule could not be published.", 500
+    finally:
+        conn.close()
+
+
 @app.route("/schedule/client/<int:client_id>/week/<monday>")
 def schedule_week(client_id, monday):
     if "user_id" not in session:
