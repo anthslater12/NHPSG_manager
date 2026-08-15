@@ -166,8 +166,9 @@ class ScheduleCopyWeekTests(unittest.TestCase):
                 destination_row["shift_date"],
                 (datetime.fromisoformat(source_row["shift_date"]) + timedelta(days=7)).date().isoformat()
             )
-            for field in ("shift_type", "planned_start_time", "planned_end_time", "status", "notes"):
+            for field in ("shift_type", "planned_start_time", "planned_end_time", "notes"):
                 self.assertEqual(destination_row[field], source_row[field])
+            self.assertEqual(destination_row["status"], "Draft")
             self.assertEqual(destination_row["created_by"], 1)
             self.assertEqual(destination_row["updated_by"], 1)
             self.assertNotEqual(destination_row["created_at_utc"], source_row["created_at_utc"])
@@ -199,8 +200,54 @@ class ScheduleCopyWeekTests(unittest.TestCase):
         self.assertIn("Destination week", event["details"])
         self.assertIn("Shifts copied: 2", event["details"])
         self.assertIn("Staff assignments copied: 3", event["details"])
+        self.assertEqual(
+            [row["activity_type"] for row in self.rows("SELECT * FROM activity_log")],
+            ["schedule_week_copied"],
+        )
+        self.assertEqual(
+            [row["status"] for row in source], ["Published", "Closed"]
+        )
         self.assertEqual(self.rows("SELECT * FROM shifts"), [])
         self.assertEqual(self.rows("SELECT * FROM shift_staff"), [])
+
+    def test_draft_source_copies_every_destination_row_as_draft(self):
+        with sqlite3.connect(app.DB_NAME) as conn:
+            conn.execute(
+                "UPDATE schedule_shifts SET status = 'Draft' WHERE client_id = 10"
+            )
+            conn.commit()
+
+        self.assertEqual(self.post_copy().status_code, 302)
+        destination = self.rows(
+            "SELECT status FROM schedule_shifts WHERE client_id = 10 "
+            "AND shift_date BETWEEN ? AND ? ORDER BY schedule_shift_id",
+            (
+                self.current_monday.isoformat(),
+                (self.current_monday + timedelta(days=6)).isoformat(),
+            ),
+        )
+        self.assertEqual([row["status"] for row in destination], ["Draft", "Draft"])
+
+        management = self.client.get(
+            f"/schedule/client/10/week/{self.current_monday}"
+        )
+        self.assertIn(b"Schedule status: <strong>Draft</strong>", management.data)
+        self.assertIn(b"Publish Schedule", management.data)
+
+        self.login(4, "Support Worker")
+        worker = self.client.get(
+            f"/schedule/client/10/week/{self.current_monday}"
+        )
+        self.assertIn(
+            b"The schedule for this week has not yet been published.",
+            worker.data,
+        )
+        self.assertNotIn(b"Monday notes", worker.data)
+        self.assertNotIn(b"Day handover", worker.data)
+        self.assertEqual(
+            [row["activity_type"] for row in self.rows("SELECT * FROM activity_log")],
+            ["schedule_week_copied"],
+        )
 
     def test_other_client_rows_do_not_copy_or_block_destination(self):
         self.assertEqual(self.post_copy().status_code, 302)

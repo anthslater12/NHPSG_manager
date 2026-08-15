@@ -7,6 +7,19 @@
     <p>Week of {{ monday.isoformat() }} to {{ week_end.isoformat() }}</p>
 
     {% if can_manage %}
+    <p class="schedule-publication-state">
+        Schedule status: <strong>{{ publication_state.state }}</strong>
+    </p>
+    {% if publication_state.state == "Draft" and monday >= current_monday %}
+    <form method="post" action="{{ url_for('schedule_week_publish', client_id=client_id, monday=monday.isoformat()) }}"
+          data-confirm="Publish this schedule for {{ client.client_name }} for {{ monday.isoformat() }} to {{ week_end.isoformat() }}?&#10;&#10;Support Workers will be able to view this schedule after it is published."
+          onsubmit="return confirm(this.dataset.confirm)">
+        <button type="submit">Publish Schedule</button>
+    </form>
+    {% endif %}
+    {% endif %}
+
+    {% if can_manage %}
     <nav class="schedule-view-selector" aria-label="Planning view">
         <span class="schedule-view-selector-label">Planning View:</span>
         {% if staff_view %}
@@ -46,7 +59,11 @@
         <button class="schedule-week-picker-submit" type="submit">View week</button>
     </form>
 
-    {% if staff_view %}
+    {% if not schedule_visible %}
+    <p class="schedule-not-published">
+        The schedule for this week has not yet been published.
+    </p>
+    {% elif staff_view %}
     {% include "schedule_staff_view.html" %}
     {% else %}
     <div class="schedule-week-grid">
