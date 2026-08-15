@@ -414,6 +414,74 @@ def _parse_schedule_monday(value):
     return monday
 
 
+def _schedule_week_rows(conn, week_start, client_id):
+    """Return the parent schedule rows for one client and Monday-based week.
+
+    This is intentionally a status-neutral query.  Phase 1 centralizes the
+    weekly publication calculation without changing what any existing route
+    currently displays.
+    """
+    end_date = week_start + timedelta(days=6)
+    return conn.execute("""
+        SELECT schedule_shift_id, client_id, shift_date, shift_type, status
+        FROM schedule_shifts
+        WHERE client_id = ?
+          AND shift_date BETWEEN ? AND ?
+        ORDER BY shift_date, schedule_shift_id
+    """, (
+        client_id, week_start.isoformat(), end_date.isoformat(),
+    )).fetchall()
+
+
+def _schedule_week_publication_state(conn, week_start, client_id):
+    """Describe the publication state of one client/week.
+
+    Publication is a week-level concept, while the existing status column is
+    stored on each schedule shift.  A week is considered fully published only
+    when it contains at least one row and every row is Published.  This helper
+    does not enforce that policy or alter existing route behavior yet.
+    """
+    rows = _schedule_week_rows(conn, week_start, client_id)
+    status_counts = {
+        status: sum(1 for row in rows if row["status"] == status)
+        for status in ("Draft", "Published", "Closed", "Cancelled")
+    }
+    statuses = {row["status"] for row in rows}
+
+    if not rows:
+        state = "Empty"
+    elif statuses == {"Published"}:
+        state = "Published"
+    elif statuses == {"Draft"}:
+        state = "Draft"
+    elif statuses <= {"Published", "Draft"}:
+        state = "Mixed" if "Published" in statuses else "Draft"
+    else:
+        state = "Mixed"
+
+    return {
+        "state": state,
+        "row_count": len(rows),
+        "status_counts": status_counts,
+        "is_empty": not rows,
+        "is_fully_published": bool(rows) and statuses == {"Published"},
+        "has_draft_rows": "Draft" in statuses,
+        "has_published_rows": "Published" in statuses,
+        "has_closed_rows": "Closed" in statuses,
+        "has_cancelled_rows": "Cancelled" in statuses,
+    }
+
+
+def _schedule_week_visible_to_support(publication_state):
+    """Return whether a weekly state is safe for Support Worker visibility.
+
+    The result is not wired into routes in Phase 1.  Keeping this decision in
+    one helper prevents future views and exports from implementing different
+    interpretations of weekly publication state.
+    """
+    return bool(publication_state.get("is_fully_published"))
+
+
 def _format_schedule_time(value):
     parsed = datetime.strptime(value, "%H:%M")
     return parsed.strftime("%I:%M %p").lstrip("0")
@@ -2953,7 +3021,17 @@ def schedule_week(client_id, monday):
         current_monday = get_schedule_operational_week_start(
             datetime.now(VANCOUVER_TIMEZONE)
         )
-        days = _schedule_week_context(conn, week_start, client_id)
+        publication_state = _schedule_week_publication_state(
+            conn, week_start, client_id
+        )
+        schedule_visible = (
+            can_manage
+            or _schedule_week_visible_to_support(publication_state)
+        )
+        days = (
+            _schedule_week_context(conn, week_start, client_id)
+            if schedule_visible else None
+        )
         staff_view_context = (
             _schedule_staff_view_context(conn, week_start, client_id)
             if staff_view else None
@@ -2963,7 +3041,7 @@ def schedule_week(client_id, monday):
             if can_manage else []
         )
         today = datetime.now(VANCOUVER_TIMEZONE).date()
-        for day in days:
+        for day in days or []:
             for shift in day["shifts"]:
                 for entry in shift["entries"]:
                     entry["editable"] = (
@@ -2987,6 +3065,8 @@ def schedule_week(client_id, monday):
             staff_summary=staff_summary,
             staff_view=staff_view,
             staff_view_context=staff_view_context,
+            publication_state=publication_state,
+            schedule_visible=schedule_visible,
         )
     except PermissionError:
         return "Access denied", 403

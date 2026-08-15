@@ -167,6 +167,7 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.assertNotIn(b"Export Weekly Schedule PDF", page.data)
         self.assertNotIn(b"Export Staff Matrix PDF", page.data)
         self.assertEqual(self.client.get(self.pdf_url()).status_code, 403)
+        self.assertEqual(self.client.get(self.matrix_pdf_url()).status_code, 403)
         self.login(5, "Program Manager")
         self.assertEqual(self.client.get(self.pdf_url()).status_code, 403)
         with self.client.session_transaction() as session:

@@ -178,6 +178,25 @@ class ScheduleStaffViewTests(unittest.TestCase):
         response = self.page(query="?view=staff")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"id=\"schedule-staff-view-heading\"", response.data)
+
+    def test_management_can_see_draft_week_content(self):
+        shift_id = self.add_shift()
+        self.add_assignment(shift_id, 2, "08:00", "16:00")
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "UPDATE schedule_shifts SET status = 'Draft', notes = 'Draft planning note' "
+            "WHERE schedule_shift_id = ?",
+            (shift_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.page(1)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Anne Worker", response.data)
+        self.assertIn(b"8:00AM", response.data)
+        self.assertIn(b"Draft planning note", response.data)
         self.assertIn(b"Weekly Staff Summary", response.data)
 
     def test_all_management_roles_can_use_staff_view(self):
@@ -189,8 +208,60 @@ class ScheduleStaffViewTests(unittest.TestCase):
     def test_support_worker_cannot_select_staff_view(self):
         response = self.page(8, "?view=staff")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"schedule-day-card", response.data)
+        self.assertIn(
+            b"The schedule for this week has not yet been published.",
+            response.data,
+        )
+        self.assertNotIn(b"schedule-day-card", response.data)
         self.assertNotIn(b"schedule-staff-view-heading", response.data)
+
+    def test_support_worker_cannot_see_unpublished_or_mixed_week(self):
+        shift_id = self.add_shift()
+        self.add_assignment(shift_id, 2, "08:00", "16:00")
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "UPDATE schedule_shifts SET status = 'Draft', notes = 'Confidential draft note' "
+            "WHERE status = 'Published'"
+        )
+        conn.commit()
+        response = self.page(8)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"The schedule for this week has not yet been published.", response.data)
+        self.assertNotIn(b"Anne Worker", response.data)
+        self.assertNotIn(b"08:00", response.data)
+        self.assertNotIn(b"16:00", response.data)
+        self.assertNotIn(b"Confidential draft note", response.data)
+        staff_response = self.page(8, "?view=staff")
+        self.assertEqual(staff_response.status_code, 200)
+        self.assertIn(
+            b"The schedule for this week has not yet been published.",
+            staff_response.data,
+        )
+        self.assertNotIn(b"schedule-staff-view-heading", staff_response.data)
+        self.assertNotIn(b"Anne Worker", staff_response.data)
+
+        conn.execute(
+            "UPDATE schedule_shifts SET status = 'Published' WHERE schedule_shift_id = ?",
+            (shift_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO schedule_shifts
+                (client_id, shift_date, shift_type, planned_start_time,
+                 planned_end_time, status, notes, created_by, created_at_utc,
+                 updated_by, updated_at_utc)
+            VALUES (10, '2026-08-04', 'Day', '08:00', '16:00', 'Draft', NULL,
+                    1, '2026-08-01T15:00:00Z', 1, '2026-08-01T15:00:00Z')
+            """
+        )
+        conn.commit()
+        conn.close()
+        response = self.page(8)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"The schedule for this week has not yet been published.", response.data)
+        self.assertNotIn(b"Anne Worker", response.data)
+        self.assertNotIn(b"08:00", response.data)
+        self.assertNotIn(b"16:00", response.data)
         self.assertNotIn(b"Planning View:", response.data)
         self.assertNotIn(b"Weekly Staff Summary", response.data)
 
