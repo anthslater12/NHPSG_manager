@@ -1528,14 +1528,22 @@ def _storyline_time(local_datetime):
         return "Time unavailable"
 
 
+def format_toileting_location(location, location_other=None):
+    location = str(location or "").strip()
+    location_other = str(location_other or "").strip()
+    if location == "Other" and location_other:
+        return f"Other — {location_other}"
+    return location
+
+
 def format_toileting_storyline_details(
     location, bm_size, bm_consistency,
     behaviour_before, behaviour_during, behaviour_after, behaviour_comments,
-    general_comments=None
+    general_comments=None, location_other=None
 ):
     lines = []
     for label, value in (
-        ("Location", location),
+        ("Location", format_toileting_location(location, location_other)),
         ("Size", bm_size),
         ("Consistency", bm_consistency),
     ):
@@ -17428,6 +17436,7 @@ def toileting_event_new(shift_id):
             ""
         ).strip()
         location = request.form.get("location", "").strip()
+        location_other = request.form.get("location_other", "").strip()
 
         bm_size = request.form.get("bm_size", "").strip()
         bm_consistency = request.form.get(
@@ -17550,6 +17559,12 @@ def toileting_event_new(shift_id):
         elif location not in valid_locations:
             error = "Please select a valid location."
 
+        elif location == "Other" and not location_other:
+            error = "Enter a custom location when Other is selected."
+
+        elif location == "Other" and len(location_other) > 200:
+            error = "Custom location must be 200 characters or fewer."
+
         elif (
             event_type in ["BM", "Both"]
             and bm_size not in valid_bm_sizes
@@ -17612,6 +17627,7 @@ def toileting_event_new(shift_id):
                 event_type=event_type,
                 event_datetime=event_datetime,
                 location=location,
+                location_other=location_other,
                 bm_size=bm_size,
                 bm_consistency=bm_consistency,
                 bm_unusual=bm_unusual,
@@ -17651,6 +17667,9 @@ def toileting_event_new(shift_id):
         if urine_unusual != "Yes":
             urine_unusual_details = None
 
+        if location != "Other":
+            location_other = None
+
         try:
             shift, documentation_context_alternatives = (
                 get_worker_documentation_module_context(
@@ -17672,6 +17691,7 @@ def toileting_event_new(shift_id):
                 event_type,
                 event_datetime,
                 location,
+                location_other,
                 bm_size,
                 bm_consistency,
                 bm_unusual_details,
@@ -17683,7 +17703,7 @@ def toileting_event_new(shift_id):
                 behaviour_comments,
                 general_comments
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 shift_id,
                 shift["client_id"],
@@ -17691,6 +17711,7 @@ def toileting_event_new(shift_id):
                 event_type,
                 event_datetime,
                 location,
+                location_other,
                 bm_size,
                 bm_consistency,
                 bm_unusual_details,
@@ -17708,7 +17729,8 @@ def toileting_event_new(shift_id):
             toileting_details = format_toileting_storyline_details(
                 location, bm_size, bm_consistency,
                 behaviour_before, behaviour_during, behaviour_after,
-                behaviour_comments, general_comments
+                behaviour_comments, general_comments,
+                location_other=location_other
             )
 
             log_activity(
@@ -20624,6 +20646,7 @@ def toileting_review_list():
             te.event_type,
             te.event_datetime,
             te.location,
+            te.location_other,
             te.bm_size,
             te.bm_consistency,
             te.bm_unusual_details,
@@ -20692,6 +20715,9 @@ def toileting_review_list():
 
     entries = [dict(entry) for entry in entries]
     for entry in entries:
+        entry["location_display"] = format_toileting_location(
+            entry["location"], entry["location_other"]
+        )
         entry["event_local_display"] = format_toileting_local_datetime_display(
             entry["event_datetime"]
         )
@@ -21310,6 +21336,9 @@ def toileting_review_detail(entry_id):
         return "Toileting event not found", 404
 
     entry = dict(entry)
+    entry["location_display"] = format_toileting_location(
+        entry["location"], entry["location_other"]
+    )
     entry["event_local_display"] = format_toileting_local_datetime_display(
         entry["event_datetime"]
     )
@@ -21503,6 +21532,7 @@ def toileting_action_new(entry_id):
             te.event_type,
             te.event_datetime,
             te.location,
+            te.location_other,
             te.general_comments,
 
             s.shift_date,
@@ -21521,6 +21551,9 @@ def toileting_action_new(entry_id):
         return "Toileting event not found", 404
 
     entry = dict(entry)
+    entry["location_display"] = format_toileting_location(
+        entry["location"], entry["location_other"]
+    )
     entry["event_local_display"] = format_toileting_local_datetime_display(
         entry["event_datetime"]
     )
@@ -21613,7 +21646,7 @@ def toileting_action_new(entry_id):
         f"Event date and time: {entry['event_local_display']}\n"
         f"Shift: {entry['shift_date']} "
         f"{entry['shift_type']}\n"
-        f"Location: {entry['location']}"
+        f"Location: {entry['location_display']}"
     )
 
     if entry["general_comments"]:
