@@ -54,7 +54,7 @@
 
         <tr>
             <th>Location</th>
-            <td>{{ entry.location }}</td>
+            <td>{{ entry.location_display|default(entry.location) }}</td>
         </tr>
 
     </table>

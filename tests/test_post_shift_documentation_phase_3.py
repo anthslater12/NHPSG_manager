@@ -99,6 +99,7 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
                 event_type TEXT NOT NULL,
                 event_datetime TEXT NOT NULL,
                 location TEXT NOT NULL,
+                location_other TEXT,
                 bm_size TEXT,
                 bm_consistency TEXT,
                 bm_unusual_details TEXT,
@@ -159,6 +160,74 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
 
     def now(self):
         return mock.patch.object(app, "get_application_now_utc", return_value=self.NOW)
+
+    def toileting_data(self, location, location_other=None):
+        return {
+            "event_type": "BM",
+            "event_datetime": "2026-08-06T10:00",
+            "location": location,
+            "location_other": location_other or "",
+            "bm_size": "Medium",
+            "bm_consistency": "Firm",
+            "bm_unusual": "No",
+        }
+
+    def test_toileting_predefined_location_clears_stale_custom_value(self):
+        self.login(shift_id=10)
+        with self.now():
+            response = self.client.post(
+                "/shift/10/toileting-event/new",
+                data=self.toileting_data("Bathroom", "Should be ignored"),
+            )
+        self.assertEqual(response.status_code, 302)
+        row = self.db().execute(
+            "SELECT location, location_other FROM toileting_events"
+        ).fetchone()
+        self.assertEqual(tuple(row), ("Bathroom", None))
+
+    def test_toileting_other_requires_and_saves_custom_location(self):
+        self.login(shift_id=10)
+        with self.now():
+            missing = self.client.post(
+                "/shift/10/toileting-event/new",
+                data=self.toileting_data("Other", "   "),
+            )
+        self.assertEqual(missing.status_code, 200)
+        self.assertIn(b"Enter a custom location", missing.data)
+        self.assertIn(b'name="location_other"', missing.data)
+
+        with self.now():
+            saved = self.client.post(
+                "/shift/10/toileting-event/new",
+                data=self.toileting_data("Other", "Community Centre"),
+            )
+        self.assertEqual(saved.status_code, 302)
+        row = self.db().execute(
+            "SELECT location, location_other FROM toileting_events"
+        ).fetchone()
+        self.assertEqual(tuple(row), ("Other", "Community Centre"))
+
+    def test_toileting_other_rejects_overlong_custom_location(self):
+        self.login(shift_id=10)
+        with self.now():
+            response = self.client.post(
+                "/shift/10/toileting-event/new",
+                data=self.toileting_data("Other", "x" * 201),
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"200 characters or fewer", response.data)
+
+    def test_toileting_location_formatter_handles_custom_and_legacy_values(self):
+        self.assertEqual(
+            app.format_toileting_location("Bathroom", None), "Bathroom"
+        )
+        self.assertEqual(
+            app.format_toileting_location("Other", "Community Centre"),
+            "Other — Community Centre",
+        )
+        self.assertEqual(
+            app.format_toileting_location("Other", None), "Other"
+        )
 
     def test_all_integrated_get_pages_show_selected_previous_context(self):
         self.login()

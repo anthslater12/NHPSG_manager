@@ -73,6 +73,17 @@
                     </option>
                 </select>
 
+                <div id="location_other_field" style="display:none;">
+                    <label for="location_other">Enter location</label>
+                    <input
+                        type="text"
+                        id="location_other"
+                        name="location_other"
+                        maxlength="200"
+                        value="{{ location_other|default("") }}"
+                    >
+                </div>
+
             </div>
 
             <div class="form-field">
@@ -500,6 +511,18 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    const location = document.getElementById('location');
+    const locationOtherField = document.getElementById('location_other_field');
+    const locationOther = document.getElementById('location_other');
+    function updateLocationOther() {
+        const isOther = location.value === 'Other';
+        locationOtherField.style.display = isOther ? 'block' : 'none';
+        locationOther.required = isOther;
+        if (!isOther) locationOther.value = '';
+    }
+    location.addEventListener('change', updateLocationOther);
+    updateLocationOther();
+
 
     const eventType = document.getElementById('event_type');
     const bmSection = document.getElementById('bm_details_section');
