@@ -16,12 +16,18 @@
     </p>
 </div>
 
+<div
+    id="client-storyline"
+    data-storyline-client-id="{{ client.client_id }}"
+    data-storyline-filter="{{ selected_filter }}"
+    data-storyline-page="{{ page }}"
+>
 {% if grouped_events %}
     {% for group in grouped_events %}
         <div class="card">
             <h3>{{ group.heading }}</h3>
             {% for event in group.events %}
-                <div class="storyline-event" style="padding: 0.25rem 0 {% if event.activity_type == 'shift_activity_created' %}0{% else %}0.15rem{% endif %};">
+                <div id="storyline-event-{{ event.activity_id }}" class="storyline-event" style="padding: 0.25rem 0 {% if event.activity_type == 'shift_activity_created' %}0{% else %}0.15rem{% endif %};">
                     <div><span class="status-active">{{ event.label }}</span></div>
                     <strong>{{ event.summary }}</strong>
                     <div>{{ event.event_time }}{% if event.full_name %} · {{ event.full_name }}{% endif %}</div>
@@ -30,6 +36,22 @@
                         {% elif event.activity_type == 'shift_activity_created' %}<div class="storyline-details storyline-activity-details" style="margin-top: 4px; margin-bottom: 0; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}</div>
                         {% else %}<div class="storyline-details" style="margin-top: 0.25rem; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}
                         </div>{% endif %}
+                    {% endif %}
+                    {% if event.storyline_toileting_detail_url %}
+                        <div class="storyline-management-controls">
+                            <a
+                                href="{{ event.storyline_toileting_detail_url }}"
+                                class="storyline-toileting-detail-link"
+                                data-storyline-activity-id="{{ event.activity_id }}"
+                            >View details</a>
+                            <span>
+                                {% if event.storyline_toileting_reviewed %}
+                                    You have reviewed this
+                                {% else %}
+                                    Review required
+                                {% endif %}
+                            </span>
+                        </div>
                     {% endif %}
                 </div>
                 <hr class="storyline-divider{% if event.activity_type == 'shift_activity_created' %} storyline-activity-divider{% endif %}" style="border: 0; border-top: 1px solid #d9d9d9; margin: {% if event.activity_type == 'shift_activity_created' %}0.15rem{% else %}0.35rem{% endif %} 0 0.35rem;">
@@ -41,6 +63,75 @@
 {% else %}
     <div class="card"><p>No {{ selected_filter }} events match this filter.</p></div>
 {% endif %}
+
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const storyline = document.getElementById('client-storyline');
+    const positionKey = 'client-storyline-toileting-position';
+    if (!storyline) {
+        return;
+    }
+
+    const currentContext = {
+        clientId: storyline.dataset.storylineClientId,
+        filter: storyline.dataset.storylineFilter,
+        page: storyline.dataset.storylinePage
+    };
+
+    document.querySelectorAll('.storyline-toileting-detail-link').forEach(function(link) {
+        link.addEventListener('click', function() {
+            const eventId = link.dataset.storylineActivityId;
+            const event = document.getElementById('storyline-event-' + eventId);
+            if (!event || !eventId) {
+                return;
+            }
+            try {
+                sessionStorage.setItem(positionKey, JSON.stringify({
+                    clientId: currentContext.clientId,
+                    filter: currentContext.filter,
+                    page: currentContext.page,
+                    activityId: eventId,
+                    viewportTop: event.getBoundingClientRect().top
+                }));
+            } catch (error) {
+                // Navigation remains usable when sessionStorage is unavailable.
+            }
+        });
+    });
+
+    let saved;
+    try {
+        saved = JSON.parse(sessionStorage.getItem(positionKey) || 'null');
+    } catch (error) {
+        saved = null;
+    }
+    if (!saved) {
+        return;
+    }
+
+    const contextMatches = saved.clientId === currentContext.clientId
+        && saved.filter === currentContext.filter
+        && saved.page === currentContext.page
+        && typeof saved.activityId === 'string'
+        && Number.isFinite(saved.viewportTop);
+    const event = contextMatches
+        ? document.getElementById('storyline-event-' + saved.activityId)
+        : null;
+    if (!event) {
+        sessionStorage.removeItem(positionKey);
+        return;
+    }
+
+    requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+            window.scrollBy(0, event.getBoundingClientRect().top - saved.viewportTop);
+            sessionStorage.removeItem(positionKey);
+        });
+    });
+});
+</script>
 
 {% if page_count > 1 %}
 <div class="card">

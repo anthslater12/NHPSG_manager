@@ -6,6 +6,19 @@
 
     <h2>Toileting Management Review</h2>
 
+    {% if storyline_return_context %}
+        <p>
+            <a href="{{ url_for(
+                'client_storyline',
+                client_id=storyline_return_context.storyline_client_id,
+                filter=storyline_return_context.storyline_filter,
+                page=storyline_return_context.storyline_page
+            ) }}">
+                Back to Client Storyline
+            </a>
+        </p>
+    {% endif %}
+
     <p>
         <a href="{{ url_for("manager_review_hub") }}">
             ← Back to Management Review
@@ -223,6 +236,11 @@
             ) }}"
             class="inline-form"
         >
+            {% if storyline_return_context %}
+                <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+                <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+                <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+            {% endif %}
             <button type="submit" class="link-button">
                 Mark as Reviewed
             </button>
@@ -251,6 +269,11 @@
             entry_id=entry.toileting_event_id
         ) }}"
     >
+        {% if storyline_return_context %}
+            <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+            <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+            <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+        {% endif %}
 
         <label for="note_text">
             Add Management Note
@@ -305,7 +328,10 @@
     <p>
         <a href="{{ url_for(
             'toileting_action_new',
-            entry_id=entry.toileting_event_id
+            entry_id=entry.toileting_event_id,
+            storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
+            storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
+            storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
         ) }}">
             Create Action
         </a>
