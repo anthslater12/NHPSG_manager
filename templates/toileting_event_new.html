@@ -73,17 +73,6 @@
                     </option>
                 </select>
 
-                <div id="location_other_field" style="display:none;">
-                    <label for="location_other">Enter location</label>
-                    <input
-                        type="text"
-                        id="location_other"
-                        name="location_other"
-                        maxlength="200"
-                        value="{{ location_other|default("") }}"
-                    >
-                </div>
-
             </div>
 
             <div class="form-field">
@@ -154,6 +143,21 @@
                     </option>
                 </select>
 
+            </div>
+
+        </div>
+
+        <div id="location_other_field" class="form-row" style="display:none;">
+
+            <div class="form-field">
+                <label for="location_other">Enter location</label>
+                <input
+                    type="text"
+                    id="location_other"
+                    name="location_other"
+                    maxlength="200"
+                    value="{{ location_other|default("") }}"
+                >
             </div>
 
         </div>
