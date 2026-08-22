@@ -1704,6 +1704,24 @@ def _storyline_access_allowed(conn, client_id, user_id):
     """, (client_id, user_id)).fetchone() is not None
 
 
+def _storyline_return_context(values, client_id):
+    storyline_client_id = values.get("storyline_client_id", type=int)
+    storyline_filter = values.get("storyline_filter", "")
+    storyline_page = values.get("storyline_page", type=int)
+    if (
+        storyline_client_id != client_id
+        or storyline_filter not in STORYLINE_FILTERS
+        or storyline_page is None
+        or storyline_page < 1
+    ):
+        return None
+    return {
+        "storyline_client_id": storyline_client_id,
+        "storyline_filter": storyline_filter,
+        "storyline_page": storyline_page,
+    }
+
+
 def get_food_fluid_shift_window(shift):
     """Return the half-open Vancouver interval for an authoritative shift."""
     try:
@@ -17962,14 +17980,71 @@ def client_storyline(client_id):
         "al.event_datetime" if "event_datetime" in activity_log_columns
         else "NULL AS event_datetime"
     )
+    activity_class_select = (
+        "al.activity_class" if "activity_class" in activity_log_columns
+        else "NULL AS activity_class"
+    )
+    related_table_select = (
+        "al.related_table" if "related_table" in activity_log_columns
+        else "NULL AS related_table"
+    )
+    related_id_select = (
+        "al.related_id" if "related_id" in activity_log_columns
+        else "NULL AS related_id"
+    )
     events = conn.execute(f"""
         SELECT al.activity_id, al.activity_datetime, {event_datetime_select},
-               al.activity_type, al.summary, al.details
+               {activity_class_select}, al.activity_type, al.summary,
+               al.details, {related_table_select}, {related_id_select}
         FROM activity_log al
         WHERE {where_sql}
         ORDER BY al.activity_id DESC
     """, parameters).fetchall()
     prepared_events = []
+    management_storyline = (
+        session.get("role") in STAFF_NOTICE_MANAGEMENT_ROLES
+    )
+    toileting_source_ids = {
+        event["related_id"]
+        for event in events
+        if event["activity_type"] == "toileting_event_created"
+        and event["related_table"] == "toileting_events"
+        and event["related_id"] is not None
+    }
+    valid_toileting_source_ids = set()
+    reviewed_toileting_source_ids = set()
+    toileting_table_exists = conn.execute("""
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'toileting_events'
+    """).fetchone() is not None
+    if management_storyline and toileting_source_ids and toileting_table_exists:
+        placeholders = ", ".join("?" for _ in toileting_source_ids)
+        source_rows = conn.execute(f"""
+            SELECT toileting_event_id
+            FROM toileting_events
+            WHERE client_id = ?
+              AND toileting_event_id IN ({placeholders})
+        """, (client_id, *toileting_source_ids)).fetchall()
+        valid_toileting_source_ids = {
+            row["toileting_event_id"] for row in source_rows
+        }
+        if valid_toileting_source_ids:
+            placeholders = ", ".join(
+                "?" for _ in valid_toileting_source_ids
+            )
+            review_rows = conn.execute(f"""
+                SELECT source_id
+                FROM acknowledgements
+                WHERE source_table = 'toileting_events'
+                  AND source_id IN ({placeholders})
+                  AND user_id = ?
+                  AND acknowledgement_type = 'Review'
+                  AND active = 1
+            """, (*valid_toileting_source_ids, session["user_id"])).fetchall()
+            reviewed_toileting_source_ids = {
+                row["source_id"] for row in review_rows
+            }
     for event in events:
         event = dict(event)
         event["label"] = _storyline_label(event["activity_type"])
@@ -18014,6 +18089,24 @@ def client_storyline(client_id):
             if event["local_datetime"] else ""
         )
         event["event_time"] = _storyline_time(event["local_datetime"])
+        event["storyline_toileting_detail_url"] = None
+        event["storyline_toileting_reviewed"] = False
+        if (
+            management_storyline
+            and event["activity_type"] == "toileting_event_created"
+            and event["related_table"] == "toileting_events"
+            and event["related_id"] in valid_toileting_source_ids
+        ):
+            event["storyline_toileting_detail_url"] = url_for(
+                "toileting_review_detail",
+                entry_id=event["related_id"],
+                storyline_client_id=client_id,
+                storyline_filter=selected_filter,
+                storyline_page=page,
+            )
+            event["storyline_toileting_reviewed"] = (
+                event["related_id"] in reviewed_toileting_source_ids
+            )
         prepared_events.append(event)
 
     prepared_events.sort(
@@ -21336,6 +21429,9 @@ def toileting_review_detail(entry_id):
         return "Toileting event not found", 404
 
     entry = dict(entry)
+    storyline_return_context = _storyline_return_context(
+        request.args, entry["client_id"]
+    )
     entry["location_display"] = format_toileting_location(
         entry["location"], entry["location_other"]
     )
@@ -21440,7 +21536,8 @@ def toileting_review_detail(entry_id):
         current_user_reviewed=current_user_reviewed,
         management_notes=management_notes,
         linked_actions=linked_actions,
-        shift_staff=shift_staff
+        shift_staff=shift_staff,
+        storyline_return_context=storyline_return_context
     )
 
 @app.route(
@@ -21465,11 +21562,16 @@ def add_toileting_management_note(entry_id):
     ).strip()
 
     if not note_text:
+        return_context = _storyline_return_context(
+            request.form,
+            request.form.get("storyline_client_id", type=int)
+        )
         return redirect(
             url_for(
                 "toileting_review_detail",
                 entry_id=entry_id,
-                note_error="Management note text is required."
+                note_error="Management note text is required.",
+                **(return_context or {})
             )
         )
 
@@ -21503,7 +21605,13 @@ def add_toileting_management_note(entry_id):
     return redirect(
         url_for(
             "toileting_review_detail",
-            entry_id=entry_id
+            entry_id=entry_id,
+            **(
+                _storyline_return_context(
+                    request.form,
+                    request.form.get("storyline_client_id", type=int)
+                ) or {}
+            )
         )
     )
 
@@ -22111,7 +22219,7 @@ def review_toileting_entry(entry_id):
     conn = get_db()
 
     entry = conn.execute("""
-        SELECT toileting_event_id
+        SELECT toileting_event_id, client_id
         FROM toileting_events
         WHERE toileting_event_id = ?
     """, (entry_id,)).fetchone()
@@ -22131,6 +22239,15 @@ def review_toileting_entry(entry_id):
     conn.commit()
     conn.close()
 
+    return_context = _storyline_return_context(
+        request.form, entry["client_id"]
+    )
+    if return_context:
+        return redirect(url_for(
+            "toileting_review_detail",
+            entry_id=entry_id,
+            **return_context
+        ))
     return redirect(
         url_for("toileting_review_list")
         + f"#toileting-entry-{entry_id}"

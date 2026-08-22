@@ -28,9 +28,19 @@ class ClientStorylineTests(unittest.TestCase):
                 details TEXT, success INTEGER DEFAULT 1, storyline_visible INTEGER NOT NULL DEFAULT 0,
                 event_datetime TEXT NULL
             );
+            CREATE TABLE acknowledgements (
+                acknowledgement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                acknowledgement_type TEXT DEFAULT 'Read',
+                active INTEGER NOT NULL DEFAULT 1
+            );
             CREATE TABLE toileting_events (
                 toileting_event_id INTEGER PRIMARY KEY, client_id INTEGER,
-                location TEXT, bm_size TEXT, bm_consistency TEXT,
+                shift_id INTEGER, event_type TEXT, event_datetime TEXT,
+                recorded_by_user_id INTEGER, location TEXT, location_other TEXT,
+                bm_size TEXT, bm_consistency TEXT,
                 behaviour_before TEXT, behaviour_during TEXT,
                 behaviour_after TEXT, behaviour_comments TEXT
             );
@@ -51,13 +61,15 @@ class ClientStorylineTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             session.update(user_id=user_id, role=role, full_name="Test User")
 
-    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when="2026-08-02 10:00:00", user_id=1, details=None, event_datetime=None):
+    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when="2026-08-02 10:00:00", user_id=1, details=None, event_datetime=None, related_table=None, related_id=None):
         conn = sqlite3.connect(self.path)
         conn.execute("""
             INSERT INTO activity_log
-            (activity_datetime, activity_type, user_id, client_id, summary, details, success, storyline_visible, event_datetime)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (when, event_type, user_id, client_id, summary, details, success, visible, event_datetime))
+            (activity_datetime, activity_type, user_id, client_id, summary, details,
+             success, storyline_visible, event_datetime, related_table, related_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (when, event_type, user_id, client_id, summary, details, success,
+               visible, event_datetime, related_table, related_id))
         conn.commit()
         conn.close()
 
@@ -84,6 +96,64 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"Client fell asleep", response.data)
         self.assertNotIn(b"Login", response.data)
         self.assertNotIn(b"Other client", response.data)
+
+    def test_management_toileting_storyline_control_and_per_user_status(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO toileting_events
+            (toileting_event_id, client_id, shift_id, event_type,
+             event_datetime, recorded_by_user_id, location)
+            VALUES (7, 1, 10, 'BM', '2026-08-02T10:00', 1, 'Bathroom')
+        """)
+        conn.commit()
+        conn.close()
+        self.add_event(
+            "toileting_event_created", "Toileting record",
+            related_table="toileting_events", related_id=7
+        )
+        self.login(2, "Program Manager")
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"View details", page)
+        self.assertIn(b"Review required", page)
+        self.assertIn(b'id="storyline-event-', page)
+        self.assertIn(b'class="storyline-toileting-detail-link"', page)
+        self.assertIn(b"client-storyline-toileting-position", page)
+        self.assertIn(
+            b"/manager-review/toileting/7?storyline_client_id=1",
+            page
+        )
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO acknowledgements
+            (source_table, source_id, user_id, acknowledgement_type, active)
+            VALUES ('toileting_events', 7, 2, 'Review', 1)
+        """)
+        conn.commit()
+        conn.close()
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"You have reviewed this", page)
+        self.assertNotIn(b"Review required", page)
+
+        self.login(3, "Support Worker")
+        page = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"View details", page)
+        self.assertNotIn(b"You have reviewed this", page)
+
+    def test_malformed_toileting_storyline_metadata_stays_informational(self):
+        self.login(2, "Program Manager")
+        self.add_event(
+            "toileting_event_created", "Missing source",
+            related_table="toileting_events", related_id=None
+        )
+        self.add_event(
+            "toileting_event_created", "Wrong source",
+            related_table="other_table", related_id=7
+        )
+        page = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"View details", page)
+        self.assertIn(b"Missing source", page)
+        self.assertIn(b"Wrong source", page)
 
     def test_worker_cannot_view_unrelated_client(self):
         self.login()
