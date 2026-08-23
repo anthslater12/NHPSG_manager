@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Incident Management Review</h2>
+
+    {% if storyline_return_context %}
+        <p>
+            <a href="{{ url_for(
+                'client_storyline',
+                client_id=storyline_return_context.storyline_client_id,
+                filter=storyline_return_context.storyline_filter,
+                page=storyline_return_context.storyline_page
+            ) }}">
+                Back to Client Storyline
+            </a>
+        </p>
+    {% endif %}
+
+    <p>
+        <a href="{{ url_for('incident_list') }}">
+            &larr; Return to Incident Reports
+        </a>
+    </p>
+
+    <table class="management-detail-table">
+        <tr><th>Date</th><td>{{ incident.incident_date }}</td></tr>
+        <tr><th>Time</th><td>{{ incident.incident_time }}</td></tr>
+        <tr><th>Client</th><td>{{ incident.client_name }}</td></tr>
+        <tr><th>Reported By</th><td>{{ incident.reporter_name }}</td></tr>
+        <tr><th>Location</th><td>{{ incident.location }}</td></tr>
+        <tr><th>Incident Type</th><td>{{ incident.incident_type }}</td></tr>
+        <tr><th>Severity</th><td>{{ incident.severity }}</td></tr>
+        <tr><th>Description</th><td>{{ incident.description }}</td></tr>
+        <tr><th>Actions Taken</th><td>{{ incident.actions_taken }}</td></tr>
+        <tr><th>Follow-up Required</th><td>{{ "Yes" if incident.follow_up_required else "No" }}</td></tr>
+        <tr><th>Witnesses</th><td>{{ incident.witnesses }}</td></tr>
+        <tr><th>Injuries</th><td>{{ "Yes" if incident.injuries else "No" }}</td></tr>
+        <tr><th>Injury Details</th><td>{{ incident.injury_details }}</td></tr>
+        <tr><th>Police Notified</th><td>{{ "Yes" if incident.police_notified else "No" }}</td></tr>
+        <tr><th>Medical Treatment</th><td>{{ "Yes" if incident.medical_treatment else "No" }}</td></tr>
+        <tr><th>Status</th><td>{{ incident.status }}</td></tr>
+        <tr><th>Created</th><td>{{ incident.created_at }}</td></tr>
+    </table>
+
+    <h3>Reviews</h3>
+
+    {% if reviews %}
+        <ul>
+            {% for review in reviews %}
+                <li>
+                    {{ review.reviewed_by }} &mdash; {{ review.acknowledged_at }}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No management reviews recorded.</p>
+    {% endif %}
+
+    {% if current_user_reviewed %}
+        <p>You have reviewed this incident.</p>
+    {% else %}
+        <p>Review required</p>
+        <form method="post" action="{{ url_for(
+            'review_incident_post', incident_id=incident.incident_id
+        ) }}">
+            {% if storyline_return_context %}
+                <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+                <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+                <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+            {% endif %}
+            <button type="submit">Mark as Reviewed</button>
+        </form>
+    {% endif %}
+</div>
+
+{% endblock %}

@@ -1752,6 +1752,9 @@ STORYLINE_REVIEW_SOURCES = {
     "housekeeping_task_completed": (
         "shift_housekeeping_task_entries", "housekeeping_review_detail"
     ),
+    "incident_created": (
+        "incident_reports", "incident_review_detail"
+    ),
 }
 
 
@@ -1791,6 +1794,11 @@ def _storyline_source_ids_for_client(conn, client_id, candidates):
             FROM shift_housekeeping_task_entries hte
             JOIN shifts s ON s.shift_id = hte.shift_id
             WHERE s.client_id = ? AND hte.entry_id IN ({placeholders})
+        """,
+        "incident_reports": """
+            SELECT incident_id AS source_id
+            FROM incident_reports
+            WHERE client_id = ? AND incident_id IN ({placeholders})
         """,
     }
     by_table = {}
@@ -18196,6 +18204,7 @@ def client_storyline(client_id):
             id_parameter = (
                 "activity_id" if detail_endpoint == "activity_review_detail"
                 else "note_id" if detail_endpoint == "shift_note_review_detail"
+                else "incident_id" if detail_endpoint == "incident_review_detail"
                 else "entry_id"
             )
             event["storyline_detail_url"] = url_for(
@@ -20185,6 +20194,7 @@ def incident_list():
             ON ack.user_id = u.user_id
 
         WHERE ack.source_table = 'incident_reports'
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY ack.acknowledged_at
@@ -20194,6 +20204,7 @@ def incident_list():
         SELECT source_id AS incident_id
         FROM acknowledgements
         WHERE source_table = 'incident_reports'
+          AND acknowledgement_type = 'Review'
           AND user_id = ?
           AND active = 1
     """, (session["user_id"],)).fetchall()
@@ -20222,6 +20233,103 @@ def incident_list():
         reviewed_by_current_user=reviewed_by_current_user
     )
 
+@app.route("/manager-review/incidents/<int:incident_id>")
+def incident_review_detail(incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in ["Admin", "Program Manager", "Director"]:
+        return "Access denied", 403
+
+    conn = get_db()
+    incident = conn.execute("""
+        SELECT
+            ir.*,
+            reporter.full_name AS reporter_name,
+            c.client_name
+        FROM incident_reports ir
+        JOIN users reporter ON reporter.user_id = ir.reported_by_user_id
+        JOIN clients c ON c.client_id = ir.client_id
+        WHERE ir.incident_id = ?
+    """, (incident_id,)).fetchone()
+
+    if incident is None:
+        conn.close()
+        return "Incident not found", 404
+
+    reviews = conn.execute("""
+        SELECT ack.acknowledgement_id, ack.acknowledged_at,
+               ack.user_id, u.full_name AS reviewed_by
+        FROM acknowledgements ack
+        JOIN users u ON u.user_id = ack.user_id
+        WHERE ack.source_table = 'incident_reports'
+          AND ack.source_id = ?
+          AND ack.acknowledgement_type = 'Review'
+          AND ack.active = 1
+        ORDER BY ack.acknowledged_at, ack.acknowledgement_id
+    """, (incident_id,)).fetchall()
+    conn.close()
+
+    return render_template(
+        "incident_review_detail.html",
+        incident=incident,
+        reviews=reviews,
+        current_user_reviewed=any(
+            review["user_id"] == session["user_id"]
+            for review in reviews
+        ),
+        storyline_return_context=_storyline_return_context(
+            request.args, incident["client_id"]
+        )
+    )
+
+@app.route(
+    "/manager-review/incidents/<int:incident_id>/review",
+    methods=["POST"]
+)
+def review_incident_post(incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    if session["role"] not in ["Admin", "Program Manager", "Director"]:
+        return "Access denied", 403
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        incident = conn.execute("""
+            SELECT incident_id, client_id
+            FROM incident_reports
+            WHERE incident_id = ?
+        """, (incident_id,)).fetchone()
+        if incident is None:
+            conn.rollback()
+            return "Incident not found", 404
+
+        create_acknowledgement(
+            conn,
+            source_table="incident_reports",
+            source_id=incident_id,
+            user_id=session["user_id"],
+            acknowledgement_type="Review"
+        )
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return_context = _storyline_return_context(
+        request.form, incident["client_id"]
+    )
+    return redirect(url_for(
+        "incident_review_detail",
+        incident_id=incident_id,
+        **(return_context or {})
+    ))
+
 @app.route("/incident/<int:incident_id>/review")
 def review_incident(incident_id):
 
@@ -20231,30 +20339,10 @@ def review_incident(incident_id):
     if session["role"] not in ["Admin", "Program Manager", "Director"]:
         return "Access denied", 403
 
-    conn = get_db()
-
-    incident = conn.execute("""
-        SELECT *
-        FROM incident_reports
-        WHERE incident_id = ?
-    """, (incident_id,)).fetchone()
-
-    if incident is None:
-        conn.close()
-        return "Incident not found", 404
-
-    create_acknowledgement(
-        conn,
-        source_table="incident_reports",
-        source_id=incident_id,
-        user_id=session["user_id"],
-        acknowledgement_type="Review"
-    )
-
-    conn.commit()
-    conn.close()
-
-    return redirect(url_for("incident_list"))
+    return redirect(url_for(
+        "incident_review_detail",
+        incident_id=incident_id
+    ))
 
 #####################################################################
 # MANAGER REVIEW

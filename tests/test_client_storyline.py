@@ -62,6 +62,20 @@ class ClientStorylineTests(unittest.TestCase):
             CREATE TABLE shift_housekeeping_task_entries (
                 entry_id INTEGER PRIMARY KEY, shift_id INTEGER
             );
+            CREATE TABLE incident_reports (
+                incident_id INTEGER PRIMARY KEY, client_id INTEGER NOT NULL,
+                reported_by_user_id INTEGER NOT NULL,
+                incident_date TEXT NOT NULL, incident_time TEXT NOT NULL,
+                location TEXT NOT NULL, incident_type TEXT NOT NULL,
+                severity TEXT DEFAULT 'Normal', description TEXT NOT NULL,
+                actions_taken TEXT, follow_up_required INTEGER NOT NULL DEFAULT 0,
+                witnesses TEXT, injuries INTEGER NOT NULL DEFAULT 0,
+                injury_details TEXT, police_notified INTEGER NOT NULL DEFAULT 0,
+                medical_treatment INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'Awaiting Review',
+                reviewed_by_user_id INTEGER, reviewed_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             INSERT INTO users VALUES (1, 'Worker', 'Support Worker', 1), (2, 'Manager', 'Program Manager', 1), (3, 'Other', 'Support Worker', 1), (4, 'Second Manager', 'Program Manager', 1);
             INSERT INTO clients VALUES (1, 'Client One', 1), (2, 'Client Two', 1);
             INSERT INTO shifts VALUES (10, 1, 'Open'), (20, 2, 'Open');
@@ -88,6 +102,17 @@ class ClientStorylineTests(unittest.TestCase):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (when, event_type, user_id, client_id, summary, details, success,
                visible, event_datetime, related_table, related_id))
+        conn.commit()
+        conn.close()
+
+    def add_incident(self, incident_id, client_id=1):
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO incident_reports
+            (incident_id, client_id, reported_by_user_id, incident_date,
+             incident_time, location, incident_type, description)
+            VALUES (?, ?, 1, '2026-08-02', '10:00', 'Home', 'Medical', 'Details')
+        """, (incident_id, client_id))
         conn.commit()
         conn.close()
 
@@ -325,6 +350,167 @@ class ClientStorylineTests(unittest.TestCase):
                 "storyline_page",
             ):
                 self.assertIn(field_name, source, template_name)
+
+    def test_incident_detail_review_is_post_only_and_preserves_storyline_context(self):
+        self.add_incident(31)
+        self.add_event(
+            "incident_created", "Incident record",
+            related_table="incident_reports", related_id=31
+        )
+        self.login(2, "Program Manager")
+        incident_list = self.client.get("/incidents")
+        self.assertIn(b"/manager-review/incidents/31", incident_list.data)
+        self.assertNotIn(b"/incident/31/review", incident_list.data)
+
+        detail = self.client.get(
+            "/manager-review/incidents/31",
+            query_string={
+                "storyline_client_id": 1,
+                "storyline_filter": "Incident",
+                "storyline_page": 2,
+            }
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Back to Client Storyline", detail.data)
+        self.assertIn(b"Review required", detail.data)
+        self.assertEqual(self._incident_review_count(31), 0)
+
+        old_get = self.client.get("/incident/31/review")
+        self.assertEqual(old_get.status_code, 302)
+        self.assertIn(b"/manager-review/incidents/31", old_get.data)
+        self.assertEqual(self._incident_review_count(31), 0)
+
+        reviewed = self.client.post(
+            "/manager-review/incidents/31/review",
+            data={
+                "storyline_client_id": "1",
+                "storyline_filter": "Incident",
+                "storyline_page": "2",
+            }
+        )
+        self.assertEqual(reviewed.status_code, 302)
+        self.assertIn(b"storyline_client_id=1", reviewed.data)
+        self.assertIn(b"storyline_filter=Incident", reviewed.data)
+        self.assertIn(b"storyline_page=2", reviewed.data)
+        self.assertEqual(self._incident_review_count(31), 1)
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM activity_log "
+                "WHERE activity_type = 'incident_created'"
+            ).fetchone()[0],
+            1
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM activity_log "
+                "WHERE activity_type = 'record_acknowledged' "
+                "AND storyline_visible = 1"
+            ).fetchone()[0],
+            0
+        )
+        conn.close()
+
+        reviewed_detail = self.client.get(reviewed.headers["Location"])
+        self.assertIn(b"Back to Client Storyline", reviewed_detail.data)
+        self.assertIn(b"You have reviewed this incident", reviewed_detail.data)
+        storyline_after_review = self.client.get(
+            "/client/1/storyline?filter=Incident&page=2"
+        )
+        self.assertIn(b"You have reviewed this", storyline_after_review.data)
+        self.assertIn(b"client-storyline-detail-position", storyline_after_review.data)
+
+        self.client.post("/manager-review/incidents/31/review")
+        self.assertEqual(self._incident_review_count(31), 1)
+
+        self.login(4, "Program Manager")
+        other_manager = self.client.get("/manager-review/incidents/31")
+        self.assertIn(b"Review required", other_manager.data)
+        self.assertNotIn(b"You have reviewed this incident", other_manager.data)
+
+        self.login(2, "Program Manager")
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            UPDATE acknowledgements
+            SET active = 0
+            WHERE source_table = 'incident_reports'
+              AND source_id = 31 AND user_id = 2
+        """)
+        conn.commit()
+        conn.close()
+        invalidated = self.client.get("/manager-review/incidents/31")
+        self.assertIn(b"Review required", invalidated.data)
+
+    def test_all_management_roles_can_open_incident_detail(self):
+        self.add_incident(32)
+        for role in ("Admin", "Director", "Program Manager"):
+            self.login(2, role)
+            self.assertEqual(
+                self.client.get("/manager-review/incidents/32").status_code,
+                200
+            )
+
+    def _incident_review_count(self, incident_id):
+        conn = sqlite3.connect(self.path)
+        count = conn.execute("""
+            SELECT COUNT(*) FROM acknowledgements
+            WHERE source_table = 'incident_reports'
+              AND source_id = ?
+              AND acknowledgement_type = 'Review'
+              AND active = 1
+        """, (incident_id,)).fetchone()[0]
+        conn.close()
+        return count
+
+    def test_incident_storyline_controls_validate_source_and_role(self):
+        self.add_incident(41, client_id=1)
+        self.add_incident(42, client_id=2)
+        self.add_event(
+            "incident_created", "Valid incident",
+            related_table="incident_reports", related_id=41
+        )
+        self.add_event(
+            "incident_created", "Wrong table incident",
+            related_table="other_table", related_id=41
+        )
+        self.add_event(
+            "incident_created", "Missing id incident",
+            related_table="incident_reports", related_id=None
+        )
+        self.add_event(
+            "incident_created", "Mismatched client incident",
+            related_table="incident_reports", related_id=42
+        )
+        self.add_event(
+            "incident_created", "Missing source incident",
+            related_table="incident_reports", related_id=999
+        )
+
+        self.login(2, "Program Manager")
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Valid incident", page)
+        self.assertIn(b"/manager-review/incidents/41", page)
+        self.assertIn(b"Review required", page)
+        for summary in (
+            b"Wrong table incident", b"Missing id incident",
+            b"Mismatched client incident", b"Missing source incident"
+        ):
+            start = page.find(summary)
+            self.assertGreaterEqual(start, 0)
+            self.assertNotIn(b"View details", page[start:start + 700])
+
+        self.login(1, "Support Worker")
+        worker_page = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"/manager-review/incidents/41", worker_page)
+        self.assertNotIn(b"View details", worker_page)
+        self.assertEqual(
+            self.client.get("/manager-review/incidents/41").status_code,
+            403
+        )
+        self.assertEqual(
+            self.client.post("/manager-review/incidents/41/review").status_code,
+            403
+        )
 
     def test_worker_cannot_view_unrelated_client(self):
         self.login()
