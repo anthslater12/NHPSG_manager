@@ -1460,8 +1460,10 @@ STORYLINE_FILTERS = {
     "Activity": {"shift_activity_created"},
     "Incident": {"incident_created"},
     "Shift Notes": {"shift_note_updated"},
-    "Care": {"care_task_updated"},
-    "Housekeeping": {"housekeeping_task_updated"},
+    "Care": {"care_task_completed", "care_task_updated"},
+    "Housekeeping": {
+        "housekeeping_task_completed", "housekeeping_task_updated"
+    },
     "Shift": {"start_shift_completed", "end_shift_completed"},
 }
 
@@ -1720,6 +1722,94 @@ def _storyline_return_context(values, client_id):
         "storyline_filter": storyline_filter,
         "storyline_page": storyline_page,
     }
+
+
+STORYLINE_REVIEW_SOURCES = {
+    "toileting_event_created": (
+        "toileting_events", "toileting_review_detail"
+    ),
+    "food_fluid_entry_created": (
+        "food_fluid_entries", "food_fluid_review_detail"
+    ),
+    "food_fluid_entry_voided": (
+        "food_fluid_entries", "food_fluid_review_detail"
+    ),
+    "shift_activity_created": (
+        "shift_activities", "activity_review_detail"
+    ),
+    "shift_note_updated": (
+        "shift_notes", "shift_note_review_detail"
+    ),
+    "care_task_updated": (
+        "shift_care_task_entries", "care_review_detail"
+    ),
+    "care_task_completed": (
+        "shift_care_task_entries", "care_review_detail"
+    ),
+    "housekeeping_task_updated": (
+        "shift_housekeeping_task_entries", "housekeeping_review_detail"
+    ),
+    "housekeeping_task_completed": (
+        "shift_housekeeping_task_entries", "housekeeping_review_detail"
+    ),
+}
+
+
+def _storyline_source_ids_for_client(conn, client_id, candidates):
+    valid = set()
+    queries = {
+        "toileting_events": """
+            SELECT toileting_event_id AS source_id
+            FROM toileting_events
+            WHERE client_id = ? AND toileting_event_id IN ({placeholders})
+        """,
+        "food_fluid_entries": """
+            SELECT food_fluid_entry_id AS source_id
+            FROM food_fluid_entries
+            WHERE client_id = ? AND food_fluid_entry_id IN ({placeholders})
+        """,
+        "shift_notes": """
+            SELECT note_id AS source_id
+            FROM shift_notes
+            WHERE client_id = ? AND note_id IN ({placeholders})
+        """,
+        "shift_activities": """
+            SELECT sa.shift_activity_id AS source_id
+            FROM shift_activities sa
+            JOIN shifts s ON s.shift_id = sa.shift_id
+            WHERE s.client_id = ?
+              AND sa.shift_activity_id IN ({placeholders})
+        """,
+        "shift_care_task_entries": """
+            SELECT cte.entry_id AS source_id
+            FROM shift_care_task_entries cte
+            JOIN shifts s ON s.shift_id = cte.shift_id
+            WHERE s.client_id = ? AND cte.entry_id IN ({placeholders})
+        """,
+        "shift_housekeeping_task_entries": """
+            SELECT hte.entry_id AS source_id
+            FROM shift_housekeeping_task_entries hte
+            JOIN shifts s ON s.shift_id = hte.shift_id
+            WHERE s.client_id = ? AND hte.entry_id IN ({placeholders})
+        """,
+    }
+    by_table = {}
+    for activity_type, related_table, related_id in candidates:
+        by_table.setdefault(related_table, set()).add(related_id)
+    for related_table, source_ids in by_table.items():
+        query = queries.get(related_table)
+        if query is None:
+            continue
+        placeholders = ", ".join("?" for _ in source_ids)
+        try:
+            rows = conn.execute(
+                query.format(placeholders=placeholders),
+                (client_id, *source_ids)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        valid.update((related_table, row["source_id"]) for row in rows)
+    return valid
 
 
 def get_food_fluid_shift_window(shift):
@@ -18004,47 +18094,46 @@ def client_storyline(client_id):
     management_storyline = (
         session.get("role") in STAFF_NOTICE_MANAGEMENT_ROLES
     )
-    toileting_source_ids = {
-        event["related_id"]
+    candidates = [
+        (
+            event["activity_type"], event["related_table"],
+            event["related_id"]
+        )
         for event in events
-        if event["activity_type"] == "toileting_event_created"
-        and event["related_table"] == "toileting_events"
+        if management_storyline
+        and event["activity_type"] in STORYLINE_REVIEW_SOURCES
+        and event["related_table"] == STORYLINE_REVIEW_SOURCES[
+            event["activity_type"]
+        ][0]
         and event["related_id"] is not None
-    }
-    valid_toileting_source_ids = set()
-    reviewed_toileting_source_ids = set()
-    toileting_table_exists = conn.execute("""
-        SELECT 1
-        FROM sqlite_master
-        WHERE type = 'table' AND name = 'toileting_events'
-    """).fetchone() is not None
-    if management_storyline and toileting_source_ids and toileting_table_exists:
-        placeholders = ", ".join("?" for _ in toileting_source_ids)
-        source_rows = conn.execute(f"""
-            SELECT toileting_event_id
-            FROM toileting_events
-            WHERE client_id = ?
-              AND toileting_event_id IN ({placeholders})
-        """, (client_id, *toileting_source_ids)).fetchall()
-        valid_toileting_source_ids = {
-            row["toileting_event_id"] for row in source_rows
-        }
-        if valid_toileting_source_ids:
-            placeholders = ", ".join(
-                "?" for _ in valid_toileting_source_ids
-            )
-            review_rows = conn.execute(f"""
-                SELECT source_id
+    ]
+    valid_review_sources = (
+        _storyline_source_ids_for_client(conn, client_id, candidates)
+        if candidates else set()
+    )
+    reviewed_review_sources = set()
+    if management_storyline and valid_review_sources:
+        clauses = []
+        review_parameters = []
+        for related_table, related_id in valid_review_sources:
+            clauses.append("(source_table = ? AND source_id = ?)")
+            review_parameters.extend((related_table, related_id))
+        try:
+            review_rows = conn.execute("""
+                SELECT source_table, source_id
                 FROM acknowledgements
-                WHERE source_table = 'toileting_events'
-                  AND source_id IN ({placeholders})
-                  AND user_id = ?
+                WHERE user_id = ?
                   AND acknowledgement_type = 'Review'
                   AND active = 1
-            """, (*valid_toileting_source_ids, session["user_id"])).fetchall()
-            reviewed_toileting_source_ids = {
-                row["source_id"] for row in review_rows
+                  AND (""" + " OR ".join(clauses) + ")",
+                (session["user_id"], *review_parameters)
+            ).fetchall()
+            reviewed_review_sources = {
+                (row["source_table"], row["source_id"])
+                for row in review_rows
             }
+        except sqlite3.OperationalError:
+            reviewed_review_sources = set()
     for event in events:
         event = dict(event)
         event["label"] = _storyline_label(event["activity_type"])
@@ -18089,24 +18178,46 @@ def client_storyline(client_id):
             if event["local_datetime"] else ""
         )
         event["event_time"] = _storyline_time(event["local_datetime"])
-        event["storyline_toileting_detail_url"] = None
-        event["storyline_toileting_reviewed"] = False
+        event["storyline_detail_url"] = None
+        event["storyline_reviewed"] = False
         if (
             management_storyline
-            and event["activity_type"] == "toileting_event_created"
-            and event["related_table"] == "toileting_events"
-            and event["related_id"] in valid_toileting_source_ids
+            and event["activity_type"] in STORYLINE_REVIEW_SOURCES
+            and event["related_table"] == STORYLINE_REVIEW_SOURCES[
+                event["activity_type"]
+            ][0]
+            and (
+                event["related_table"], event["related_id"]
+            ) in valid_review_sources
         ):
-            event["storyline_toileting_detail_url"] = url_for(
-                "toileting_review_detail",
-                entry_id=event["related_id"],
+            detail_endpoint = STORYLINE_REVIEW_SOURCES[
+                event["activity_type"]
+            ][1]
+            id_parameter = (
+                "activity_id" if detail_endpoint == "activity_review_detail"
+                else "note_id" if detail_endpoint == "shift_note_review_detail"
+                else "entry_id"
+            )
+            event["storyline_detail_url"] = url_for(
+                detail_endpoint,
+                **{id_parameter: event["related_id"]},
                 storyline_client_id=client_id,
                 storyline_filter=selected_filter,
                 storyline_page=page,
             )
-            event["storyline_toileting_reviewed"] = (
-                event["related_id"] in reviewed_toileting_source_ids
-            )
+            event["storyline_reviewed"] = (
+                event["related_table"], event["related_id"]
+            ) in reviewed_review_sources
+        event["storyline_toileting_detail_url"] = (
+            event["storyline_detail_url"]
+            if event["activity_type"] == "toileting_event_created"
+            else None
+        )
+        event["storyline_toileting_reviewed"] = (
+            event["storyline_reviewed"]
+            if event["activity_type"] == "toileting_event_created"
+            else False
+        )
         prepared_events.append(event)
 
     prepared_events.sort(
@@ -19354,6 +19465,9 @@ def shift_note_review_detail(note_id):
 
     conn.close()
 
+    storyline_return_context = _storyline_return_context(
+        request.args, entry["client_id"]
+    )
     return render_template(
         "shift_note_review_detail.html",
         entry=entry,
@@ -19362,7 +19476,8 @@ def shift_note_review_detail(note_id):
             current_user_review is not None
         ),
         management_notes=management_notes,
-        linked_actions=linked_actions
+        linked_actions=linked_actions,
+        storyline_return_context=storyline_return_context
     )
 
 @app.route(
@@ -19631,12 +19746,16 @@ def acknowledge_shift_note(note_id):
     conn.close()
 
     return_to = request.form.get("return_to", "")
+    return_context = _storyline_return_context(
+        request.form, note["client_id"]
+    )
 
     if return_to == "detail":
         return redirect(
             url_for(
                 "shift_note_review_detail",
-                note_id=note_id
+                note_id=note_id,
+                **(return_context or {})
             )
         )
 
@@ -20277,6 +20396,9 @@ def activity_review_detail(activity_id):
         current_user_reviewed=any(
             review["user_id"] == actor["user_id"]
             for review in reviews
+        ),
+        storyline_return_context=_storyline_return_context(
+            request.args, entry["client_id"]
         )
     )
 
@@ -20334,7 +20456,11 @@ def review_shift_activity(activity_id):
 
     return redirect(url_for(
         "activity_review_detail",
-        activity_id=activity_id
+        activity_id=activity_id,
+        **(
+            _storyline_return_context(request.args, entry["client_id"])
+            or {}
+        )
     ))
 
 
@@ -20437,7 +20563,10 @@ def food_fluid_review_detail(entry_id):
         view_history=view_history,
         review_history=review_history,
         reviewed_by_current_user=reviewed_by_current_user,
-        state_filter=get_food_fluid_review_filter()
+        state_filter=get_food_fluid_review_filter(),
+        storyline_return_context=_storyline_return_context(
+            request.args, entry["client_id"]
+        )
     )
 
 
@@ -20481,10 +20610,14 @@ def review_food_fluid_entry(entry_id):
         raise
 
     conn.close()
+    return_context = _storyline_return_context(
+        request.args, entry["client_id"]
+    )
     return redirect(url_for(
         "food_fluid_review_detail",
         entry_id=entry_id,
-        state=get_food_fluid_review_filter()
+        state=get_food_fluid_review_filter(),
+        **(return_context or {})
     ))
 
 
@@ -21113,7 +21246,10 @@ def housekeeping_review_detail(entry_id):
         ),
         management_notes=management_notes,
         linked_actions=linked_actions,
-        shift_staff=shift_staff
+        shift_staff=shift_staff,
+        storyline_return_context=_storyline_return_context(
+            request.args, entry["client_id"]
+        )
     )
 
 @app.route(
@@ -21358,9 +21494,10 @@ def review_housekeeping_entry(entry_id):
     conn = get_db()
 
     entry = conn.execute("""
-        SELECT entry_id
-        FROM shift_housekeeping_task_entries
-        WHERE entry_id = ?
+        SELECT hte.entry_id, s.client_id
+        FROM shift_housekeeping_task_entries hte
+        JOIN shifts s ON s.shift_id = hte.shift_id
+        WHERE hte.entry_id = ?
     """, (entry_id,)).fetchone()
 
     if entry is None:
@@ -21378,6 +21515,15 @@ def review_housekeeping_entry(entry_id):
     conn.commit()
     conn.close()
 
+    return_context = _storyline_return_context(
+        request.form, entry["client_id"]
+    )
+    if return_context:
+        return redirect(url_for(
+            "housekeeping_review_detail",
+            entry_id=entry_id,
+            **return_context
+        ))
     return redirect(
         url_for("housekeeping_review_list")
         + f"#housekeeping-entry-{entry_id}"
@@ -21935,7 +22081,10 @@ def care_review_detail(entry_id):
         ),
         management_notes=management_notes,
         linked_actions=linked_actions,
-        shift_staff=shift_staff
+        shift_staff=shift_staff,
+        storyline_return_context=_storyline_return_context(
+            request.args, entry["client_id"]
+        )
     )
 
 @app.route(
@@ -22175,9 +22324,10 @@ def review_care_entry(entry_id):
     conn = get_db()
 
     entry = conn.execute("""
-        SELECT entry_id
-        FROM shift_care_task_entries
-        WHERE entry_id = ?
+        SELECT cte.entry_id, s.client_id
+        FROM shift_care_task_entries cte
+        JOIN shifts s ON s.shift_id = cte.shift_id
+        WHERE cte.entry_id = ?
     """, (entry_id,)).fetchone()
 
     if entry is None:
@@ -22195,6 +22345,15 @@ def review_care_entry(entry_id):
     conn.commit()
     conn.close()
 
+    return_context = _storyline_return_context(
+        request.form, entry["client_id"]
+    )
+    if return_context:
+        return redirect(url_for(
+            "care_review_detail",
+            entry_id=entry_id,
+            **return_context
+        ))
     return redirect(
         url_for("care_review_list")
         + f"#care-entry-{entry_id}"

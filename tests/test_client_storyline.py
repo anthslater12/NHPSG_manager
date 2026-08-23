@@ -33,7 +33,9 @@ class ClientStorylineTests(unittest.TestCase):
                 source_table TEXT NOT NULL,
                 source_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
+                acknowledged_at TEXT,
                 acknowledgement_type TEXT DEFAULT 'Read',
+                comment TEXT,
                 active INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE toileting_events (
@@ -44,7 +46,23 @@ class ClientStorylineTests(unittest.TestCase):
                 behaviour_before TEXT, behaviour_during TEXT,
                 behaviour_after TEXT, behaviour_comments TEXT
             );
-            INSERT INTO users VALUES (1, 'Worker', 'Support Worker', 1), (2, 'Manager', 'Program Manager', 1), (3, 'Other', 'Support Worker', 1);
+            CREATE TABLE food_fluid_entries (
+                food_fluid_entry_id INTEGER PRIMARY KEY, client_id INTEGER,
+                shift_id INTEGER
+            );
+            CREATE TABLE shift_activities (
+                shift_activity_id INTEGER PRIMARY KEY, shift_id INTEGER
+            );
+            CREATE TABLE shift_notes (
+                note_id INTEGER PRIMARY KEY, client_id INTEGER
+            );
+            CREATE TABLE shift_care_task_entries (
+                entry_id INTEGER PRIMARY KEY, shift_id INTEGER
+            );
+            CREATE TABLE shift_housekeeping_task_entries (
+                entry_id INTEGER PRIMARY KEY, shift_id INTEGER
+            );
+            INSERT INTO users VALUES (1, 'Worker', 'Support Worker', 1), (2, 'Manager', 'Program Manager', 1), (3, 'Other', 'Support Worker', 1), (4, 'Second Manager', 'Program Manager', 1);
             INSERT INTO clients VALUES (1, 'Client One', 1), (2, 'Client Two', 1);
             INSERT INTO shifts VALUES (10, 1, 'Open'), (20, 2, 'Open');
             INSERT INTO shift_staff VALUES (100, 10, 1, 1), (200, 20, 3, 1), (300, 10, 3, 0);
@@ -116,8 +134,8 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"View details", page)
         self.assertIn(b"Review required", page)
         self.assertIn(b'id="storyline-event-', page)
-        self.assertIn(b'class="storyline-toileting-detail-link"', page)
-        self.assertIn(b"client-storyline-toileting-position", page)
+        self.assertIn(b'class="storyline-detail-link"', page)
+        self.assertIn(b"client-storyline-detail-position", page)
         self.assertIn(
             b"/manager-review/toileting/7?storyline_client_id=1",
             page
@@ -154,6 +172,159 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertNotIn(b"View details", page)
         self.assertIn(b"Missing source", page)
         self.assertIn(b"Wrong source", page)
+
+    def test_management_controls_map_supported_modules_to_exact_sources(self):
+        conn = sqlite3.connect(self.path)
+        conn.executemany(
+            "INSERT INTO food_fluid_entries VALUES (?, ?, ?)",
+            [(11, 1, 10), (111, 2, 20)]
+        )
+        conn.execute("INSERT INTO shift_activities VALUES (12, 10)")
+        conn.execute("INSERT INTO shift_notes VALUES (13, 1)")
+        conn.execute("INSERT INTO shift_care_task_entries VALUES (14, 10)")
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries VALUES (15, 10)"
+        )
+        conn.commit()
+        conn.close()
+
+        mappings = (
+            ("food_fluid_entry_created", "food_fluid_entries", 11,
+             "/manager-review/food-fluid/11"),
+            ("shift_activity_created", "shift_activities", 12,
+             "/manager-review/activities/12"),
+            ("shift_note_updated", "shift_notes", 13,
+             "/manager-review/shift-notes/13"),
+            ("care_task_updated", "shift_care_task_entries", 14,
+             "/manager-review/care/14"),
+            ("housekeeping_task_updated", "shift_housekeeping_task_entries", 15,
+             "/manager-review/housekeeping/15"),
+        )
+        for event_type, table_name, source_id, _ in mappings:
+            self.add_event(
+                event_type,
+                f"{event_type} record",
+                related_table=table_name,
+                related_id=source_id
+            )
+
+        self.add_event(
+            "food_fluid_entry_created", "Wrong client source",
+            related_table="food_fluid_entries", related_id=111
+        )
+        self.login(2, "Program Manager")
+        page = self.client.get("/client/1/storyline").data
+
+        for _, _, _, detail_path in mappings:
+            self.assertIn(detail_path.encode(), page)
+        self.assertIn(b"Wrong client source", page)
+        self.assertEqual(page.count(b"View details"), len(mappings))
+
+        self.login(1, "Support Worker")
+        worker_page = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"View details", worker_page)
+
+    def test_care_and_housekeeping_review_status_uses_operational_source(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute("INSERT INTO shift_care_task_entries VALUES (21, 10)")
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries VALUES (22, 10)"
+        )
+        conn.commit()
+        conn.close()
+
+        self.add_event(
+            "care_task_completed", "Care operational event",
+            related_table="shift_care_task_entries", related_id=21
+        )
+        self.add_event(
+            "housekeeping_task_completed", "Housekeeping operational event",
+            related_table="shift_housekeeping_task_entries", related_id=22
+        )
+        self.add_event(
+            "care_task_updated", "Administrative care event",
+            related_table="care_tasks", related_id=21
+        )
+        self.add_event(
+            "housekeeping_task_updated", "Administrative housekeeping event",
+            related_table="housekeeping_tasks", related_id=22
+        )
+
+        self.login(2, "Program Manager")
+        before = self.client.get("/client/1/storyline").data
+        self.assertEqual(before.count(b"Review required"), 2)
+        self.assertNotIn(b"Administrative care event" + b"View details", before)
+        self.assertNotIn(
+            b"Administrative housekeeping eventView details", before
+        )
+
+        self.login(4, "Program Manager")
+        self.assertEqual(
+            self.client.post("/manager-review/care/21/review").status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post(
+                "/manager-review/housekeeping/22/review"
+            ).status_code,
+            302
+        )
+
+        self.login(2, "Program Manager")
+        other_manager = self.client.get("/client/1/storyline").data
+        self.assertEqual(other_manager.count(b"Review required"), 2)
+        self.assertNotIn(b"You have reviewed this", other_manager)
+
+        self.assertEqual(
+            self.client.post("/manager-review/care/21/review").status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post(
+                "/manager-review/housekeeping/22/review"
+            ).status_code,
+            302
+        )
+        reviewed = self.client.get("/client/1/storyline").data
+        self.assertEqual(reviewed.count(b"You have reviewed this"), 2)
+        self.assertNotIn(b"Review required", reviewed)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            UPDATE acknowledgements
+            SET active = 0
+            WHERE user_id = 2 AND acknowledgement_type = 'Review'
+        """)
+        conn.commit()
+        conn.close()
+        invalidated = self.client.get("/client/1/storyline").data
+        self.assertEqual(invalidated.count(b"Review required"), 2)
+        self.assertNotIn(b"You have reviewed this", invalidated)
+
+        self.login(1, "Support Worker")
+        worker_page = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"View details", worker_page)
+
+    def test_supported_detail_review_controls_forward_storyline_context(self):
+        templates = (
+            "food_fluid_review_detail.html",
+            "activity_review_detail.html",
+            "shift_note_review_detail.html",
+            "care_review_detail.html",
+            "housekeeping_review_detail.html",
+            "toileting_review_detail.html",
+        )
+        template_root = Path(app.__file__).parent / "templates"
+        for template_name in templates:
+            source = (template_root / template_name).read_text(
+                encoding="utf-8"
+            )
+            for field_name in (
+                "storyline_client_id",
+                "storyline_filter",
+                "storyline_page",
+            ):
+                self.assertIn(field_name, source, template_name)
 
     def test_worker_cannot_view_unrelated_client(self):
         self.login()

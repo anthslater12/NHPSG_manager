@@ -6,6 +6,19 @@
 
     <h2>Care Management Review</h2>
 
+    {% if storyline_return_context %}
+        <p>
+            <a href="{{ url_for(
+                'client_storyline',
+                client_id=storyline_return_context.storyline_client_id,
+                filter=storyline_return_context.storyline_filter,
+                page=storyline_return_context.storyline_page
+            ) }}">
+                Back to Client Storyline
+            </a>
+        </p>
+    {% endif %}
+
     <p>
         <a href="{{ url_for("manager_review_hub") }}">
             ← Back to Management Review
@@ -126,14 +139,19 @@
 
     {% if not current_user_reviewed %}
 
-        <p>
-            <a href="{{ url_for(
-                'review_care_entry',
-                entry_id=entry.entry_id
-            ) }}">
+        <form method="POST" action="{{ url_for(
+            'review_care_entry',
+            entry_id=entry.entry_id
+        ) }}">
+            {% if storyline_return_context %}
+                <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+                <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+                <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+            {% endif %}
+            <button type="submit" class="link-button">
                 Mark as Reviewed
-            </a>
-        </p>
+            </button>
+        </form>
 
     {% else %}
 
