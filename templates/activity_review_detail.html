@@ -5,6 +5,19 @@
 <div class="card">
     <h2>Activity Management Review</h2>
 
+    {% if storyline_return_context %}
+        <p>
+            <a href="{{ url_for(
+                'client_storyline',
+                client_id=storyline_return_context.storyline_client_id,
+                filter=storyline_return_context.storyline_filter,
+                page=storyline_return_context.storyline_page
+            ) }}">
+                Back to Client Storyline
+            </a>
+        </p>
+    {% endif %}
+
     <p>
         <a href="{{ url_for('activity_review_list') }}">
             &larr; Return to Activity Review List
@@ -48,7 +61,10 @@
             method="post"
             action="{{ url_for(
                 'review_shift_activity',
-                activity_id=entry.shift_activity_id
+                activity_id=entry.shift_activity_id,
+                storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
+                storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
+                storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
             ) }}"
             class="inline-form"
         >

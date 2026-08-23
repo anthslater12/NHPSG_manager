@@ -37,15 +37,15 @@
                         {% else %}<div class="storyline-details" style="margin-top: 0.25rem; white-space: pre-wrap; overflow-wrap: anywhere;">{%- for detail_line in event.storyline_detail_lines %}<div>{{ detail_line }}</div>{% endfor %}
                         </div>{% endif %}
                     {% endif %}
-                    {% if event.storyline_toileting_detail_url %}
+                    {% if event.storyline_detail_url %}
                         <div class="storyline-management-controls">
                             <a
-                                href="{{ event.storyline_toileting_detail_url }}"
-                                class="storyline-toileting-detail-link"
+                                href="{{ event.storyline_detail_url }}"
+                                class="storyline-detail-link"
                                 data-storyline-activity-id="{{ event.activity_id }}"
                             >View details</a>
                             <span>
-                                {% if event.storyline_toileting_reviewed %}
+                                {% if event.storyline_reviewed %}
                                     You have reviewed this
                                 {% else %}
                                     Review required
@@ -69,7 +69,7 @@
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     const storyline = document.getElementById('client-storyline');
-    const positionKey = 'client-storyline-toileting-position';
+    const positionKey = 'client-storyline-detail-position';
     if (!storyline) {
         return;
     }
@@ -80,7 +80,7 @@ document.addEventListener('DOMContentLoaded', function() {
         page: storyline.dataset.storylinePage
     };
 
-    document.querySelectorAll('.storyline-toileting-detail-link').forEach(function(link) {
+    document.querySelectorAll('.storyline-detail-link').forEach(function(link) {
         link.addEventListener('click', function() {
             const eventId = link.dataset.storylineActivityId;
             const event = document.getElementById('storyline-event-' + eventId);

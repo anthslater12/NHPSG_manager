@@ -6,6 +6,19 @@
 
     <h2>Food &amp; Fluid Entry Detail</h2>
 
+    {% if storyline_return_context %}
+        <p>
+            <a href="{{ url_for(
+                'client_storyline',
+                client_id=storyline_return_context.storyline_client_id,
+                filter=storyline_return_context.storyline_filter,
+                page=storyline_return_context.storyline_page
+            ) }}">
+                Back to Client Storyline
+            </a>
+        </p>
+    {% endif %}
+
     <p>
         <a href="{{ url_for(
             'food_fluid_review_list',
@@ -145,7 +158,10 @@
             action="{{ url_for(
                 'review_food_fluid_entry',
                 entry_id=entry.food_fluid_entry_id,
-                state=state_filter
+                state=state_filter,
+                storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
+                storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
+                storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
             ) }}">
             <button type="submit">Mark Reviewed</button>
         </form>
