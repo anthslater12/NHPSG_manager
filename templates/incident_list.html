@@ -65,7 +65,7 @@
 
                             <br>
 
-                            <a href="{{ url_for('review_incident',
+                            <a href="{{ url_for('incident_review_detail',
                                                 incident_id=incident.incident_id) }}">
                                 Add Review
                             </a>
@@ -74,7 +74,7 @@
 
                     {% else %}
 
-                        <a href="{{ url_for('review_incident',
+                        <a href="{{ url_for('incident_review_detail',
                                             incident_id=incident.incident_id) }}">
                             Review
                         </a>
