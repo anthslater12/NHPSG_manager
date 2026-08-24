@@ -1791,10 +1791,22 @@ STORYLINE_REVIEW_SOURCES = {
     "care_task_updated": (
         "shift_care_task_entries", "care_review_detail"
     ),
+    "care_task_attempted": (
+        "shift_care_task_entries", "care_review_detail"
+    ),
+    "care_task_not_completed": (
+        "shift_care_task_entries", "care_review_detail"
+    ),
     "care_task_completed": (
         "shift_care_task_entries", "care_review_detail"
     ),
     "housekeeping_task_updated": (
+        "shift_housekeeping_task_entries", "housekeeping_review_detail"
+    ),
+    "housekeeping_task_attempted": (
+        "shift_housekeeping_task_entries", "housekeeping_review_detail"
+    ),
+    "housekeeping_task_not_completed": (
         "shift_housekeeping_task_entries", "housekeeping_review_detail"
     ),
     "housekeeping_task_completed": (
@@ -19406,6 +19418,7 @@ def shift_notes():
             ON ack.user_id = u.user_id
 
         WHERE ack.source_table = 'shift_notes'
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY ack.acknowledged_at
@@ -19415,6 +19428,7 @@ def shift_notes():
         SELECT source_id AS note_id
         FROM acknowledgements
         WHERE source_table = 'shift_notes'
+          AND acknowledgement_type = 'Review'
           AND user_id = ?
           AND active = 1
     """, (session["user_id"],)).fetchall()
@@ -19500,6 +19514,7 @@ def shift_note_review_detail(note_id):
 
         WHERE ack.source_table = 'shift_notes'
           AND ack.source_id = ?
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY
@@ -19514,6 +19529,7 @@ def shift_note_review_detail(note_id):
         WHERE source_table = 'shift_notes'
           AND source_id = ?
           AND user_id = ?
+          AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
         note_id,
@@ -21175,6 +21191,7 @@ def care_review_list():
 
         WHERE ack.source_table =
               'shift_care_task_entries'
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY ack.acknowledged_at
@@ -21189,6 +21206,7 @@ def care_review_list():
         WHERE source_table =
               'shift_care_task_entries'
           AND user_id = ?
+          AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
         session["user_id"],
@@ -21290,6 +21308,7 @@ def toileting_review_list():
 
         WHERE ack.source_table =
               'toileting_events'
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY ack.acknowledged_at
@@ -21304,6 +21323,7 @@ def toileting_review_list():
         WHERE source_table =
               'toileting_events'
           AND user_id = ?
+          AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
         session["user_id"],
@@ -21411,6 +21431,7 @@ def housekeeping_review_list():
 
         WHERE ack.source_table =
               'shift_housekeeping_task_entries'
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY ack.acknowledged_at
@@ -21425,6 +21446,7 @@ def housekeeping_review_list():
         WHERE source_table =
               'shift_housekeeping_task_entries'
           AND user_id = ?
+          AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
         session["user_id"],
@@ -21538,6 +21560,7 @@ def housekeeping_review_detail(entry_id):
         WHERE ack.source_table =
               'shift_housekeeping_task_entries'
           AND ack.source_id = ?
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY
@@ -21553,6 +21576,7 @@ def housekeeping_review_detail(entry_id):
               'shift_housekeeping_task_entries'
           AND source_id = ?
           AND user_id = ?
+          AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
         entry_id,
@@ -21972,6 +21996,7 @@ def toileting_review_detail(entry_id):
         WHERE ack.source_table =
               'toileting_events'
           AND ack.source_id = ?
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY
@@ -21987,6 +22012,7 @@ def toileting_review_detail(entry_id):
               'toileting_events'
           AND source_id = ?
           AND user_id = ?
+          AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
         entry_id,
@@ -22373,6 +22399,7 @@ def care_review_detail(entry_id):
         WHERE ack.source_table =
               'shift_care_task_entries'
           AND ack.source_id = ?
+          AND ack.acknowledgement_type = 'Review'
           AND ack.active = 1
 
         ORDER BY
@@ -22388,6 +22415,7 @@ def care_review_detail(entry_id):
               'shift_care_task_entries'
           AND source_id = ?
           AND user_id = ?
+          AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
         entry_id,
