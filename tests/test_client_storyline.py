@@ -1,3 +1,4 @@
+import inspect
 import sqlite3
 import tempfile
 import unittest
@@ -227,8 +228,16 @@ class ClientStorylineTests(unittest.TestCase):
         conn.execute("INSERT INTO shift_activities VALUES (12, 10)")
         conn.execute("INSERT INTO shift_notes VALUES (13, 1)")
         conn.execute("INSERT INTO shift_care_task_entries VALUES (14, 10)")
+        conn.execute("INSERT INTO shift_care_task_entries VALUES (16, 10)")
+        conn.execute("INSERT INTO shift_care_task_entries VALUES (17, 10)")
         conn.execute(
             "INSERT INTO shift_housekeeping_task_entries VALUES (15, 10)"
+        )
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries VALUES (18, 10)"
+        )
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries VALUES (19, 10)"
         )
         conn.commit()
         conn.close()
@@ -242,8 +251,16 @@ class ClientStorylineTests(unittest.TestCase):
              "/manager-review/shift-notes/13"),
             ("care_task_updated", "shift_care_task_entries", 14,
              "/manager-review/care/14"),
+            ("care_task_attempted", "shift_care_task_entries", 16,
+             "/manager-review/care/16"),
+            ("care_task_not_completed", "shift_care_task_entries", 17,
+             "/manager-review/care/17"),
             ("housekeeping_task_updated", "shift_housekeeping_task_entries", 15,
              "/manager-review/housekeeping/15"),
+            ("housekeeping_task_attempted", "shift_housekeeping_task_entries", 18,
+             "/manager-review/housekeeping/18"),
+            ("housekeeping_task_not_completed", "shift_housekeeping_task_entries", 19,
+             "/manager-review/housekeeping/19"),
         )
         for event_type, table_name, source_id, _ in mappings:
             self.add_event(
@@ -268,6 +285,99 @@ class ClientStorylineTests(unittest.TestCase):
         self.login(1, "Support Worker")
         worker_page = self.client.get("/client/1/storyline").data
         self.assertNotIn(b"View details", worker_page)
+
+    def test_attempted_and_not_completed_controls_validate_source_and_review_state(self):
+        conn = sqlite3.connect(self.path)
+        conn.executemany(
+            "INSERT INTO shift_care_task_entries VALUES (?, ?)",
+            [(31, 10), (32, 10), (33, 20)],
+        )
+        conn.executemany(
+            "INSERT INTO shift_housekeeping_task_entries VALUES (?, ?)",
+            [(41, 10), (42, 10), (43, 20)],
+        )
+        conn.commit()
+        conn.close()
+
+        events = (
+            ("care_task_attempted", "shift_care_task_entries", 31,
+             "/manager-review/care/31"),
+            ("care_task_not_completed", "shift_care_task_entries", 32,
+             "/manager-review/care/32"),
+            ("housekeeping_task_attempted", "shift_housekeeping_task_entries", 41,
+             "/manager-review/housekeeping/41"),
+            ("housekeeping_task_not_completed", "shift_housekeeping_task_entries", 42,
+             "/manager-review/housekeeping/42"),
+        )
+        for event_type, table_name, source_id, _ in events:
+            self.add_event(
+                event_type,
+                f"{event_type} record",
+                related_table=table_name,
+                related_id=source_id,
+            )
+
+        self.add_event(
+            "care_task_attempted", "Wrong client care source",
+            related_table="shift_care_task_entries", related_id=33,
+        )
+        self.add_event(
+            "housekeeping_task_not_completed", "Wrong client housekeeping source",
+            related_table="shift_housekeeping_task_entries", related_id=43,
+        )
+        self.add_event(
+            "care_task_attempted", "Wrong related table",
+            related_table="care_tasks", related_id=31,
+        )
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO acknowledgements
+            (source_table, source_id, user_id, acknowledgement_type, active)
+            VALUES ('shift_care_task_entries', 31, 2, 'Review', 1)
+        """)
+        conn.execute("""
+            INSERT INTO acknowledgements
+            (source_table, source_id, user_id, acknowledgement_type, active)
+            VALUES ('shift_care_task_entries', 32, 2, 'Read', 1)
+        """)
+        conn.commit()
+        conn.close()
+
+        self.login(2, "Program Manager")
+        page = self.client.get("/client/1/storyline").data
+        self.assertEqual(page.count(b"View details"), 4)
+        self.assertEqual(page.count(b"You have reviewed this"), 1)
+        self.assertEqual(page.count(b"Review required"), 3)
+        for _, _, _, detail_path in events:
+            self.assertIn(detail_path.encode(), page)
+        self.assertIn(b"Wrong client care source", page)
+        self.assertIn(b"Wrong client housekeeping source", page)
+        self.assertIn(b"Wrong related table", page)
+
+        self.login(1, "Support Worker")
+        worker_page = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"View details", worker_page)
+        self.assertNotIn(b"You have reviewed this", worker_page)
+
+    def test_legacy_management_review_queries_require_review_type(self):
+        query_functions = (
+            app.shift_notes,
+            app.shift_note_review_detail,
+            app.toileting_review_list,
+            app.toileting_review_detail,
+            app.care_review_list,
+            app.care_review_detail,
+            app.housekeeping_review_list,
+            app.housekeeping_review_detail,
+        )
+        for function in query_functions:
+            source = inspect.getsource(function)
+            self.assertIn(
+                "acknowledgement_type = 'Review'",
+                source,
+                function.__name__,
+            )
 
     def test_care_and_housekeeping_review_status_uses_operational_source(self):
         conn = sqlite3.connect(self.path)
