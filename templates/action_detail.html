@@ -72,6 +72,18 @@
                     ) }}">
                         View Source Shift Note
                     </a>
+                {% elif (
+                    action.source_table == "incident_reports"
+                    and action.source_id
+                ) %}
+                    <br>
+
+                    <a href="{{ url_for(
+                        'incident_review_detail',
+                        incident_id=action.source_id
+                    ) }}">
+                        View Source Incident
+                    </a>
                 {% endif %}
             </td>
         </tr>

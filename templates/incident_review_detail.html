@@ -58,20 +58,111 @@
         <p>No management reviews recorded.</p>
     {% endif %}
 
-    {% if current_user_reviewed %}
-        <p>You have reviewed this incident.</p>
-    {% else %}
-        <p>Review required</p>
+    {% if management_user %}
+        {% if current_user_reviewed %}
+            <p>You have reviewed this incident.</p>
+        {% else %}
+            <p>Review required</p>
+            <form method="post" action="{{ url_for(
+                'review_incident_post', incident_id=incident.incident_id
+            ) }}">
+                {% if storyline_return_context %}
+                    <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+                    <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+                    <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+                {% endif %}
+                <button type="submit">Mark as Reviewed</button>
+            </form>
+        {% endif %}
+
+        <h3>Management Notes</h3>
+
+        {% if request.args.get("note_error") %}
+            <p class="error-message">
+                {{ request.args.get("note_error") }}
+            </p>
+        {% endif %}
+
         <form method="post" action="{{ url_for(
-            'review_incident_post', incident_id=incident.incident_id
+            'add_incident_management_note', incident_id=incident.incident_id
         ) }}">
+            <label for="note_text">Add Management Note</label>
+            <textarea id="note_text" name="note_text" rows="4" required></textarea>
+
+            <p><small>This note is visible to management only.</small></p>
+
             {% if storyline_return_context %}
                 <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
                 <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
                 <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
             {% endif %}
-            <button type="submit">Mark as Reviewed</button>
+
+            <button type="submit">Add Management Note</button>
         </form>
+
+        {% if management_notes %}
+            {% for note in management_notes %}
+                <div class="card">
+                    <strong>{{ note.created_by_name }}</strong><br>
+                    <small>{{ note.created_at }} &mdash; Management only</small>
+                    <p>{{ note.note_text }}</p>
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>No Management Notes have been added.</p>
+        {% endif %}
+
+        <h3>Linked Actions</h3>
+
+        {% if storyline_return_context %}
+            <p>
+                <a href="{{ url_for(
+                    'incident_action_new',
+                    incident_id=incident.incident_id,
+                    storyline_client_id=storyline_return_context.storyline_client_id,
+                    storyline_filter=storyline_return_context.storyline_filter,
+                    storyline_page=storyline_return_context.storyline_page
+                ) }}">Create Action</a>
+            </p>
+        {% else %}
+            <p>
+                <a href="{{ url_for(
+                    'incident_action_new',
+                    incident_id=incident.incident_id
+                ) }}">Create Action</a>
+            </p>
+        {% endif %}
+
+        {% if linked_actions %}
+            <table>
+                <tr>
+                    <th>Created</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Title</th>
+                    <th>Assigned To</th>
+                    <th>Due</th>
+                    <th>View</th>
+                </tr>
+                {% for action in linked_actions %}
+                    <tr>
+                        <td>{{ action.created_at }}</td>
+                        <td>{{ action.priority }}</td>
+                        <td>{{ action.status }}</td>
+                        <td>{{ action.title }}</td>
+                        <td>{{ action.assigned_to or "Unassigned" }}</td>
+                        <td>{{ action.due_date or "" }}</td>
+                        <td>
+                            <a href="{{ url_for(
+                                'action_detail', action_id=action.action_id
+                            ) }}">View</a>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
+        {% else %}
+            <p>No Actions are linked to this Incident.</p>
+        {% endif %}
     {% endif %}
 </div>
 
