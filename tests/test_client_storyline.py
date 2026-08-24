@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app
+import add_behaviour_occurrences_table as behaviour_migration
 
 
 class ClientStorylineTests(unittest.TestCase):
@@ -82,6 +83,7 @@ class ClientStorylineTests(unittest.TestCase):
             INSERT INTO shift_staff VALUES (100, 10, 1, 1), (200, 20, 3, 1), (300, 10, 3, 0);
         """)
         conn.commit()
+        behaviour_migration.migrate(conn)
         conn.close()
         self.client = app.app.test_client()
 
@@ -113,6 +115,24 @@ class ClientStorylineTests(unittest.TestCase):
              incident_time, location, incident_type, description)
             VALUES (?, ?, 1, '2026-08-02', '10:00', 'Home', 'Medical', 'Details')
         """, (incident_id, client_id))
+        conn.commit()
+        conn.close()
+
+    def add_behaviour_occurrence(self, occurrence_id, client_id=1, status="Recorded"):
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO behaviour_occurrences
+            (behaviour_occurrence_id, client_id, occurred_at_utc,
+             aggression_towards_others, notes, recorded_by_user_id,
+             recorded_at_utc, submission_token, status,
+             voided_by_user_id, voided_at_utc, void_reason)
+            VALUES (?, ?, '2026-08-02T17:00:00Z', 1, 'Behaviour notes',
+                    1, '2026-08-02T17:01:00Z', ?, ?,
+                    CASE WHEN ? = 'Voided' THEN 2 ELSE NULL END,
+                    CASE WHEN ? = 'Voided' THEN '2026-08-02T17:02:00Z' ELSE NULL END,
+                    CASE WHEN ? = 'Voided' THEN 'Test void' ELSE NULL END)
+        """, (occurrence_id, client_id, f"behaviour-{occurrence_id}", status,
+               status, status, status))
         conn.commit()
         conn.close()
 
@@ -1003,6 +1023,60 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertEqual(self.client.get("/client/2/storyline").status_code, 200)
         after = sqlite3.connect(self.path).execute("SELECT count(*) FROM activity_log").fetchone()[0]
         self.assertEqual(before, after)
+
+    def test_behaviour_storyline_maps_to_detail_and_support_worker_has_no_control(self):
+        occurrence_id = 41
+        self.add_behaviour_occurrence(occurrence_id)
+        self.add_event(
+            "behaviour_occurrence_created", "Behaviour recorded",
+            details="Behaviour: Aggression toward others",
+            related_table="behaviour_occurrences", related_id=occurrence_id
+        )
+        self.login(1, "Support Worker")
+        worker_page = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"View details", worker_page)
+        self.login(2, "Program Manager")
+        manager_page = self.client.get("/client/1/storyline").data
+        self.assertIn(b'id="storyline-event-', manager_page)
+        self.assertIn(b"View details", manager_page)
+        self.assertIn(b"/manager-review/behaviour/41", manager_page)
+
+    def test_behaviour_review_is_per_manager_and_preserves_storyline_context(self):
+        occurrence_id = 42
+        self.add_behaviour_occurrence(occurrence_id)
+        self.login(2, "Program Manager")
+        detail = self.client.get(
+            "/manager-review/behaviour/42?storyline_client_id=1&"
+            "storyline_filter=Behaviour&storyline_page=2"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Behaviour notes", detail.data)
+        self.assertIn(b"filter=Behaviour", detail.data)
+        reviewed = self.client.post(
+            "/manager-review/behaviour/42/review",
+            data={"storyline_client_id": "1", "storyline_filter": "Behaviour", "storyline_page": "2"}
+        )
+        self.assertEqual(reviewed.status_code, 302)
+        self.assertIn("filter=Behaviour", reviewed.location)
+        conn = sqlite3.connect(self.path)
+        rows = conn.execute("""
+            SELECT user_id, acknowledgement_type FROM acknowledgements
+            WHERE source_table='behaviour_occurrences' AND source_id=42
+        """).fetchall()
+        conn.close()
+        self.assertEqual(rows, [(2, "Review")])
+        self.login(4, "Program Manager")
+        self.assertIn(b"Review required", self.client.get("/manager-review/behaviour/42").data)
+
+    def test_voided_behaviour_is_reviewable_and_support_worker_is_forbidden(self):
+        occurrence_id = 43
+        self.add_behaviour_occurrence(occurrence_id, status="Voided")
+        self.login(3, "Support Worker")
+        self.assertEqual(self.client.get("/manager-review/behaviour/43").status_code, 403)
+        self.login(2, "Program Manager")
+        page = self.client.get("/manager-review/behaviour/43").data
+        self.assertIn(b"Voided", page)
+        self.assertIn(b"Mark as Reviewed", page)
 
 
 if __name__ == "__main__":

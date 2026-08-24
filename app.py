@@ -1755,6 +1755,12 @@ STORYLINE_REVIEW_SOURCES = {
     "incident_created": (
         "incident_reports", "incident_review_detail"
     ),
+    "behaviour_occurrence_created": (
+        "behaviour_occurrences", "behaviour_review_detail"
+    ),
+    "behaviour_occurrence_voided": (
+        "behaviour_occurrences", "behaviour_review_detail"
+    ),
 }
 
 
@@ -1799,6 +1805,11 @@ def _storyline_source_ids_for_client(conn, client_id, candidates):
             SELECT incident_id AS source_id
             FROM incident_reports
             WHERE client_id = ? AND incident_id IN ({placeholders})
+        """,
+        "behaviour_occurrences": """
+            SELECT behaviour_occurrence_id AS source_id
+            FROM behaviour_occurrences
+            WHERE client_id = ? AND behaviour_occurrence_id IN ({placeholders})
         """,
     }
     by_table = {}
@@ -18205,6 +18216,7 @@ def client_storyline(client_id):
                 "activity_id" if detail_endpoint == "activity_review_detail"
                 else "note_id" if detail_endpoint == "shift_note_review_detail"
                 else "incident_id" if detail_endpoint == "incident_review_detail"
+                else "occurrence_id" if detail_endpoint == "behaviour_review_detail"
                 else "entry_id"
             )
             event["storyline_detail_url"] = url_for(
@@ -20343,6 +20355,115 @@ def review_incident(incident_id):
         "incident_review_detail",
         incident_id=incident_id
     ))
+
+@app.route("/manager-review/behaviour/<int:occurrence_id>")
+def behaviour_review_detail(occurrence_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_void_authority(conn, session["user_id"])
+        occurrence_row = conn.execute("""
+            SELECT bo.*, c.client_name,
+                   recorder.full_name AS recorder_name,
+                   voided_by.full_name AS voided_by_name
+            FROM behaviour_occurrences bo
+            JOIN clients c ON c.client_id = bo.client_id
+            JOIN users recorder ON recorder.user_id = bo.recorded_by_user_id
+            LEFT JOIN users voided_by ON voided_by.user_id = bo.voided_by_user_id
+            WHERE bo.behaviour_occurrence_id = ?
+        """, (occurrence_id,)).fetchone()
+        if occurrence_row is None:
+            return "Behaviour occurrence not found", 404
+
+        occurrence = dict(occurrence_row)
+        reviews = conn.execute("""
+            SELECT ack.acknowledgement_id, ack.acknowledged_at,
+                   ack.user_id, u.full_name AS reviewed_by
+            FROM acknowledgements ack
+            JOIN users u ON u.user_id = ack.user_id
+            WHERE ack.source_table = 'behaviour_occurrences'
+              AND ack.source_id = ?
+              AND ack.acknowledgement_type = 'Review'
+              AND ack.active = 1
+            ORDER BY ack.acknowledged_at, ack.acknowledgement_id
+        """, (occurrence_id,)).fetchall()
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    local_time = behaviour_utc_to_vancouver(
+        occurrence["occurred_at_utc"]
+    )
+    occurrence["local_time"] = local_time.strftime("%Y-%m-%d %H:%M")
+    occurrence["week_monday"] = get_behaviour_operational_week_start(
+        local_time
+    ).isoformat()
+    return render_template(
+        "behaviour_review_detail.html",
+        occurrence=occurrence,
+        categories=_behaviour_categories_for_row(occurrence),
+        abc_sections=_behaviour_week_abc_sections(occurrence),
+        reviews=reviews,
+        current_user_reviewed=any(
+            review["user_id"] == actor["user_id"] for review in reviews
+        ),
+        storyline_return_context=_storyline_return_context(
+            request.args, occurrence["client_id"]
+        )
+    )
+
+
+@app.route(
+    "/manager-review/behaviour/<int:occurrence_id>/review",
+    methods=["POST"]
+)
+def review_behaviour_post(occurrence_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = validate_behaviour_void_authority(conn, session["user_id"])
+        occurrence = conn.execute("""
+            SELECT behaviour_occurrence_id, client_id
+            FROM behaviour_occurrences
+            WHERE behaviour_occurrence_id = ?
+        """, (occurrence_id,)).fetchone()
+        if occurrence is None:
+            conn.rollback()
+            return "Behaviour occurrence not found", 404
+        create_acknowledgement(
+            conn,
+            source_table="behaviour_occurrences",
+            source_id=occurrence_id,
+            user_id=actor["user_id"],
+            acknowledgement_type="Review"
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return_context = _storyline_return_context(
+        request.form, occurrence["client_id"]
+    )
+    return redirect(url_for(
+        "behaviour_review_detail",
+        occurrence_id=occurrence_id,
+        **(return_context or {})
+    ))
+
 
 #####################################################################
 # MANAGER REVIEW
