@@ -18114,6 +18114,14 @@ def client_storyline(client_id):
         return redirect(url_for("login"))
 
     conn = get_db()
+    try:
+        storyline_actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
     client = conn.execute(
         "SELECT client_id, client_name, active FROM clients WHERE client_id = ?",
         (client_id,)
@@ -18186,7 +18194,10 @@ def client_storyline(client_id):
     """, parameters).fetchall()
     prepared_events = []
     management_storyline = (
-        session.get("role") in STAFF_NOTICE_MANAGEMENT_ROLES
+        storyline_actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+    )
+    support_worker_storyline = (
+        storyline_actor["role"] == "Support Worker"
     )
     candidates = [
         (
@@ -18194,7 +18205,12 @@ def client_storyline(client_id):
             event["related_id"]
         )
         for event in events
-        if management_storyline
+        if (
+            management_storyline or (
+                support_worker_storyline
+                and event["activity_type"] == "incident_created"
+            )
+        )
         and event["activity_type"] in STORYLINE_REVIEW_SOURCES
         and event["related_table"] == STORYLINE_REVIEW_SOURCES[
             event["activity_type"]
@@ -18275,7 +18291,13 @@ def client_storyline(client_id):
         event["storyline_detail_url"] = None
         event["storyline_reviewed"] = False
         if (
-            management_storyline
+            (
+                management_storyline
+                or (
+                    support_worker_storyline
+                    and event["activity_type"] == "incident_created"
+                )
+            )
             and event["activity_type"] in STORYLINE_REVIEW_SOURCES
             and event["related_table"] == STORYLINE_REVIEW_SOURCES[
                 event["activity_type"]
@@ -18303,8 +18325,12 @@ def client_storyline(client_id):
                 storyline_page=page,
             )
             event["storyline_reviewed"] = (
-                event["related_table"], event["related_id"]
-            ) in reviewed_review_sources
+                (
+                    event["related_table"], event["related_id"]
+                ) in reviewed_review_sources
+                if management_storyline
+                else False
+            )
         event["storyline_toileting_detail_url"] = (
             event["storyline_detail_url"]
             if event["activity_type"] == "toileting_event_created"
@@ -18346,6 +18372,7 @@ def client_storyline(client_id):
         page=page,
         page_count=page_count,
         total=total,
+        management_storyline=management_storyline,
     )
 
 
@@ -20258,6 +20285,14 @@ def incident_list():
         return redirect(url_for("login"))
 
     conn = get_db()
+    try:
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
     incidents = conn.execute("""
         SELECT
@@ -20322,7 +20357,10 @@ def incident_list():
         "incident_list.html",
         incidents=incidents,
         reviews_by_incident=reviews_by_incident,
-        reviewed_by_current_user=reviewed_by_current_user
+        reviewed_by_current_user=reviewed_by_current_user,
+        management_user=(
+            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+        )
     )
 
 @app.route("/manager-review/incidents/<int:incident_id>")
@@ -20330,10 +20368,16 @@ def incident_review_detail(incident_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in ["Admin", "Program Manager", "Director"]:
+    conn = get_db()
+    try:
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        conn.close()
         return "Access denied", 403
 
-    conn = get_db()
     incident = conn.execute("""
         SELECT
             ir.*,
@@ -20360,6 +20404,40 @@ def incident_review_detail(incident_id):
           AND ack.active = 1
         ORDER BY ack.acknowledged_at, ack.acknowledgement_id
     """, (incident_id,)).fetchall()
+
+    management_user = (
+        actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+    )
+    management_notes = []
+    linked_actions = []
+    if management_user:
+        management_notes = get_management_notes(
+            conn,
+            source_table="incident_reports",
+            source_id=incident_id
+        )
+        linked_actions = conn.execute("""
+            SELECT
+                ai.action_id,
+                ai.title,
+                ai.status,
+                ai.priority,
+                ai.assigned_to_user_id,
+                ai.due_date,
+                ai.created_at,
+
+                assigned_to.full_name AS assigned_to
+
+            FROM action_items ai
+
+            LEFT JOIN users assigned_to
+                ON ai.assigned_to_user_id = assigned_to.user_id
+
+            WHERE ai.source_table = 'incident_reports'
+              AND ai.source_id = ?
+
+            ORDER BY ai.created_at DESC, ai.action_id DESC
+        """, (incident_id,)).fetchall()
     conn.close()
 
     return render_template(
@@ -20367,13 +20445,239 @@ def incident_review_detail(incident_id):
         incident=incident,
         reviews=reviews,
         current_user_reviewed=any(
-            review["user_id"] == session["user_id"]
+            review["user_id"] == actor["user_id"]
             for review in reviews
         ),
+        management_user=management_user,
+        management_notes=management_notes,
+        linked_actions=linked_actions,
         storyline_return_context=_storyline_return_context(
             request.args, incident["client_id"]
         )
     )
+
+@app.route(
+    "/manager-review/incidents/<int:incident_id>/management-note",
+    methods=["POST"]
+)
+def add_incident_management_note(incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    return_context = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+        if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+            raise PermissionError(
+                "Current user is not allowed to add management notes."
+            )
+
+        incident = conn.execute("""
+            SELECT incident_id, client_id
+            FROM incident_reports
+            WHERE incident_id = ?
+        """, (incident_id,)).fetchone()
+        if incident is None:
+            conn.rollback()
+            return "Incident not found", 404
+
+        return_context = _storyline_return_context(
+            request.form,
+            incident["client_id"]
+        )
+        note_text = request.form.get("note_text", "").strip()
+        if not note_text:
+            conn.rollback()
+            return redirect(url_for(
+                "incident_review_detail",
+                incident_id=incident_id,
+                note_error="Management note text is required.",
+                **(return_context or {})
+            ))
+
+        add_management_note(
+            conn,
+            source_table="incident_reports",
+            source_id=incident_id,
+            note_text=note_text,
+            created_by_user_id=actor["user_id"],
+            visibility="management_only",
+            shift_id=None
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "incident_review_detail",
+        incident_id=incident_id,
+        **(return_context or {})
+    ))
+
+@app.route(
+    "/manager-review/incidents/<int:incident_id>/action/new",
+    methods=["GET", "POST"]
+)
+def incident_action_new(incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+        if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+            raise PermissionError(
+                "Current user is not allowed to create actions."
+            )
+
+        incident = conn.execute("""
+            SELECT
+                ir.incident_id,
+                ir.client_id,
+                ir.incident_date,
+                ir.incident_time,
+                ir.location,
+                ir.incident_type,
+                ir.severity,
+                ir.description,
+                ir.actions_taken,
+                ir.follow_up_required,
+                c.client_name
+            FROM incident_reports ir
+            JOIN clients c ON c.client_id = ir.client_id
+            WHERE ir.incident_id = ?
+        """, (incident_id,)).fetchone()
+        if incident is None:
+            conn.rollback()
+            return "Incident not found", 404
+
+        active_users = conn.execute("""
+            SELECT user_id, full_name, role
+            FROM users
+            WHERE active = 1
+            ORDER BY full_name
+        """).fetchall()
+        return_context = _storyline_return_context(
+            request.args if request.method == "GET" else request.form,
+            incident["client_id"]
+        )
+
+        if request.method == "POST":
+            title = request.form.get("title", "").strip()
+            description = request.form.get("description", "").strip()
+            priority = request.form.get("priority", "Medium").strip()
+            due_date = request.form.get("due_date", "").strip() or None
+            assigned_to_user_id = request.form.get(
+                "assigned_to_user_id", ""
+            ).strip()
+            error = None
+
+            if not title:
+                error = "Action title is required."
+            elif priority not in ["High", "Medium", "Low"]:
+                error = "Invalid priority."
+
+            if assigned_to_user_id:
+                try:
+                    assigned_to_user_id = int(assigned_to_user_id)
+                except ValueError:
+                    assigned_to_user_id = None
+                    error = "Invalid assigned user."
+                else:
+                    active_user_ids = {
+                        user["user_id"] for user in active_users
+                    }
+                    if assigned_to_user_id not in active_user_ids:
+                        error = "Invalid assigned user."
+            else:
+                assigned_to_user_id = None
+
+            if error:
+                conn.rollback()
+                return render_template(
+                    "incident_action_new.html",
+                    incident=incident,
+                    active_users=active_users,
+                    error=error,
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    due_date=due_date,
+                    assigned_to_user_id=assigned_to_user_id,
+                    storyline_return_context=return_context
+                ), 400
+
+            action_id = create_action(
+                conn,
+                title=title,
+                description=description or None,
+                source_table="incident_reports",
+                source_id=incident_id,
+                shift_id=None,
+                created_by_user_id=actor["user_id"],
+                assigned_to_user_id=assigned_to_user_id,
+                priority=priority,
+                due_date=due_date
+            )
+            conn.commit()
+            return redirect(url_for(
+                "incident_review_detail",
+                incident_id=incident_id,
+                **(return_context or {})
+            ))
+
+        default_description = (
+            f"Incident: {incident['incident_type']}\n"
+            f"Date and time: {incident['incident_date']} "
+            f"{incident['incident_time']}\n"
+            f"Client: {incident['client_name']}\n"
+            f"Location: {incident['location']}\n"
+            f"Severity: {incident['severity']}\n"
+            f"Follow-up required: "
+            f"{'Yes' if incident['follow_up_required'] else 'No'}\n"
+            f"Description: {incident['description']}"
+        )
+        if incident["actions_taken"]:
+            default_description += (
+                f"\nActions taken: {incident['actions_taken']}"
+            )
+
+        conn.rollback()
+        return render_template(
+            "incident_action_new.html",
+            incident=incident,
+            active_users=active_users,
+            error=None,
+            title=f"Incident Follow-up: {incident['incident_type']}",
+            description=default_description,
+            priority="Medium",
+            due_date=None,
+            assigned_to_user_id=None,
+            storyline_return_context=return_context
+        )
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    finally:
+        conn.close()
 
 @app.route(
     "/manager-review/incidents/<int:incident_id>/review",
@@ -20383,12 +20687,17 @@ def review_incident_post(incident_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in ["Admin", "Program Manager", "Director"]:
-        return "Access denied", 403
-
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+        if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+            raise PermissionError(
+                "Current user is not allowed to review incidents."
+            )
         incident = conn.execute("""
             SELECT incident_id, client_id
             FROM incident_reports
@@ -20402,10 +20711,14 @@ def review_incident_post(incident_id):
             conn,
             source_table="incident_reports",
             source_id=incident_id,
-            user_id=session["user_id"],
+            user_id=actor["user_id"],
             acknowledgement_type="Review"
         )
         conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
     except Exception:
         if conn.in_transaction:
             conn.rollback()
@@ -20428,7 +20741,19 @@ def review_incident(incident_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in ["Admin", "Program Manager", "Director"]:
+    conn = get_db()
+    try:
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
         return "Access denied", 403
 
     return redirect(url_for(

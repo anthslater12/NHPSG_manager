@@ -44,13 +44,15 @@
                                 class="storyline-detail-link"
                                 data-storyline-activity-id="{{ event.activity_id }}"
                             >View details</a>
-                            <span>
-                                {% if event.storyline_reviewed %}
-                                    You have reviewed this
-                                {% else %}
-                                    Review required
-                                {% endif %}
-                            </span>
+                            {% if management_storyline %}
+                                <span>
+                                    {% if event.storyline_reviewed %}
+                                        You have reviewed this
+                                    {% else %}
+                                        Review required
+                                    {% endif %}
+                                </span>
+                            {% endif %}
                         </div>
                     {% endif %}
                 </div>

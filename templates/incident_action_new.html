@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>Create Incident Action</h2>
+
+    {% if storyline_return_context %}
+        <p>
+            <a href="{{ url_for(
+                'incident_review_detail',
+                incident_id=incident.incident_id,
+                storyline_client_id=storyline_return_context.storyline_client_id,
+                storyline_filter=storyline_return_context.storyline_filter,
+                storyline_page=storyline_return_context.storyline_page
+            ) }}">
+                &larr; Back to Incident Management Review
+            </a>
+        </p>
+    {% else %}
+        <p>
+            <a href="{{ url_for(
+                'incident_review_detail',
+                incident_id=incident.incident_id
+            ) }}">
+                &larr; Back to Incident Management Review
+            </a>
+        </p>
+    {% endif %}
+
+    <h3>Source Record</h3>
+
+    <table class="management-detail-table">
+        <tr><th>Date</th><td>{{ incident.incident_date }}</td></tr>
+        <tr><th>Time</th><td>{{ incident.incident_time }}</td></tr>
+        <tr><th>Client</th><td>{{ incident.client_name }}</td></tr>
+        <tr><th>Location</th><td>{{ incident.location }}</td></tr>
+        <tr><th>Incident Type</th><td>{{ incident.incident_type }}</td></tr>
+        <tr><th>Severity</th><td>{{ incident.severity }}</td></tr>
+        <tr><th>Follow-up Required</th><td>{{ "Yes" if incident.follow_up_required else "No" }}</td></tr>
+        <tr><th>Description</th><td>{{ incident.description }}</td></tr>
+        <tr><th>Actions Taken</th><td>{{ incident.actions_taken }}</td></tr>
+    </table>
+
+    {% if error %}
+        <p class="error-message">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        {% if storyline_return_context %}
+            <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+            <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+            <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+        {% endif %}
+
+        <p>
+            <label for="title">Action Title</label><br>
+            <input type="text" id="title" name="title" value="{{ title }}" required>
+        </p>
+
+        <p>
+            <label for="description">Description</label><br>
+            <textarea id="description" name="description" rows="8">{{ description }}</textarea>
+        </p>
+
+        <p>
+            <label for="priority">Priority</label><br>
+            <select id="priority" name="priority">
+                {% for option in ("High", "Medium", "Low") %}
+                    <option value="{{ option }}" {% if priority == option %}selected{% endif %}>
+                        {{ option }}
+                    </option>
+                {% endfor %}
+            </select>
+        </p>
+
+        <p>
+            <label for="assigned_to_user_id">Assign To</label><br>
+            <select id="assigned_to_user_id" name="assigned_to_user_id">
+                <option value="">Unassigned</option>
+                {% for user in active_users %}
+                    <option value="{{ user.user_id }}" {% if assigned_to_user_id == user.user_id %}selected{% endif %}>
+                        {{ user.full_name }} &mdash; {{ user.role }}
+                    </option>
+                {% endfor %}
+            </select>
+        </p>
+
+        <p>
+            <label for="due_date">Due Date</label><br>
+            <input type="date" id="due_date" name="due_date" value="{{ due_date or '' }}">
+        </p>
+
+        <button type="submit">Create Action</button>
+    </form>
+
+</div>
+
+{% endblock %}

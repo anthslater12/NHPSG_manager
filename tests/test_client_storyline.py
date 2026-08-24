@@ -78,7 +78,44 @@ class ClientStorylineTests(unittest.TestCase):
                 reviewed_by_user_id INTEGER, reviewed_at TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
-            INSERT INTO users VALUES (1, 'Worker', 'Support Worker', 1), (2, 'Manager', 'Program Manager', 1), (3, 'Other', 'Support Worker', 1), (4, 'Second Manager', 'Program Manager', 1);
+            CREATE TABLE management_notes (
+                management_note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                note_text TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'management_only',
+                created_by_user_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                active INTEGER NOT NULL DEFAULT 1,
+                shared_at TEXT,
+                shared_by_user_id INTEGER
+            );
+            CREATE TABLE action_items (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'Open',
+                priority TEXT DEFAULT 'Medium',
+                source_table TEXT,
+                source_id INTEGER,
+                assigned_to_user_id INTEGER,
+                created_by_user_id INTEGER,
+                due_date TEXT,
+                acknowledged_at TEXT,
+                completed_at TEXT,
+                closed_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                shift_id INTEGER
+            );
+            INSERT INTO users VALUES
+                (1, 'Worker', 'Support Worker', 1),
+                (2, 'Manager', 'Program Manager', 1),
+                (3, 'Other', 'Support Worker', 1),
+                (4, 'Second Manager', 'Program Manager', 1),
+                (5, 'Admin', 'Admin', 1),
+                (6, 'Director', 'Director', 1),
+                (7, 'Inactive Worker', 'Support Worker', 0),
+                (8, 'Inactive Manager', 'Program Manager', 0);
             INSERT INTO clients VALUES (1, 'Client One', 1), (2, 'Client Two', 1);
             INSERT INTO shifts VALUES (10, 1, 'Open'), (20, 2, 'Open');
             INSERT INTO shift_staff VALUES (100, 10, 1, 1), (200, 20, 3, 1), (300, 10, 3, 0);
@@ -573,8 +610,12 @@ class ClientStorylineTests(unittest.TestCase):
 
     def test_all_management_roles_can_open_incident_detail(self):
         self.add_incident(32)
-        for role in ("Admin", "Director", "Program Manager"):
-            self.login(2, role)
+        for user_id, role in (
+            (5, "Admin"),
+            (6, "Director"),
+            (2, "Program Manager"),
+        ):
+            self.login(user_id, role)
             self.assertEqual(
                 self.client.get("/manager-review/incidents/32").status_code,
                 200
@@ -630,17 +671,87 @@ class ClientStorylineTests(unittest.TestCase):
             self.assertNotIn(b"View details", page[start:start + 700])
 
         self.login(1, "Support Worker")
-        worker_page = self.client.get("/client/1/storyline").data
-        self.assertNotIn(b"/manager-review/incidents/41", worker_page)
-        self.assertNotIn(b"View details", worker_page)
-        self.assertEqual(
-            self.client.get("/manager-review/incidents/41").status_code,
-            403
-        )
+        worker_detail = self.client.get("/manager-review/incidents/41")
+        self.assertEqual(worker_detail.status_code, 200)
+        self.assertIn(b"Details", worker_detail.data)
+        self.assertNotIn(b"Review required", worker_detail.data)
+        self.assertNotIn(b"You have reviewed this", worker_detail.data)
+        self.assertNotIn(b"Mark as Reviewed", worker_detail.data)
+        self.assertNotIn(b"review_incident_post", worker_detail.data)
+
+        worker_list = self.client.get("/incidents")
+        self.assertEqual(worker_list.status_code, 200)
+        self.assertIn(b"View details", worker_list.data)
+        self.assertNotIn(b"Add Review", worker_list.data)
+        self.assertNotIn(b">Review</a>", worker_list.data)
+
         self.assertEqual(
             self.client.post("/manager-review/incidents/41/review").status_code,
             403
         )
+
+        self.login(2, "Program Manager")
+        manager_list = self.client.get("/incidents")
+        self.assertIn(b"View details", manager_list.data)
+        self.assertGreater(
+            manager_list.data.count(b"Review"),
+            worker_list.data.count(b"Review"),
+        )
+
+    def test_support_worker_incident_storyline_detail_is_read_only(self):
+        self.add_incident(44)
+        self.add_event(
+            "incident_created", "Support-visible incident",
+            related_table="incident_reports", related_id=44
+        )
+        self.login(1, "Support Worker")
+        worker_page = self.client.get("/client/1/storyline")
+        self.assertEqual(worker_page.status_code, 200)
+        self.assertIn(b"/manager-review/incidents/44", worker_page.data)
+        self.assertIn(b"View details", worker_page.data)
+        self.assertNotIn(b"Review required", worker_page.data)
+        self.assertNotIn(b"You have reviewed this", worker_page.data)
+
+        detail = self.client.get(
+            "/manager-review/incidents/44?storyline_client_id=1&"
+            "storyline_filter=Incident&storyline_page=1"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Back to Client Storyline", detail.data)
+        self.assertNotIn(b"Mark as Reviewed", detail.data)
+        self.assertEqual(self._incident_review_count(44), 0)
+
+    def test_inactive_user_cannot_open_or_review_incident(self):
+        self.add_incident(45)
+        for user_id, role in (
+            (7, "Support Worker"),
+            (8, "Program Manager"),
+        ):
+            self.login(user_id, role)
+            self.assertEqual(
+                self.client.get("/manager-review/incidents/45").status_code,
+                403
+            )
+            self.assertEqual(
+                self.client.post("/manager-review/incidents/45/review").status_code,
+                403
+            )
+            self.assertEqual(self.client.get("/incidents").status_code, 403)
+
+    def test_missing_incident_detail_returns_404(self):
+        self.login(2, "Program Manager")
+        self.assertEqual(
+            self.client.get("/manager-review/incidents/999").status_code,
+            404
+        )
+
+    def test_legacy_incident_review_get_remains_non_mutating(self):
+        self.add_incident(46)
+        self.login(2, "Program Manager")
+        response = self.client.get("/incident/46/review")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(b"/manager-review/incidents/46", response.data)
+        self.assertEqual(self._incident_review_count(46), 0)
 
     def test_worker_cannot_view_unrelated_client(self):
         self.login()

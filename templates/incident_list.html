@@ -28,6 +28,7 @@
                 <th>Location</th>
                 <th>Reported By</th>
                 <th>Follow-up</th>
+                <th>Details</th>
                 <th>Reviewed</th>
             </tr>
 
@@ -52,6 +53,17 @@
 
                 <td>
 
+                    <a href="{{ url_for(
+                        'incident_review_detail',
+                        incident_id=incident.incident_id
+                    ) }}">
+                        View details
+                    </a>
+
+                </td>
+
+                <td>
+
                     {% if reviews_by_incident.get(incident.incident_id) %}
 
                         {% for review in reviews_by_incident[incident.incident_id] %}
@@ -61,7 +73,7 @@
 
                         {% endfor %}
 
-                        {% if incident.incident_id not in reviewed_by_current_user %}
+                        {% if management_user and incident.incident_id not in reviewed_by_current_user %}
 
                             <br>
 
@@ -73,11 +85,14 @@
                         {% endif %}
 
                     {% else %}
-
-                        <a href="{{ url_for('incident_review_detail',
-                                            incident_id=incident.incident_id) }}">
-                            Review
-                        </a>
+                        {% if management_user %}
+                            <a href="{{ url_for('incident_review_detail',
+                                                incident_id=incident.incident_id) }}">
+                                Review
+                            </a>
+                        {% else %}
+                            Read-only
+                        {% endif %}
 
                     {% endif %}
 
