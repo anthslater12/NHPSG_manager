@@ -1451,6 +1451,54 @@ def get_sleep_events(conn, shift_id):
     return events
 
 
+def get_sleep_management_actor(conn, user_id):
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to review Sleep."
+        )
+    return actor
+
+
+def get_sleep_management_event(conn, sleep_event_id):
+    row = conn.execute("""
+        SELECT
+            se.sleep_event_id,
+            se.client_id,
+            se.shift_id,
+            se.event_type,
+            se.event_datetime,
+            se.recorded_by_user_id,
+            se.note,
+            se.created_at,
+            c.client_name,
+            s.shift_date,
+            s.shift_type,
+            recorder.full_name AS recorded_by_name
+        FROM sleep_events se
+        JOIN shifts s
+          ON s.shift_id = se.shift_id
+         AND s.client_id = se.client_id
+        JOIN clients c ON c.client_id = se.client_id
+        JOIN users recorder
+          ON recorder.user_id = se.recorded_by_user_id
+        WHERE se.sleep_event_id = ?
+    """, (sleep_event_id,)).fetchone()
+    if row is None:
+        return None
+
+    event = dict(row)
+    event["event_local_display"] = behaviour_utc_to_vancouver(
+        event["event_datetime"]
+    ).strftime("%Y-%m-%d %I:%M %p")
+    event["event_type_display"] = (
+        "Fell Asleep"
+        if event["event_type"] == "fell_asleep"
+        else "Woke Up"
+    )
+    return event
+
+
 STORYLINE_FILTERS = {
     "All": None,
     "Sleep": {"sleep_fell_asleep", "sleep_woke_up"},
@@ -1761,6 +1809,12 @@ STORYLINE_REVIEW_SOURCES = {
     "behaviour_occurrence_voided": (
         "behaviour_occurrences", "behaviour_review_detail"
     ),
+    "sleep_fell_asleep": (
+        "sleep_events", "sleep_review_detail"
+    ),
+    "sleep_woke_up": (
+        "sleep_events", "sleep_review_detail"
+    ),
 }
 
 
@@ -1810,6 +1864,15 @@ def _storyline_source_ids_for_client(conn, client_id, candidates):
             SELECT behaviour_occurrence_id AS source_id
             FROM behaviour_occurrences
             WHERE client_id = ? AND behaviour_occurrence_id IN ({placeholders})
+        """,
+        "sleep_events": """
+            SELECT se.sleep_event_id AS source_id
+            FROM sleep_events se
+            JOIN shifts s
+              ON s.shift_id = se.shift_id
+             AND s.client_id = se.client_id
+            WHERE se.client_id = ?
+              AND se.sleep_event_id IN ({placeholders})
         """,
     }
     by_table = {}
@@ -18217,6 +18280,7 @@ def client_storyline(client_id):
                 else "note_id" if detail_endpoint == "shift_note_review_detail"
                 else "incident_id" if detail_endpoint == "incident_review_detail"
                 else "occurrence_id" if detail_endpoint == "behaviour_review_detail"
+                else "sleep_event_id" if detail_endpoint == "sleep_review_detail"
                 else "entry_id"
             )
             event["storyline_detail_url"] = url_for(
@@ -20461,6 +20525,103 @@ def review_behaviour_post(occurrence_id):
     return redirect(url_for(
         "behaviour_review_detail",
         occurrence_id=occurrence_id,
+        **(return_context or {})
+    ))
+
+
+@app.route("/manager-review/sleep/<int:sleep_event_id>")
+def sleep_review_detail(sleep_event_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_sleep_management_actor(conn, session["user_id"])
+        event = get_sleep_management_event(conn, sleep_event_id)
+        if event is None:
+            return "Sleep event not found", 404
+
+        reviews = conn.execute("""
+            SELECT ack.acknowledgement_id, ack.acknowledged_at,
+                   ack.user_id, u.full_name AS reviewed_by
+            FROM acknowledgements ack
+            JOIN users u ON u.user_id = ack.user_id
+            WHERE ack.source_table = 'sleep_events'
+              AND ack.source_id = ?
+              AND ack.acknowledgement_type = 'Review'
+              AND ack.active = 1
+            ORDER BY ack.acknowledged_at, ack.acknowledgement_id
+        """, (sleep_event_id,)).fetchall()
+        current_user_review = conn.execute("""
+            SELECT acknowledgement_id
+            FROM acknowledgements
+            WHERE source_table = 'sleep_events'
+              AND source_id = ?
+              AND acknowledgement_type = 'Review'
+              AND active = 1
+              AND user_id = ?
+            LIMIT 1
+        """, (sleep_event_id, actor["user_id"])).fetchone()
+    except PermissionError:
+        return "Access denied", 403
+    finally:
+        conn.close()
+
+    return render_template(
+        "sleep_review_detail.html",
+        event=event,
+        reviews=reviews,
+        current_user_reviewed=current_user_review is not None,
+        storyline_return_context=_storyline_return_context(
+            request.args, event["client_id"]
+        )
+    )
+
+
+@app.route(
+    "/manager-review/sleep/<int:sleep_event_id>/review",
+    methods=["POST"]
+)
+def review_sleep_event(sleep_event_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_sleep_management_actor(conn, session["user_id"])
+        event = get_sleep_management_event(conn, sleep_event_id)
+        if event is None:
+            conn.rollback()
+            return "Sleep event not found", 404
+
+        create_acknowledgement(
+            conn,
+            source_table="sleep_events",
+            source_id=sleep_event_id,
+            user_id=actor["user_id"],
+            acknowledgement_type="Review",
+            client_id=event["client_id"],
+            shift_id=event["shift_id"]
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return_context = _storyline_return_context(
+        request.form, event["client_id"]
+    )
+    return redirect(url_for(
+        "sleep_review_detail",
+        sleep_event_id=sleep_event_id,
         **(return_context or {})
     ))
 
