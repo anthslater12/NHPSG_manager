@@ -259,7 +259,7 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
             self.client.get("/manager-review/food-fluid/1").status_code,
             302,
         )
-        for user_id in (4, 5, 6, 999):
+        for user_id in (4, 6, 999):
             with self.subTest(user_id=user_id):
                 self.login(user_id, session_role="Admin")
                 before = self.count_rows("activity_log")
@@ -275,6 +275,16 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
                 )
                 self.assertEqual(self.count_rows("activity_log"), before)
                 self.assertEqual(self.count_rows("acknowledgements"), 0)
+
+        self.login(5, session_role="Admin")
+        self.assertEqual(
+            self.client.get("/manager-review/food-fluid/1").status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post("/manager-review/food-fluid/1/review").status_code,
+            302,
+        )
 
     def test_list_get_is_read_only_and_does_not_record_viewed(self):
         self.login(1)

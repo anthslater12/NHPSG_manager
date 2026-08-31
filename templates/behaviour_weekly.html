@@ -56,6 +56,9 @@
             {% elif can_void %}
                 <form method="post" action="{{ url_for('behaviour_occurrence_void', occurrence_id=item.behaviour_occurrence_id) }}" class="inline-form behaviour-review-void-form"><label>Void reason <input name="void_reason" required></label><button type="submit">Void record</button></form>
             {% endif %}
+            {% if can_review %}
+                <p><a href="{{ url_for('behaviour_review_detail', occurrence_id=item.behaviour_occurrence_id) }}">View details</a></p>
+            {% endif %}
         </article>
         {% endfor %}
     {% else %}<p class="behaviour-review-empty">No Behaviour episodes recorded.</p>{% endif %}

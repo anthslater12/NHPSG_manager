@@ -44,7 +44,7 @@
                                 class="storyline-detail-link"
                                 data-storyline-activity-id="{{ event.activity_id }}"
                             >View details</a>
-                            {% if management_storyline %}
+                            {% if management_storyline or behaviour_consultant_storyline %}
                                 <span>
                                     {% if event.storyline_reviewed %}
                                         You have reviewed this

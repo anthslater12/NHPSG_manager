@@ -233,7 +233,7 @@
 
     <h3>Linked Actions</h3>
 
-    <p>
+    {% if can_manage_actions %}<p>
 
         <a href="{{ url_for(
             'housekeeping_action_new',
@@ -242,7 +242,7 @@
             Create Action
         </a>
 
-    </p>
+    </p>{% endif %}
 
     {% if linked_actions %}
 

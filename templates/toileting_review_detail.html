@@ -325,7 +325,7 @@
 
     <h3>Linked Actions</h3>
 
-    <p>
+    {% if can_manage_actions %}<p>
         <a href="{{ url_for(
             'toileting_action_new',
             entry_id=entry.toileting_event_id,
@@ -335,7 +335,7 @@
         ) }}">
             Create Action
         </a>
-    </p>
+    </p>{% endif %}
 
     {% if linked_actions %}
 

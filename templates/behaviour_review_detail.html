@@ -70,5 +70,43 @@
             <button type="submit">Mark as Reviewed</button>
         </form>
     {% endif %}
+
+    <h3>Management Notes</h3>
+
+    {% if request.args.get("note_error") %}
+        <p class="error-message">
+            {{ request.args.get("note_error") }}
+        </p>
+    {% endif %}
+
+    <form method="post" action="{{ url_for(
+        'add_behaviour_management_note',
+        occurrence_id=occurrence.behaviour_occurrence_id
+    ) }}">
+        <label for="note_text">Add Management Note</label>
+        <textarea id="note_text" name="note_text" rows="4" required></textarea>
+
+        <p><small>This note is visible to Behaviour review staff only.</small></p>
+
+        {% if storyline_return_context %}
+            <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+            <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+            <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+        {% endif %}
+
+        <button type="submit">Add Management Note</button>
+    </form>
+
+    {% if management_notes %}
+        {% for note in management_notes %}
+            <div class="card">
+                <strong>{{ note.created_by_name }}</strong><br>
+                <small>{{ note.created_at }} &mdash; Management only</small>
+                <p>{{ note.note_text }}</p>
+            </div>
+        {% endfor %}
+    {% else %}
+        <p>No Management Notes have been added.</p>
+    {% endif %}
 </div>
 {% endblock %}

@@ -14,6 +14,7 @@ class ClientStorylineTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = str(Path(self.temp.name) / "storyline.db")
         self.old_db = app.DB_NAME
+        self.old_testing = app.app.config.get("TESTING")
         app.DB_NAME = self.path
         app.app.config.update(TESTING=True)
         self.addCleanup(self.cleanup)
@@ -115,7 +116,9 @@ class ClientStorylineTests(unittest.TestCase):
                 (5, 'Admin', 'Admin', 1),
                 (6, 'Director', 'Director', 1),
                 (7, 'Inactive Worker', 'Support Worker', 0),
-                (8, 'Inactive Manager', 'Program Manager', 0);
+                (8, 'Inactive Manager', 'Program Manager', 0),
+                (9, 'Consultant', 'Behaviour Consultant', 1),
+                (10, 'Inactive Consultant', 'Behaviour Consultant', 0);
             INSERT INTO clients VALUES (1, 'Client One', 1), (2, 'Client Two', 1);
             INSERT INTO shifts VALUES (10, 1, 'Open'), (20, 2, 'Open');
             INSERT INTO shift_staff VALUES (100, 10, 1, 1), (200, 20, 3, 1), (300, 10, 3, 0);
@@ -127,6 +130,7 @@ class ClientStorylineTests(unittest.TestCase):
 
     def cleanup(self):
         app.DB_NAME = self.old_db
+        app.app.config.update(TESTING=self.old_testing)
         self.temp.cleanup()
 
     def login(self, user_id=1, role="Support Worker"):
@@ -496,6 +500,32 @@ class ClientStorylineTests(unittest.TestCase):
         self.login(1, "Support Worker")
         worker_page = self.client.get("/client/1/storyline").data
         self.assertNotIn(b"View details", worker_page)
+
+        self.login(9, "Behaviour Consultant")
+        self.assertEqual(
+            self.client.post("/manager-review/care/21/review").status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post(
+                "/manager-review/housekeeping/22/review"
+            ).status_code,
+            302
+        )
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO toileting_events
+            (toileting_event_id, client_id, shift_id, event_type,
+             event_datetime, recorded_by_user_id, location)
+            VALUES (23, 1, 10, 'BM', '2026-08-02T10:00', 1, 'Bathroom')
+        """)
+        conn.commit()
+        conn.close()
+        self.assertEqual(
+            self.client.post("/manager-review/toileting/23/review").status_code,
+            302
+        )
 
     def test_supported_detail_review_controls_forward_storyline_context(self):
         templates = (
@@ -1288,6 +1318,116 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertEqual(rows, [(2, "Review")])
         self.login(4, "Program Manager")
         self.assertIn(b"Review required", self.client.get("/manager-review/behaviour/42").data)
+
+    def test_behaviour_consultant_can_review_and_add_management_note(self):
+        occurrence_id = 44
+        self.add_behaviour_occurrence(occurrence_id)
+        self.login(9, "Support Worker")
+
+        detail = self.client.get(
+            "/manager-review/behaviour/44?storyline_client_id=1&"
+            "storyline_filter=Behaviour&storyline_page=3"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Management Notes", detail.data)
+        self.assertIn(b"Add Management Note", detail.data)
+
+        reviewed = self.client.post(
+            "/manager-review/behaviour/44/review",
+            data={"storyline_client_id": "1", "storyline_filter": "Behaviour",
+                  "storyline_page": "3"}
+        )
+        self.assertEqual(reviewed.status_code, 302)
+
+        noted = self.client.post(
+            "/manager-review/behaviour/44/management-note",
+            data={"note_text": "  Consultant follow-up  ",
+                  "storyline_client_id": "1", "storyline_filter": "Behaviour",
+                  "storyline_page": "3"}
+        )
+        self.assertEqual(noted.status_code, 302)
+        self.assertIn("filter=Behaviour", noted.location)
+        conn = sqlite3.connect(self.path)
+        note = conn.execute("""
+            SELECT note_text, created_by_user_id, visibility
+            FROM management_notes
+            WHERE source_table='behaviour_occurrences' AND source_id=44
+        """).fetchone()
+        conn.close()
+        self.assertEqual(note, ("Consultant follow-up", 9, "management_only"))
+
+    def test_behaviour_consultant_matches_manager_storyline_access(self):
+        occurrence_id = 45
+        self.add_behaviour_occurrence(occurrence_id)
+        self.add_incident(45)
+        self.add_event(
+            "behaviour_occurrence_created", "Behaviour recorded",
+            related_table="behaviour_occurrences", related_id=occurrence_id
+        )
+        self.add_event(
+            "incident_created", "Incident recorded",
+            related_table="incident_reports", related_id=45
+        )
+        self.login(9, "Behaviour Consultant")
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"/manager-review/behaviour/45", page)
+        self.assertIn(b"/manager-review/incidents/45", page)
+        self.assertIn(b"Incident recorded", page)
+        self.assertNotIn(b">Edit<", page)
+
+        self.assertEqual(
+            self.client.get("/manager-review/behaviour/45").status_code, 200
+        )
+        self.assertEqual(self.client.get("/shift-task/new").status_code, 403)
+        self.assertEqual(self.client.get("/care-task/new").status_code, 403)
+        self.assertEqual(
+            self.client.get("/housekeeping-task/new").status_code, 403
+        )
+        self.assertEqual(self.client.post("/action/1").status_code, 403)
+        self.assertEqual(
+            self.client.post("/behaviour/occurrences/45/void",
+                             data={"void_reason": "not permitted"}).status_code,
+            403
+        )
+        self.assertEqual(
+            self.client.get("/manager-review/behaviour/45").status_code, 200
+        )
+
+    def test_behaviour_consultant_matches_manager_client_scope_and_history(self):
+        self.add_event("sleep_fell_asleep", "Client One history", client_id=1)
+        self.add_event("sleep_woke_up", "Client Two history", client_id=2)
+        for user_id, role in ((2, "Program Manager"), (9, "Behaviour Consultant")):
+            self.login(user_id, role)
+            client_one = self.client.get("/client/1/storyline?filter=Sleep&page=1")
+            client_two = self.client.get("/client/2/storyline?filter=Sleep&page=1")
+            self.assertEqual(client_one.status_code, 200)
+            self.assertEqual(client_two.status_code, 200)
+            self.assertIn(b"Client One history", client_one.data)
+            self.assertIn(b"Client Two history", client_two.data)
+
+    def test_behaviour_consultant_sees_storyline_navigation_link(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE clients SET active = 0 WHERE client_id = 2")
+        conn.commit()
+        conn.close()
+        self.login(9, "Behaviour Consultant")
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b'href="/client/1/storyline"', page)
+        self.assertIn(b"Storyline", page)
+
+    def test_inactive_behaviour_consultant_and_support_worker_remain_forbidden(self):
+        occurrence_id = 46
+        self.add_behaviour_occurrence(occurrence_id)
+        for user_id in (3, 10):
+            self.login(user_id, "Behaviour Consultant")
+            self.assertEqual(
+                self.client.get(f"/manager-review/behaviour/{occurrence_id}").status_code,
+                403
+            )
+            self.assertEqual(
+                self.client.post(f"/manager-review/behaviour/{occurrence_id}/review").status_code,
+                403
+            )
 
     def test_voided_behaviour_is_reviewable_and_support_worker_is_forbidden(self):
         occurrence_id = 43

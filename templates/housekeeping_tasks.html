@@ -11,10 +11,12 @@
     </div>
 
     <div>
-        <a href="{{ url_for('housekeeping_task_new') }}"
-           class="button">
-            Add Task
-        </a>
+        {% if can_manage_tasks %}
+            <a href="{{ url_for('housekeeping_task_new') }}"
+               class="button">
+                Add Task
+            </a>
+        {% endif %}
     </div>
 </div>
 
@@ -57,7 +59,7 @@
                     <th>Timing</th>
                     <th>Required</th>
                     <th>Status</th>
-                    <th>Actions</th>
+                    {% if can_manage_tasks %}<th>Actions</th>{% endif %}
                 </tr>
             </thead>
 
@@ -120,7 +122,7 @@
                             {% endif %}
                         </td>
 
-                        <td>
+                        {% if can_manage_tasks %}<td>
 
                             <a href="{{ url_for(
                                 'housekeeping_task_edit',
@@ -154,7 +156,7 @@
 
                             {% endif %}
 
-                        </td>
+                        </td>{% endif %}
 
                     </tr>
 

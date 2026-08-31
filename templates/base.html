@@ -101,6 +101,30 @@
             Activity Log
         </a>
 
+    {% elif session.role == "Behaviour Consultant" %}
+
+        {% if management_storyline_url %}
+            <a href="{{ management_storyline_url }}">
+                Storyline
+            </a>
+        {% endif %}
+
+        <a href="{{ url_for('actions') }}">
+            Actions
+        </a>
+
+        <a href="{{ url_for('care_tasks') }}">
+            Care Routine
+        </a>
+
+        <a href="{{ url_for('housekeeping_tasks') }}">
+            Housekeeping
+        </a>
+
+        <a href="{{ url_for('shift_tasks') }}">
+            Shift Tasks
+        </a>
+
     {% endif %}
 
     <a href="{{ url_for('logout') }}">

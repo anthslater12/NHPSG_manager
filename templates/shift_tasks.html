@@ -5,7 +5,9 @@
 <div class="card">
     <h2>Shift Tasks</h2>
 
-    <p><a href="/shift-task/new">+ Add Shift Task</a></p>
+    {% if can_manage_tasks %}
+        <p><a href="/shift-task/new">+ Add Shift Task</a></p>
+    {% endif %}
 
     <p>
         Show:
@@ -47,7 +49,7 @@
                 <th>Instructions</th>
                 <th>Required</th>
                 <th>Status</th>
-				<th>Action</th>
+				{% if can_manage_tasks %}<th>Action</th>{% endif %}
             </tr>
 
             {% for task in tasks %}
@@ -64,7 +66,7 @@
     				{% endif %}
 				</td>
 
-				<td>
+				{% if can_manage_tasks %}<td>
 					<a href="{{ url_for('shift_task_edit', shift_task_id=task.shift_task_id, status=status_filter) }}">Edit</a>
 
 					{% if task.active %}
@@ -72,7 +74,7 @@
 					{% else %}
 						| <a href="{{ url_for('shift_task_reactivate', shift_task_id=task.shift_task_id, status=status_filter) }}">Reactivate</a>
 					{% endif %}
-				</td>
+				</td>{% endif %}
 			</tr>
 			{% endfor %}
         </table>

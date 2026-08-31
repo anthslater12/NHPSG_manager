@@ -205,14 +205,14 @@
 
     <h3>Linked Actions</h3>
 
-    <p>
+    {% if can_manage_actions %}<p>
         <a href="{{ url_for(
             'shift_note_action_new',
             note_id=entry.note_id
         ) }}">
             Create Action
         </a>
-    </p>
+    </p>{% endif %}
 
     {% if linked_actions %}
 
