@@ -31,6 +31,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = str(Path(self.temp.name) / "storyline.db")
         self.old_db_name = app.DB_NAME
+        self.old_testing = app.app.config.get("TESTING")
         app.DB_NAME = self.path
         app.app.config.update(TESTING=True)
         self.addCleanup(self.cleanup)
@@ -39,6 +40,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
 
     def cleanup(self):
         app.DB_NAME = self.old_db_name
+        app.app.config["TESTING"] = self.old_testing
         self.temp.cleanup()
 
     def create_database(self):
