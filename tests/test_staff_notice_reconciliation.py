@@ -8,6 +8,7 @@ from unittest import mock
 
 import app
 import add_staff_notices_tables as staff_notice_schema
+import add_sleep_events_table as sleep_events_schema
 
 
 class ReconciliationTrackingConnection:
@@ -216,6 +217,7 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 INSERT INTO clients (client_id, client_name, active)
                 VALUES (1, 'Active Client', 1)
             """)
+            sleep_events_schema.migrate(conn)
             conn.commit()
         finally:
             conn.close()
