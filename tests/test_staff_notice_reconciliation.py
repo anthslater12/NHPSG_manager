@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import app
+import add_leave_requests_table as leave_requests_schema
 import add_staff_notices_tables as staff_notice_schema
 import add_sleep_events_table as sleep_events_schema
 
@@ -202,6 +203,8 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
 
             for sql in staff_notice_schema.INDEX_SQL.values():
                 conn.execute(sql)
+
+            leave_requests_schema.migrate(conn)
 
             conn.executemany("""
                 INSERT INTO users (user_id, full_name, role, active)
@@ -729,16 +732,48 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                     ORDER BY name
                 """).fetchall()
             ]
-            return {
+            snapshot = {
                 table_name: tuple(
-                    conn.execute(
+                    tuple(row)
+                    for row in conn.execute(
                         f'SELECT * FROM "{table_name}" ORDER BY rowid'
                     ).fetchall()
                 )
                 for table_name in table_names
             }
+            snapshot["__schema__"] = tuple(
+                tuple(row)
+                for row in conn.execute("""
+                    SELECT type, name, tbl_name, sql
+                    FROM sqlite_master
+                    WHERE name NOT LIKE 'sqlite_%'
+                    ORDER BY type, name
+                """).fetchall()
+            )
+            return snapshot
         finally:
             conn.close()
+
+    def test_database_snapshot_is_value_based_and_detects_changes(self):
+        first = self.database_snapshot()
+        second = self.database_snapshot()
+        self.assertEqual(first, second)
+
+        conn = self.open_database()
+        try:
+            conn.execute("UPDATE clients SET client_name = 'Changed' WHERE client_id = 1")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertNotEqual(first, self.database_snapshot())
+
+        conn = self.open_database()
+        try:
+            conn.execute("CREATE TABLE snapshot_schema_probe (probe_id INTEGER)")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertNotEqual(first, self.database_snapshot())
 
     def test_union_eligibility_opens_once_with_deterministic_sources(self):
         fixture = self.create_published_notice(
