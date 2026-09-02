@@ -7,6 +7,7 @@ from unittest import mock
 from werkzeug.datastructures import MultiDict
 
 import app
+import add_leave_requests_table as leave_requests_schema
 import add_staff_notices_tables as staff_notice_schema
 
 
@@ -189,6 +190,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
 
             for sql in staff_notice_schema.INDEX_SQL.values():
                 conn.execute(sql)
+
+            leave_requests_schema.migrate(conn)
 
             conn.executemany("""
                 INSERT INTO users (user_id, full_name, role, active)
@@ -692,7 +695,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
             ]
             return {
                 table_name: tuple(
-                    conn.execute(
+                    tuple(row)
+                    for row in conn.execute(
                         f'SELECT * FROM "{table_name}" ORDER BY rowid'
                     ).fetchall()
                 )
