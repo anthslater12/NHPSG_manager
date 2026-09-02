@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import app
+import add_leave_requests_table as leave_requests_schema
 import add_staff_notices_tables as staff_notice_schema
 
 
@@ -192,6 +193,8 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
 
             for sql in staff_notice_schema.INDEX_SQL.values():
                 conn.execute(sql)
+
+            leave_requests_schema.migrate(conn)
 
             conn.executemany("""
                 INSERT INTO users (user_id, full_name, role, active)
@@ -454,11 +457,14 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
         conn = sqlite3.connect(self.database_path)
 
         try:
-            objects = tuple(conn.execute("""
-                SELECT type, name, tbl_name, sql
-                FROM sqlite_master
-                ORDER BY type, name
-            """).fetchall())
+            objects = tuple(
+                tuple(row)
+                for row in conn.execute("""
+                    SELECT type, name, tbl_name, sql
+                    FROM sqlite_master
+                    ORDER BY type, name
+                """).fetchall()
+            )
             table_names = [
                 row[0]
                 for row in conn.execute("""
@@ -471,14 +477,16 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
             ]
             rows = {
                 table_name: tuple(
-                    conn.execute(
+                    tuple(row)
+                    for row in conn.execute(
                         f'SELECT * FROM "{table_name}" ORDER BY rowid'
                     ).fetchall()
                 )
                 for table_name in table_names
             }
             sequence = tuple(
-                conn.execute(
+                tuple(row)
+                for row in conn.execute(
                     "SELECT * FROM sqlite_sequence ORDER BY name"
                 ).fetchall()
             )
