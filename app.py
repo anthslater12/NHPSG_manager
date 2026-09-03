@@ -23,6 +23,7 @@ import re
 import secrets
 import add_leave_requests_table
 import add_sleep_events_note
+import mail_service
 
 app = Flask(__name__)
 app.secret_key = "change-this-later"
@@ -841,6 +842,188 @@ def _schedule_staff_view_context(conn, week_start, client_id):
             str(worker["user_id"]) for worker in ordered_workers
         ),
     }
+
+
+def _schedule_worker_email_context(conn, week_start, client_id, user_id):
+    """Return one worker's published assignments for one client and week."""
+    dates = [week_start + timedelta(days=offset) for offset in range(7)]
+    end_date = dates[-1]
+
+    worker = conn.execute("""
+        SELECT user_id, full_name, email_address, active, role
+        FROM users
+        WHERE user_id = ?
+    """, (user_id,)).fetchone()
+
+    if worker is None:
+        raise LookupError("Schedule worker not found.")
+
+    if worker["role"] != "Support Worker":
+        raise ValueError("Schedule email recipient must be a Support Worker.")
+
+    if worker["active"] != 1:
+        raise ValueError("Schedule email recipient must be active.")
+
+    assignments = conn.execute("""
+        SELECT st.schedule_staff_id,
+               ss.shift_date,
+               ss.shift_type,
+               COALESCE(NULLIF(TRIM(st.planned_start_time), ''),
+                        ss.planned_start_time) AS planned_start_time,
+               COALESCE(NULLIF(TRIM(st.planned_end_time), ''),
+                        ss.planned_end_time) AS planned_end_time
+        FROM schedule_staff AS st
+        JOIN schedule_shifts AS ss
+          ON ss.schedule_shift_id = st.schedule_shift_id
+        WHERE ss.client_id = ?
+          AND st.user_id = ?
+          AND ss.shift_date BETWEEN ? AND ?
+          AND ss.status = 'Published'
+        ORDER BY ss.shift_date,
+                 st.planned_start_time,
+                 st.schedule_staff_id
+    """, (
+        client_id,
+        user_id,
+        week_start.isoformat(),
+        end_date.isoformat(),
+    )).fetchall()
+
+    date_indexes = {
+        day.isoformat(): index
+        for index, day in enumerate(dates)
+    }
+
+    day_assignments = [[] for _ in dates]
+
+    for row in assignments:
+        start_minutes = _schedule_matrix_time_minutes(
+            row["planned_start_time"]
+        )
+        end_minutes = _schedule_matrix_time_minutes(
+            row["planned_end_time"]
+        )
+        day_index = date_indexes.get(row["shift_date"])
+
+        if (
+            start_minutes is None
+            or end_minutes is None
+            or day_index is None
+        ):
+            app.logger.warning(
+                "Skipping invalid worker email assignment "
+                "schedule_staff_id=%s",
+                row["schedule_staff_id"],
+            )
+            continue
+
+        day_assignments[day_index].append({
+            "schedule_staff_id": row["schedule_staff_id"],
+            "shift_type": row["shift_type"],
+            "start_display": _format_schedule_time(
+                row["planned_start_time"]
+            ),
+            "end_display": _format_schedule_time(
+                row["planned_end_time"]
+            ),
+            "start_minutes": start_minutes,
+            "end_minutes": end_minutes,
+            "overnight": (
+                row["shift_type"] == "Overnight"
+                and end_minutes < start_minutes
+            ),
+        })
+
+    days = []
+
+    for index, day in enumerate(dates):
+        sorted_assignments = sorted(
+            day_assignments[index],
+            key=lambda assignment: (
+                assignment["start_minutes"],
+                assignment["end_minutes"],
+                assignment["shift_type"],
+                assignment["schedule_staff_id"],
+            ),
+        )
+
+        days.append({
+            "weekday": day.strftime("%A"),
+            "date_display": f"{day.strftime('%b')} {day.day}",
+            "date_iso": day.isoformat(),
+            "assignments": sorted_assignments,
+        })
+
+    return {
+        "user_id": worker["user_id"],
+        "full_name": worker["full_name"],
+        "email_address": worker["email_address"],
+        "week_start": week_start,
+        "week_end": end_date,
+        "days": days,
+        "assignment_count": sum(
+            len(day["assignments"])
+            for day in days
+        ),
+    }
+
+
+def _render_schedule_worker_email_body(context):
+    """Return a plain-text weekly schedule email for one worker."""
+    lines = [
+        f"Hello {context['full_name']},",
+        "",
+        (
+            "Here is your NHPSG schedule for "
+            f"{context['week_start'].strftime('%B')} "
+            f"{context['week_start'].day}, "
+            f"{context['week_start'].year} to "
+            f"{context['week_end'].strftime('%B')} "
+            f"{context['week_end'].day}, "
+            f"{context['week_end'].year}."
+        ),
+        "",
+    ]
+
+    scheduled_days = 0
+
+    for day in context["days"]:
+        assignments = day["assignments"]
+
+        if not assignments:
+            continue
+
+        scheduled_days += 1
+
+        lines.append(
+            f"{day['weekday']}, {day['date_display']}"
+        )
+
+        for assignment in assignments:
+            shift_label = assignment["shift_type"]
+
+            lines.append(
+                "  "
+                f"{assignment['start_display']} - "
+                f"{assignment['end_display']} "
+                f"({shift_label})"
+            )
+
+        lines.append("")
+
+    if scheduled_days == 0:
+        lines.extend([
+            "You have no scheduled shifts for this week.",
+            "",
+        ])
+
+    lines.extend([
+        "If you believe this schedule is incorrect, please contact your manager.",
+        "",
+        "NHPSG Manager",
+    ])
+
+    return "\n".join(lines)
 
 
 def _schedule_matrix_time_minutes(value):
@@ -3588,6 +3771,261 @@ def schedule_week_publish(client_id, monday):
         except Exception:
             conn.rollback()
             return "Schedule could not be published.", 500
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/schedule/client/<int:client_id>/week/<monday>/email-staff",
+    methods=["POST"],
+)
+def schedule_week_email_staff(client_id, monday):
+    """Validate a published week and identify workers eligible for schedule email."""
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+
+    try:
+        try:
+            _schedule_management_user(conn)
+        except PermissionError:
+            return "Access denied", 403
+
+        client = conn.execute("""
+            SELECT client_id, client_name
+            FROM clients
+            WHERE client_id = ?
+              AND active = 1
+        """, (client_id,)).fetchone()
+
+        if client is None:
+            return "Client not found", 404
+
+        try:
+            week_start = _parse_schedule_monday(monday)
+        except ValueError as error:
+            return str(error), 404
+
+        publication_state = _schedule_week_publication_state(
+            conn,
+            week_start,
+            client_id,
+        )
+
+        if publication_state["state"] != "Published":
+            flash(
+                "Staff schedules can be emailed only after the "
+                "schedule week has been fully published."
+            )
+            return redirect(url_for(
+                "schedule_week",
+                client_id=client_id,
+                monday=week_start.isoformat(),
+            ))
+
+        end_date = week_start + timedelta(days=6)
+
+        recipient_rows = conn.execute("""
+            SELECT DISTINCT u.user_id
+            FROM schedule_staff AS st
+            JOIN schedule_shifts AS ss
+              ON ss.schedule_shift_id = st.schedule_shift_id
+            JOIN users AS u
+              ON u.user_id = st.user_id
+            WHERE ss.client_id = ?
+              AND ss.shift_date BETWEEN ? AND ?
+              AND ss.status = 'Published'
+              AND u.active = 1
+              AND u.role = 'Support Worker'
+            ORDER BY u.user_id
+        """, (
+            client_id,
+            week_start.isoformat(),
+            end_date.isoformat(),
+        )).fetchall()
+
+        if not recipient_rows:
+            flash(
+                "There are no active Support Workers scheduled "
+                "for this published week."
+            )
+            return redirect(url_for(
+                "schedule_week",
+                client_id=client_id,
+                monday=week_start.isoformat(),
+            ))
+
+        recipient_contexts = []
+
+        for row in recipient_rows:
+            context = _schedule_worker_email_context(
+                conn,
+                week_start,
+                client_id,
+                row["user_id"],
+            )
+
+            if context["assignment_count"] > 0:
+                recipient_contexts.append(context)
+
+        if not recipient_contexts:
+            flash(
+                "There are no eligible staff schedules to email "
+                "for this published week."
+            )
+            return redirect(url_for(
+                "schedule_week",
+                client_id=client_id,
+                monday=week_start.isoformat(),
+            ))
+
+        missing_email_names = [
+            context["full_name"]
+            for context in recipient_contexts
+            if not context["email_address"]
+        ]
+
+        ready_contexts = [
+            context
+            for context in recipient_contexts
+            if context["email_address"]
+        ]
+
+        if not ready_contexts:
+            flash(
+                "No schedules were emailed because none of the "
+                "scheduled Support Workers have an email address."
+            )
+
+            if missing_email_names:
+                flash(
+                    "Missing email address: "
+                    + ", ".join(missing_email_names)
+                    + "."
+                )
+
+            return redirect(url_for(
+                "schedule_week",
+                client_id=client_id,
+                monday=week_start.isoformat(),
+            ))
+
+        sent_count = 0
+        failed_names = []
+
+        subject = (
+            "NHPSG Schedule - "
+            f"Week of {week_start.isoformat()}"
+        )
+
+        for context in ready_contexts:
+            body = _render_schedule_worker_email_body(context)
+
+            try:
+                mail_service.send_email(
+                    context["email_address"],
+                    subject,
+                    body,
+                )
+            except Exception:
+                app.logger.exception(
+                    "Could not email staff schedule "
+                    "for user_id=%s",
+                    context["user_id"],
+                )
+
+                failed_names.append(context["full_name"])
+
+                try:
+                    log_activity(
+                        conn,
+                        "SCHEDULE",
+                        "schedule_staff_email_failed",
+                        f"Schedule email failed for {context['full_name']}",
+                        user_id=session["user_id"],
+                        client_id=client_id,
+                        related_table="users",
+                        related_id=context["user_id"],
+                        details=(
+                            f"Worker user ID: {context['user_id']}\n"
+                            f"Week start: {week_start.isoformat()}\n"
+                            f"Week end: {end_date.isoformat()}\n"
+                            f"Assignments attempted: {context['assignment_count']}"
+                        ),
+                        success=0,
+                        storyline_visible=False,
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    app.logger.exception(
+                        "Could not record failed schedule-email audit "
+                        "for user_id=%s",
+                        context["user_id"],
+                    )
+
+                continue
+
+            sent_count += 1
+
+            try:
+                log_activity(
+                    conn,
+                    "SCHEDULE",
+                    "schedule_staff_email_sent",
+                    f"Schedule emailed to {context['full_name']}",
+                    user_id=session["user_id"],
+                    client_id=client_id,
+                    related_table="users",
+                    related_id=context["user_id"],
+                    details=(
+                        f"Worker user ID: {context['user_id']}\n"
+                        f"Week start: {week_start.isoformat()}\n"
+                        f"Week end: {end_date.isoformat()}\n"
+                        f"Assignments emailed: {context['assignment_count']}"
+                    ),
+                    storyline_visible=False,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                app.logger.exception(
+                    "Could not record successful schedule-email audit "
+                    "for user_id=%s",
+                    context["user_id"],
+                )
+
+        if sent_count:
+            flash(
+                f"Emailed {sent_count} staff schedule(s)."
+            )
+
+        if missing_email_names:
+            flash(
+                "Missing email address: "
+                + ", ".join(missing_email_names)
+                + "."
+            )
+
+        if failed_names:
+            flash(
+                "Schedule email failed for: "
+                + ", ".join(failed_names)
+                + "."
+            )
+
+        if not sent_count:
+            flash(
+                "No staff schedules were emailed."
+            )
+
+        return redirect(url_for(
+            "schedule_week",
+            client_id=client_id,
+            monday=week_start.isoformat(),
+        ))
+
     finally:
         conn.close()
 
@@ -16540,6 +16978,38 @@ def manager_alerts():
 # USER MANAGEMENT
 #####################################################################
 
+def _normalize_user_email_address(value):
+    """Return a normalized optional staff email address."""
+    email_address = (value or "").strip()
+
+    if not email_address:
+        return None
+
+    if len(email_address) > 254:
+        raise ValueError("Email address is too long.")
+
+    if any(character.isspace() for character in email_address):
+        raise ValueError("Email address cannot contain spaces.")
+
+    if email_address.count("@") != 1:
+        raise ValueError("Enter a valid email address.")
+
+    local_part, domain_part = email_address.split("@", 1)
+
+    if not local_part or not domain_part:
+        raise ValueError("Enter a valid email address.")
+
+    if local_part.startswith(".") or local_part.endswith("."):
+        raise ValueError("Enter a valid email address.")
+
+    if domain_part.startswith(".") or domain_part.endswith("."):
+        raise ValueError("Enter a valid email address.")
+
+    if "." not in domain_part:
+        raise ValueError("Enter a valid email address.")
+
+    return email_address
+
 @app.route("/users")
 def users():
     if "user_id" not in session:
@@ -16564,7 +17034,7 @@ def users():
     conn = get_db()
 
     query = """
-        SELECT user_id, username, full_name, role, active
+        SELECT user_id, username, full_name, email_address, role, active
         FROM users
     """
 
@@ -16620,9 +17090,18 @@ def user_new():
         role = request.form["role"]
         password = request.form["password"]
 
-        if not username or not full_name or not password:
+        try:
+            email_address = _normalize_user_email_address(
+                request.form.get("email_address")
+            )
+        except ValueError as validation_error:
+            email_address = None
+            error = str(validation_error)
+
+        if error is None and (not username or not full_name or not password):
             error = "Username, full name, and password are required."
-        else:
+
+        if error is None:
             from werkzeug.security import generate_password_hash
 
             conn = get_db()
@@ -16639,13 +17118,14 @@ def user_new():
                     )
                 cur = conn.execute("""
                     INSERT INTO users
-                    (username, password_hash, full_name, role, active,
+                    (username, password_hash, full_name, email_address, role, active,
                      must_change_password)
-                    VALUES (?, ?, ?, ?, 1, 1)
+                    VALUES (?, ?, ?, ?, ?, 1, 1)
                 """, (
                     username,
                     generate_password_hash(password),
                     full_name,
+                    email_address,
                     role
                 ))
                 new_user_id = cur.lastrowid
@@ -16667,7 +17147,7 @@ def user_new():
                     changed_at_utc
                 )
                 created_user = conn.execute("""
-                    SELECT username, full_name, role, active
+                    SELECT username, full_name, email_address, role, active
                     FROM users
                     WHERE user_id = ?
                 """, (new_user_id,)).fetchone()
@@ -16675,6 +17155,7 @@ def user_new():
                     created_user is None
                     or created_user["username"] != username
                     or created_user["full_name"] != full_name
+                    or created_user["email_address"] != email_address
                     or created_user["role"] != role
                     or created_user["active"] != 1
                 ):
@@ -16741,7 +17222,7 @@ def user_edit(user_id):
         return "Access denied", 403
 
     user = conn.execute("""
-        SELECT user_id, username, full_name, role, active
+        SELECT user_id, username, full_name, email_address, role, active
         FROM users
         WHERE user_id = ?
     """, (user_id,)).fetchone()
@@ -16758,10 +17239,17 @@ def user_edit(user_id):
         full_name = request.form["full_name"].strip()
         role = request.form["role"]
         active = 1 if "active" in request.form else 0
+        try:
+            email_address = _normalize_user_email_address(
+                request.form.get("email_address")
+            )
+        except ValueError as validation_error:
+            email_address = None
+            error = str(validation_error)
 
-        if not username or not full_name:
+        if error is None and (not username or not full_name):
             error = "Username and full name are required."
-        else:
+        if error is None:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 changed_at_utc = get_application_now_utc()
@@ -16774,7 +17262,7 @@ def user_edit(user_id):
                         "Current user is not allowed to manage users."
                     )
                 current_user = conn.execute("""
-                    SELECT user_id, username, full_name, role, active
+                    SELECT user_id, username, full_name, email_address, role, active
                     FROM users
                     WHERE user_id = ?
                 """, (user_id,)).fetchone()
@@ -16783,6 +17271,7 @@ def user_edit(user_id):
                 if (
                     current_user["username"] != user["username"]
                     or current_user["full_name"] != user["full_name"]
+                    or current_user["email_address"] != user["email_address"]
                     or current_user["role"] != user["role"]
                     or current_user["active"] != user["active"]
                 ):
@@ -16793,6 +17282,7 @@ def user_edit(user_id):
                 if (
                     current_user["username"] == username
                     and current_user["full_name"] == full_name
+                    and current_user["email_address"] == email_address
                     and current_user["role"] == role
                     and current_user["active"] == active
                 ):
@@ -16804,20 +17294,23 @@ def user_edit(user_id):
 
                 cursor = conn.execute("""
                     UPDATE users
-                    SET username = ?, full_name = ?, role = ?, active = ?
+                    SET username = ?, full_name = ?, email_address = ?, role = ?, active = ?
                     WHERE user_id = ?
                       AND username = ?
                       AND full_name = ?
+                      AND email_address IS ?
                       AND role = ?
                       AND active = ?
                 """, (
                     username,
                     full_name,
+                    email_address,
                     role,
                     active,
                     user_id,
                     current_user["username"],
                     current_user["full_name"],
+                    current_user["email_address"],
                     current_user["role"],
                     current_user["active"]
                 ))
@@ -16857,7 +17350,7 @@ def user_edit(user_id):
                         changed_at_utc
                     )
                 verified_user = conn.execute("""
-                    SELECT username, full_name, role, active
+                    SELECT username, full_name, email_address, role, active
                     FROM users
                     WHERE user_id = ?
                 """, (user_id,)).fetchone()
@@ -16865,6 +17358,7 @@ def user_edit(user_id):
                     verified_user is None
                     or verified_user["username"] != username
                     or verified_user["full_name"] != full_name
+                    or verified_user["email_address"] != email_address
                     or verified_user["role"] != role
                     or verified_user["active"] != active
                 ):

@@ -39,6 +39,7 @@
         <tr>
             <th>Name</th>
             <th>Username</th>
+            <th>Email</th>
             <th>Role</th>
             <th>Status</th>
             <th>Action</th>
@@ -48,6 +49,13 @@
         <tr class="{% if user.active %}row-active{% else %}row-inactive{% endif %}">
             <td>{{ user.full_name }}</td>
             <td>{{ user.username }}</td>
+            <td>
+                {% if user.email_address %}
+                    {{ user.email_address }}
+                {% else %}
+                    <span class="text-muted">Not set</span>
+                {% endif %}
+            </td>
             <td>{{ user.role }}</td>
             <td>
                 {% if user.active %}

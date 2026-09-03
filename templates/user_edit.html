@@ -13,6 +13,14 @@
         <label>Full Name</label>
         <input type="text" name="full_name" value="{{ user.full_name }}" required>
 
+        <label>Email Address</label>
+        <input
+            type="email"
+            name="email_address"
+            value="{{ user.email_address or '' }}"
+            autocomplete="email"
+        >
+
         <label>Username</label>
         <input type="text" name="username" value="{{ user.username }}" required>
 

@@ -17,6 +17,14 @@
         <button type="submit">Publish Schedule</button>
     </form>
     {% endif %}
+    {% if publication_state.state == "Published" %}
+    <form method="post"
+          action="{{ url_for('schedule_week_email_staff', client_id=client_id, monday=monday.isoformat()) }}"
+          data-confirm="Email each scheduled Support Worker their own schedule for {{ monday.isoformat() }} to {{ week_end.isoformat() }}?&#10;&#10;Each worker will receive only their own assignments."
+          onsubmit="return confirm(this.dataset.confirm)">
+        <button type="submit">Email Staff Schedules</button>
+    </form>
+    {% endif %}
     {% endif %}
 
     {% if can_manage %}

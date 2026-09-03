@@ -13,6 +13,14 @@ class DocumentationContextPhase2Tests(unittest.TestCase):
     NOW = datetime(2026, 8, 10, 19, 0, tzinfo=timezone.utc)
 
     def setUp(self):
+        self.now_patcher = mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=self.NOW,
+        )
+        self.now_patcher.start()
+        self.addCleanup(self.now_patcher.stop)
+
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.database_path = str(

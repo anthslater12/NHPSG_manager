@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     full_name TEXT NOT NULL,
+    email_address TEXT,
     role TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
 )

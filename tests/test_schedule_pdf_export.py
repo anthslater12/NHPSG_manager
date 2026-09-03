@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,9 +21,7 @@ class SchedulePdfExportTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.old_db = app.DB_NAME
         app.DB_NAME = os.path.join(self.temp.name, "schedule.db")
-        self.monday = app.get_schedule_operational_week_start(
-            datetime.now(app.VANCOUVER_TIMEZONE)
-        )
+        self.monday = date(2026, 8, 3)
         conn = sqlite3.connect(app.DB_NAME)
         conn.executescript("""
             CREATE TABLE users (

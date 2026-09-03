@@ -3,7 +3,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -14,8 +15,31 @@ import add_schedule_tables
 import app
 
 
+class FixedScheduleDateTime(datetime):
+    """Keep Schedule Staff View tests independent of the real calendar."""
+
+    @classmethod
+    def now(cls, tz=None):
+        fixed = cls(
+            2026,
+            8,
+            9,
+            12,
+            0,
+            0,
+            tzinfo=app.VANCOUVER_TIMEZONE,
+        )
+
+        if tz is None:
+            return fixed.replace(tzinfo=None)
+
+        return fixed.astimezone(tz)
+
+
 class ScheduleStaffViewTests(unittest.TestCase):
     def setUp(self):
+        self.old_datetime = app.datetime
+        app.datetime = FixedScheduleDateTime
         self.temp = tempfile.TemporaryDirectory()
         self.old_db = app.DB_NAME
         app.DB_NAME = os.path.join(self.temp.name, "schedule.db")
@@ -26,6 +50,7 @@ class ScheduleStaffViewTests(unittest.TestCase):
                 username TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 full_name TEXT NOT NULL,
+                email_address TEXT,
                 role TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1
             );
@@ -51,14 +76,14 @@ class ScheduleStaffViewTests(unittest.TestCase):
                 event_datetime TEXT
             );
             INSERT INTO users VALUES
-                (1, 'admin', 'hash', 'Alex Manager', 'Admin', 1),
-                (2, 'anne', 'hash', 'Anne Worker', 'Support Worker', 1),
-                (3, 'zara', 'hash', 'Zara Worker', 'Support Worker', 1),
-                (4, 'historical', 'hash', 'Historical Worker', 'Support Worker', 0),
-                (5, 'unused', 'hash', 'Unused Worker', 'Support Worker', 0),
-                (6, 'director', 'hash', 'Dana Director', 'Director', 1),
-                (7, 'manager', 'hash', 'Morgan Manager', 'Program Manager', 1),
-                (8, 'worker', 'hash', 'Sam Worker', 'Support Worker', 1);
+                (1, 'admin', 'hash', 'Alex Manager', 'admin@example.com', 'Admin', 1),
+                (2, 'anne', 'hash', 'Anne Worker', 'anne@example.com', 'Support Worker', 1),
+                (3, 'zara', 'hash', 'Zara Worker', 'zara@example.com', 'Support Worker', 1),
+                (4, 'historical', 'hash', 'Historical Worker', 'historical@example.com', 'Support Worker', 0),
+                (5, 'unused', 'hash', 'Unused Worker', 'unused@example.com', 'Support Worker', 0),
+                (6, 'director', 'hash', 'Dana Director', 'director@example.com', 'Director', 1),
+                (7, 'manager', 'hash', 'Morgan Manager', 'manager@example.com', 'Program Manager', 1),
+                (8, 'worker', 'hash', 'Sam Worker', 'sam@example.com', 'Support Worker', 1);
             INSERT INTO clients VALUES
                 (10, 'Client Ten', 1),
                 (20, 'Client Twenty', 1);
@@ -70,6 +95,7 @@ class ScheduleStaffViewTests(unittest.TestCase):
         self.client = app.app.test_client()
 
     def tearDown(self):
+        app.datetime = self.old_datetime
         app.DB_NAME = self.old_db
         self.temp.cleanup()
 
@@ -155,6 +181,24 @@ class ScheduleStaffViewTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def worker_email_context(self, user_id, client_id=10):
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.row_factory = sqlite3.Row
+        try:
+            return app._schedule_worker_email_context(
+                conn,
+                date(2026, 8, 3),
+                client_id,
+                user_id,
+            )
+        finally:
+            conn.close()
+
+    def email_staff_url(self, client_id=10, monday="2026-08-03"):
+        return (
+            f"/schedule/client/{client_id}/week/{monday}/email-staff"
+        )
+
     def move(self, user_id, direction, signature=None):
         self.login()
         return self.client.post(
@@ -164,6 +208,485 @@ class ScheduleStaffViewTests(unittest.TestCase):
                 "expected_order_signature": signature or self.order_signature(),
             },
         )
+
+    def test_worker_email_context_contains_only_requested_worker(self):
+        anne_shift = self.add_shift(
+            shift_date="2026-08-03",
+            shift_type="Day",
+            start="08:00",
+            end="16:00",
+        )
+        zara_shift = self.add_shift(
+            shift_date="2026-08-04",
+            shift_type="Afternoon",
+            start="14:00",
+            end="22:00",
+        )
+
+        self.add_assignment(
+            anne_shift,
+            2,
+            "08:00",
+            "16:00",
+        )
+        self.add_assignment(
+            zara_shift,
+            3,
+            "14:00",
+            "22:00",
+        )
+
+        context = self.worker_email_context(2)
+
+        self.assertEqual(context["user_id"], 2)
+        self.assertEqual(context["full_name"], "Anne Worker")
+        self.assertEqual(context["email_address"], "anne@example.com")
+        self.assertEqual(context["assignment_count"], 1)
+
+        assignment_ids = [
+            assignment["schedule_staff_id"]
+            for day in context["days"]
+            for assignment in day["assignments"]
+        ]
+
+        self.assertEqual(len(assignment_ids), 1)
+
+        rendered_values = repr(context)
+
+        self.assertIn("Day", rendered_values)
+        self.assertNotIn("Zara Worker", rendered_values)
+        self.assertNotIn("zara@example.com", rendered_values)
+        self.assertNotIn("Afternoon", rendered_values)
+
+    def test_worker_email_body_contains_only_requested_worker_schedule(self):
+        anne_shift = self.add_shift(
+            shift_date="2026-08-03",
+            shift_type="Day",
+            start="08:00",
+            end="16:00",
+        )
+        zara_shift = self.add_shift(
+            shift_date="2026-08-04",
+            shift_type="Afternoon",
+            start="14:00",
+            end="22:00",
+        )
+
+        self.add_assignment(anne_shift, 2, "08:00", "16:00")
+        self.add_assignment(zara_shift, 3, "14:00", "22:00")
+
+        context = self.worker_email_context(2)
+        body = app._render_schedule_worker_email_body(context)
+
+        self.assertIn("Hello Anne Worker", body)
+        self.assertIn("8:00 AM - 4:00 PM", body)
+        self.assertIn("(Day)", body)
+
+        self.assertNotIn("Zara Worker", body)
+        self.assertNotIn("zara@example.com", body)
+        self.assertNotIn("2:00PM - 10:00PM", body)
+        self.assertNotIn("(Afternoon)", body)
+
+    def test_worker_email_body_marks_overnight_assignment(self):
+        shift_id = self.add_shift(
+            shift_date="2026-08-05",
+            shift_type="Overnight",
+            start="23:00",
+            end="07:00",
+        )
+        self.add_assignment(shift_id, 2, "23:00", "07:00")
+
+        context = self.worker_email_context(2)
+        body = app._render_schedule_worker_email_body(context)
+
+        self.assertIn(
+            "11:00 PM - 7:00 AM (Overnight)",
+            body,
+        )
+
+    def test_worker_email_body_handles_no_assignments(self):
+        context = self.worker_email_context(2)
+        body = app._render_schedule_worker_email_body(context)
+
+        self.assertIn(
+            "You have no scheduled shifts for this week.",
+            body,
+        )
+
+    def test_schedule_email_route_requires_management_role(self):
+        shift_id = self.add_shift()
+        self.add_assignment(shift_id, 2, "08:00", "16:00")
+
+        self.login(8)
+
+        response = self.client.post(self.email_staff_url())
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_schedule_email_route_requires_fully_published_week(self):
+        shift_id = self.add_shift()
+        self.add_assignment(shift_id, 2, "08:00", "16:00")
+
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            """
+            UPDATE schedule_shifts
+            SET status = 'Draft'
+            WHERE schedule_shift_id = ?
+            """,
+            (shift_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        self.login()
+
+        response = self.client.post(
+            self.email_staff_url(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            b"only after the schedule week has been fully published",
+            response.data,
+        )
+
+    @patch("app.mail_service.send_email")
+    def test_schedule_email_route_reports_missing_email_address(
+        self,
+        send_email,
+    ):
+        shift_id = self.add_shift()
+        self.add_assignment(shift_id, 2, "08:00", "16:00")
+
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "UPDATE users SET email_address = NULL WHERE user_id = 2"
+        )
+        conn.commit()
+        conn.close()
+
+        self.login()
+
+        response = self.client.post(
+            self.email_staff_url(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            b"No schedules were emailed",
+            response.data,
+        )
+        self.assertIn(
+            b"Missing email address: Anne Worker",
+            response.data,
+        )
+        send_email.assert_not_called()
+
+    @patch("app.mail_service.send_email")
+    def test_schedule_email_route_sends_only_scheduled_worker(
+        self,
+        send_email,
+    ):
+        shift_id = self.add_shift()
+        self.add_assignment(shift_id, 2, "08:00", "16:00")
+
+        self.login()
+
+        response = self.client.post(
+            self.email_staff_url(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            b"Emailed 1 staff schedule(s).",
+            response.data,
+        )
+        send_email.assert_called_once()
+
+        recipient, subject, body = send_email.call_args.args
+
+        self.assertEqual(recipient, "anne@example.com")
+        self.assertEqual(
+            subject,
+            "NHPSG Schedule - Week of 2026-08-03",
+        )
+
+        self.assertIn("Hello Anne Worker", body)
+        self.assertIn("8:00 AM - 4:00 PM (Day)", body)
+
+        self.assertNotIn("Zara Worker", body)
+        self.assertNotIn("zara@example.com", body)
+
+    @patch("app.mail_service.send_email")
+    def test_schedule_email_route_sends_separate_worker_emails(
+        self,
+        send_email,
+    ):
+        anne_shift = self.add_shift(
+            shift_date="2026-08-03",
+            shift_type="Day",
+            start="08:00",
+            end="16:00",
+        )
+        zara_shift = self.add_shift(
+            shift_date="2026-08-04",
+            shift_type="Afternoon",
+            start="14:00",
+            end="22:00",
+        )
+
+        self.add_assignment(anne_shift, 2, "08:00", "16:00")
+        self.add_assignment(zara_shift, 3, "14:00", "22:00")
+
+        self.login()
+
+        response = self.client.post(
+            self.email_staff_url(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            b"Emailed 2 staff schedule(s).",
+            response.data,
+        )
+
+        self.assertEqual(send_email.call_count, 2)
+
+        calls_by_recipient = {
+            call.args[0]: call.args
+            for call in send_email.call_args_list
+        }
+
+        self.assertEqual(
+            set(calls_by_recipient),
+            {
+                "anne@example.com",
+                "zara@example.com",
+            },
+        )
+
+        anne_body = calls_by_recipient["anne@example.com"][2]
+        zara_body = calls_by_recipient["zara@example.com"][2]
+
+        self.assertIn("Anne Worker", anne_body)
+        self.assertIn("8:00 AM - 4:00 PM (Day)", anne_body)
+        self.assertNotIn("Zara Worker", anne_body)
+        self.assertNotIn("2:00 PM - 10:00 PM", anne_body)
+
+        self.assertIn("Zara Worker", zara_body)
+        self.assertIn(
+            "2:00 PM - 10:00 PM (Afternoon)",
+            zara_body,
+        )
+        self.assertNotIn("Anne Worker", zara_body)
+        self.assertNotIn("8:00 AM - 4:00 PM", zara_body)
+
+    @patch("app.mail_service.send_email")
+    def test_schedule_email_route_continues_after_one_send_failure(
+        self,
+        send_email,
+    ):
+        anne_shift = self.add_shift(
+            shift_date="2026-08-03",
+            shift_type="Day",
+            start="08:00",
+            end="16:00",
+        )
+        zara_shift = self.add_shift(
+            shift_date="2026-08-04",
+            shift_type="Afternoon",
+            start="14:00",
+            end="22:00",
+        )
+
+        self.add_assignment(anne_shift, 2, "08:00", "16:00")
+        self.add_assignment(zara_shift, 3, "14:00", "22:00")
+
+        def send_side_effect(recipient, subject, body):
+            if recipient == "anne@example.com":
+                raise RuntimeError("SMTP test failure")
+
+        send_email.side_effect = send_side_effect
+
+        self.login()
+
+        response = self.client.post(
+            self.email_staff_url(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(send_email.call_count, 2)
+
+        self.assertIn(
+            b"Emailed 1 staff schedule(s).",
+            response.data,
+        )
+        self.assertIn(
+            b"Schedule email failed for: Anne Worker.",
+            response.data,
+        )
+
+        calls_by_recipient = {
+            call.args[0]: call.args
+            for call in send_email.call_args_list
+        }
+
+        self.assertIn("anne@example.com", calls_by_recipient)
+        self.assertIn("zara@example.com", calls_by_recipient)
+
+    @patch("app.mail_service.send_email")
+    def test_schedule_email_route_logs_success_and_failure_without_email_address(
+        self,
+        send_email,
+    ):
+        anne_shift = self.add_shift(
+            shift_date="2026-08-03",
+            shift_type="Day",
+            start="08:00",
+            end="16:00",
+        )
+        zara_shift = self.add_shift(
+            shift_date="2026-08-04",
+            shift_type="Afternoon",
+            start="14:00",
+            end="22:00",
+        )
+
+        self.add_assignment(anne_shift, 2, "08:00", "16:00")
+        self.add_assignment(zara_shift, 3, "14:00", "22:00")
+
+        def send_side_effect(recipient, subject, body):
+            if recipient == "zara@example.com":
+                raise RuntimeError("SMTP test failure")
+
+        send_email.side_effect = send_side_effect
+
+        self.login()
+
+        response = self.client.post(
+            self.email_staff_url(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        rows = self.rows("""
+            SELECT activity_type, related_id, details, success
+            FROM activity_log
+            WHERE activity_type IN (
+                'schedule_staff_email_sent',
+                'schedule_staff_email_failed'
+            )
+            ORDER BY activity_id
+        """)
+
+        self.assertEqual(len(rows), 2)
+
+        self.assertEqual(
+            tuple(rows[0]),
+            (
+                "schedule_staff_email_sent",
+                2,
+                (
+                    "Worker user ID: 2\n"
+                    "Week start: 2026-08-03\n"
+                    "Week end: 2026-08-09\n"
+                    "Assignments emailed: 1"
+                ),
+                1,
+            ),
+        )
+
+        self.assertEqual(
+            tuple(rows[1]),
+            (
+                "schedule_staff_email_failed",
+                3,
+                (
+                    "Worker user ID: 3\n"
+                    "Week start: 2026-08-03\n"
+                    "Week end: 2026-08-09\n"
+                    "Assignments attempted: 1"
+                ),
+                0,
+            ),
+        )
+
+        combined_log_text = "\n".join(
+            str(value)
+            for row in rows
+            for value in row
+            if value is not None
+        )
+
+        self.assertNotIn("anne@example.com", combined_log_text)
+        self.assertNotIn("zara@example.com", combined_log_text)
+
+    def test_worker_email_context_excludes_draft_and_other_client_assignments(self):
+        published_shift = self.add_shift(
+            client_id=10,
+            shift_date="2026-08-03",
+            shift_type="Day",
+            start="08:00",
+            end="16:00",
+        )
+        draft_shift = self.add_shift(
+            client_id=10,
+            shift_date="2026-08-04",
+            shift_type="Afternoon",
+            start="14:00",
+            end="22:00",
+        )
+        other_client_shift = self.add_shift(
+            client_id=20,
+            shift_date="2026-08-05",
+            shift_type="Overnight",
+            start="23:00",
+            end="07:00",
+        )
+
+        self.add_assignment(published_shift, 2, "08:00", "16:00")
+        self.add_assignment(draft_shift, 2, "14:00", "22:00")
+        self.add_assignment(other_client_shift, 2, "23:00", "07:00")
+
+        conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            """
+            UPDATE schedule_shifts
+            SET status = 'Draft'
+            WHERE schedule_shift_id = ?
+            """,
+            (draft_shift,),
+        )
+        conn.commit()
+        conn.close()
+
+        context = self.worker_email_context(2)
+
+        self.assertEqual(context["assignment_count"], 1)
+
+        rendered_values = repr(context)
+
+        self.assertIn("Day", rendered_values)
+        self.assertNotIn("Afternoon", rendered_values)
+        self.assertNotIn("Overnight", rendered_values)
+
+    def test_worker_email_context_rejects_inactive_and_non_worker_users(self):
+        with self.assertRaises(ValueError):
+            self.worker_email_context(4)
+
+        with self.assertRaises(ValueError):
+            self.worker_email_context(7)
+
+    def test_worker_email_context_rejects_missing_user(self):
+        with self.assertRaises(LookupError):
+            self.worker_email_context(999)
 
     def test_management_view_selection_and_summary(self):
         response = self.page()
@@ -507,7 +1030,7 @@ class ScheduleStaffViewTests(unittest.TestCase):
             "FROM schedule_shifts WHERE schedule_shift_id = ?", (parent_id,)
         )[0]
         self.assertEqual(
-            tuple(parent), ("Published", "08:00", "16:00", "Keep this note")
+            tuple(parent), ("Draft", "08:00", "16:00", "Keep this note")
         )
         log = self.rows(
             "SELECT activity_type, related_table, related_id, details, storyline_visible "

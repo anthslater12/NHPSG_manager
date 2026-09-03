@@ -79,6 +79,7 @@ class StaffNoticeAcceptanceRemediationTests(unittest.TestCase):
                     username TEXT NOT NULL UNIQUE,
                     password_hash TEXT NOT NULL,
                     full_name TEXT NOT NULL,
+                    email_address TEXT,
                     role TEXT NOT NULL,
                     active INTEGER NOT NULL,
                     must_change_password INTEGER NOT NULL DEFAULT 0
