@@ -971,7 +971,7 @@ def _schedule_worker_email_context(conn, week_start, client_id, user_id):
 def _render_schedule_worker_email_body(context):
     """Return a plain-text weekly schedule email for one worker."""
     lines = [
-        f"Hello {context['full_name']},",
+        "Hello,",
         "",
         (
             "Here is your NHPSG schedule for "

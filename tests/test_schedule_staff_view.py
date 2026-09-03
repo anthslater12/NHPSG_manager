@@ -278,7 +278,8 @@ class ScheduleStaffViewTests(unittest.TestCase):
         context = self.worker_email_context(2)
         body = app._render_schedule_worker_email_body(context)
 
-        self.assertIn("Hello Anne Worker", body)
+        self.assertIn("Hello,", body)
+        self.assertNotIn("Anne Worker", body)
         self.assertIn("8:00 AM - 4:00 PM", body)
         self.assertIn("(Day)", body)
 
@@ -415,7 +416,8 @@ class ScheduleStaffViewTests(unittest.TestCase):
             "NHPSG Schedule - Week of 2026-08-03",
         )
 
-        self.assertIn("Hello Anne Worker", body)
+        self.assertIn("Hello,", body)
+        self.assertNotIn("Anne Worker", body)
         self.assertIn("8:00 AM - 4:00 PM (Day)", body)
 
         self.assertNotIn("Zara Worker", body)
@@ -473,17 +475,17 @@ class ScheduleStaffViewTests(unittest.TestCase):
         anne_body = calls_by_recipient["anne@example.com"][2]
         zara_body = calls_by_recipient["zara@example.com"][2]
 
-        self.assertIn("Anne Worker", anne_body)
         self.assertIn("8:00 AM - 4:00 PM (Day)", anne_body)
+        self.assertNotIn("Anne Worker", anne_body)
         self.assertNotIn("Zara Worker", anne_body)
         self.assertNotIn("2:00 PM - 10:00 PM", anne_body)
 
-        self.assertIn("Zara Worker", zara_body)
+        self.assertNotIn("Anne Worker", zara_body)
+        self.assertNotIn("Zara Worker", zara_body)
         self.assertIn(
             "2:00 PM - 10:00 PM (Afternoon)",
             zara_body,
         )
-        self.assertNotIn("Anne Worker", zara_body)
         self.assertNotIn("8:00 AM - 4:00 PM", zara_body)
 
     @patch("app.mail_service.send_email")
