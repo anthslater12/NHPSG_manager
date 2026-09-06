@@ -9,7 +9,10 @@
     <p>
         <a href="{{ url_for(
             'housekeeping_review_detail',
-            entry_id=entry.entry_id
+            entry_id=entry.entry_id,
+            storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
+            storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
+            storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
         ) }}">
             ← Back to Housekeeping Management
         </a>
@@ -55,6 +58,12 @@
     {% endif %}
 
     <form method="POST">
+
+        {% if storyline_return_context %}
+            <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+            <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+            <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+        {% endif %}
 
         <p>
             <label for="title">

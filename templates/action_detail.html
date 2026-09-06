@@ -7,7 +7,12 @@
     <h2>Action Detail</h2>
 
     <p>
-        <a href="/actions">← Back to Actions</a>
+        {# Worker views return to the assignment-scoped list; management views retain the broad queue. #}
+        {% if assigned_worker_view %}
+            <a href="{{ url_for('my_actions') }}">← Back to My Actions</a>
+        {% else %}
+            <a href="/actions">← Back to Actions</a>
+        {% endif %}
     </p>
 
     <table>
@@ -55,34 +60,16 @@
         <tr>
             <th>Source</th>
             <td>
-                {{ action.source_table }}
-                {% if action.source_id %}
-                    #{{ action.source_id }}
+                {{ source_context.label }}
+                {% if source_context.source_id is not none %}
+                    #{{ source_context.source_id }}
                 {% endif %}
 
-                {% if (
-                    action.source_table == "shift_notes"
-                    and action.source_id
-                ) %}
+                {% if source_context.url %}
                     <br>
 
-                    <a href="{{ url_for(
-                        'shift_note_review_detail',
-                        note_id=action.source_id
-                    ) }}">
-                        View Source Shift Note
-                    </a>
-                {% elif (
-                    action.source_table == "incident_reports"
-                    and action.source_id
-                ) %}
-                    <br>
-
-                    <a href="{{ url_for(
-                        'incident_review_detail',
-                        incident_id=action.source_id
-                    ) }}">
-                        View Source Incident
+                    <a href="{{ source_context.url }}">
+                        View Source Record
                     </a>
                 {% endif %}
             </td>
@@ -123,6 +110,53 @@
 
     {% endif %}
 
+    {% if assigned_worker_view and action.status != "Closed" %}
+    <hr>
+
+    <h3>Worker Response</h3>
+
+    {% if worker_status_options %}
+    <form method="post">
+
+        <input type="hidden" name="form_type" value="worker_status">
+
+        <label>Status</label>
+        <select name="status" required>
+            {% for status in worker_status_options %}
+                <option value="{{ status }}">{{ status }}</option>
+            {% endfor %}
+        </select>
+
+        <button type="submit">
+            Update Status
+        </button>
+
+    </form>
+    {% else %}
+        <p>No further worker status changes are available.</p>
+    {% endif %}
+
+    <form method="post">
+
+        <input type="hidden" name="form_type" value="worker_comment">
+
+        <textarea
+            name="comment"
+            rows="4"
+            style="width:100%;"
+            placeholder="Add an update..."
+            required></textarea>
+
+        <br><br>
+
+        <button type="submit">
+            Add Update
+        </button>
+
+    </form>
+    {% endif %}
+
+    {# Assigned workers receive read-only detail; these follow-up controls remain management-only. #}
     {% if can_manage_action %}
     <hr>
 

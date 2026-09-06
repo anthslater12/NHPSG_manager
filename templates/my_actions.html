@@ -4,8 +4,9 @@
 
 <div class="card">
 
-    <h2>Outstanding Actions</h2>
+    <h2>My Actions</h2>
 
+    {# The route has already limited this collection to the active user's assignments. #}
     {% if actions %}
 
     <table>
@@ -14,9 +15,9 @@
             <th>Created</th>
             <th>Priority</th>
             <th>Status</th>
-			<th>Source</th>
+            <th>Source</th>
             <th>Title</th>
-            <th>Assigned To</th>
+            <th>Due Date</th>
             <th></th>
         </tr>
 
@@ -29,23 +30,20 @@
             <td>{{ action.priority }}</td>
 
             <td>{{ action.status }}</td>
-			
-			<td>
 
-				{{ action.source_context.label }}
-
-				{% if action.source_context.source_id is not none %}
-					#{{ action.source_context.source_id }}
-				{% endif %}
-
-			</td>
+            <td>
+                {{ action.source_context.label }}
+                {% if action.source_context.source_id is not none %}
+                    #{{ action.source_context.source_id }}
+                {% endif %}
+            </td>
 
             <td>{{ action.title }}</td>
 
-            <td>{{ action.assigned_to or "" }}</td>
+            <td>{{ action.due_date or "" }}</td>
 
             <td>
-                <a href="/action/{{ action.action_id }}">
+                <a href="{{ url_for('action_detail', action_id=action.action_id) }}">
                     View
                 </a>
             </td>
@@ -58,7 +56,7 @@
 
     {% else %}
 
-        <p>No actions found.</p>
+        <p>No actions assigned to you.</p>
 
     {% endif %}
 
