@@ -21713,6 +21713,31 @@ def activity_review_detail(activity_id):
               AND ack.active = 1
             ORDER BY ack.acknowledged_at, ack.acknowledgement_id
         """, (activity_id,)).fetchall()
+        management_notes = get_management_notes(
+            conn,
+            source_table="shift_activities",
+            source_id=activity_id
+        )
+        linked_actions = conn.execute("""
+            SELECT
+                ai.action_id,
+                ai.title,
+                ai.status,
+                ai.priority,
+                ai.created_at,
+
+                assigned_to.full_name AS assigned_to
+
+            FROM action_items ai
+
+            LEFT JOIN users assigned_to
+                ON ai.assigned_to_user_id = assigned_to.user_id
+
+            WHERE ai.source_table = 'shift_activities'
+              AND ai.source_id = ?
+
+            ORDER BY ai.created_at DESC, ai.action_id DESC
+        """, (activity_id,)).fetchall()
     except PermissionError:
         return "Access denied", 403
     finally:
@@ -21726,10 +21751,236 @@ def activity_review_detail(activity_id):
             review["user_id"] == actor["user_id"]
             for review in reviews
         ),
+        management_notes=management_notes,
+        linked_actions=linked_actions,
+        can_manage_actions=(
+            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        ),
         storyline_return_context=_storyline_return_context(
             request.args, entry["client_id"]
         )
     )
+
+
+@app.route(
+    "/manager-review/activities/<int:activity_id>/management-note",
+    methods=["POST"]
+)
+def add_activity_management_note(activity_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_activity_management_actor(
+            conn,
+            session["user_id"]
+        )
+        entry = conn.execute("""
+            SELECT
+                sa.shift_activity_id,
+                sa.shift_id,
+                s.client_id
+            FROM shift_activities sa
+            JOIN shifts s ON s.shift_id = sa.shift_id
+            WHERE sa.shift_activity_id = ?
+        """, (activity_id,)).fetchone()
+        if entry is None:
+            conn.rollback()
+            return "Activity not found", 404
+
+        return_context = _storyline_return_context(
+            request.args, entry["client_id"]
+        )
+        note_text = request.form.get("note_text", "").strip()
+        if not note_text:
+            conn.rollback()
+            return redirect(url_for(
+                "activity_review_detail",
+                activity_id=activity_id,
+                note_error="Management note text is required.",
+                **(return_context or {})
+            ))
+
+        add_management_note(
+            conn,
+            source_table="shift_activities",
+            source_id=activity_id,
+            note_text=note_text,
+            created_by_user_id=actor["user_id"],
+            visibility="management_only",
+            shift_id=entry["shift_id"]
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "activity_review_detail",
+        activity_id=activity_id,
+        **(return_context or {})
+    ))
+
+
+@app.route(
+    "/manager-review/activities/<int:activity_id>/action/new",
+    methods=["GET", "POST"]
+)
+def activity_action_new(activity_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_activity_management_actor(
+            conn,
+            session["user_id"]
+        )
+        if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+            conn.close()
+            return "Access denied", 403
+
+        entry = conn.execute("""
+            SELECT
+                sa.shift_activity_id,
+                sa.shift_id,
+                sa.start_time,
+                sa.end_time,
+                sa.a_selected,
+                sa.t_selected,
+                sa.ls_selected,
+                sa.activity_description,
+                sa.created_at,
+                s.client_id,
+                s.shift_date,
+                s.shift_type,
+                c.client_name,
+                u.full_name AS recorded_by_name
+            FROM shift_activities sa
+            JOIN shifts s ON s.shift_id = sa.shift_id
+            JOIN clients c ON c.client_id = s.client_id
+            JOIN users u ON u.user_id = sa.recorded_by_user_id
+            WHERE sa.shift_activity_id = ?
+        """, (activity_id,)).fetchone()
+        if entry is None:
+            conn.close()
+            return "Activity not found", 404
+
+        active_users = conn.execute("""
+            SELECT
+                user_id,
+                full_name,
+                role
+            FROM users
+            WHERE active = 1
+            ORDER BY full_name
+        """).fetchall()
+
+        return_context = _storyline_return_context(
+            request.args, entry["client_id"]
+        )
+
+        if request.method == "POST":
+            title = request.form.get("title", "").strip()
+            description = request.form.get("description", "").strip()
+            priority = request.form.get("priority", "Medium").strip()
+            assigned_to_user_id = request.form.get(
+                "assigned_to_user_id", ""
+            ).strip()
+            error = None
+
+            if not title:
+                error = "Action title is required."
+            elif priority not in ["High", "Medium", "Low"]:
+                error = "Invalid priority."
+
+            if assigned_to_user_id:
+                try:
+                    assigned_to_user_id = int(assigned_to_user_id)
+                except ValueError:
+                    assigned_to_user_id = None
+                    error = "Invalid assigned user."
+                else:
+                    active_user_ids = {
+                        user["user_id"] for user in active_users
+                    }
+                    if assigned_to_user_id not in active_user_ids:
+                        error = "Invalid assigned user."
+            else:
+                assigned_to_user_id = None
+
+            if error:
+                conn.close()
+                return render_template(
+                    "activity_action_new.html",
+                    entry=entry,
+                    active_users=active_users,
+                    error=error,
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    assigned_to_user_id=assigned_to_user_id,
+                    storyline_return_context=return_context
+                ), 400
+
+            action_id = create_action(
+                conn,
+                title=title,
+                description=description or None,
+                source_table="shift_activities",
+                source_id=activity_id,
+                shift_id=entry["shift_id"],
+                created_by_user_id=actor["user_id"],
+                assigned_to_user_id=assigned_to_user_id,
+                priority=priority
+            )
+
+            conn.commit()
+            conn.close()
+
+            return redirect(url_for(
+                "action_detail",
+                action_id=action_id
+            ))
+
+        default_description = (
+            f"Activity\n"
+            f"Date: {entry['shift_date']}\n"
+            f"Shift: {entry['shift_type']}\n"
+            f"Client: {entry['client_name']}\n"
+            f"Start: {entry['start_time']}\n"
+            f"End: {entry['end_time']}\n"
+            f"Categories: "
+            f"A={'Yes' if entry['a_selected'] else 'No'}, "
+            f"T={'Yes' if entry['t_selected'] else 'No'}, "
+            f"LS={'Yes' if entry['ls_selected'] else 'No'}\n"
+            f"Description: {entry['activity_description']}"
+        )
+
+        conn.close()
+        return render_template(
+            "activity_action_new.html",
+            entry=entry,
+            active_users=active_users,
+            error=None,
+            title="Activity Follow-up",
+            description=default_description,
+            priority="Medium",
+            assigned_to_user_id=None,
+            storyline_return_context=return_context
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
 
 @app.route(
