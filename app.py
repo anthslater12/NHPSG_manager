@@ -205,6 +205,11 @@ ACTION_STATUSES = frozenset((
     "Completed",
     "Closed",
 ))
+ACTION_PRIORITIES = frozenset((
+    "High",
+    "Medium",
+    "Low",
+))
 WORKER_ACTION_STATUS_TRANSITIONS = {
     "Open": ("Acknowledged", "In Progress"),
     "Acknowledged": ("In Progress", "Completed"),
@@ -20246,14 +20251,12 @@ def shift_note_action_new(note_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
-        return "Access denied", 403
-
     conn = get_db()
+    try:
+        actor = get_action_management_actor(conn, session["user_id"])
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
     entry = conn.execute("""
         SELECT
@@ -20304,10 +20307,10 @@ def shift_note_action_new(note_id):
             "Medium"
         ).strip()
 
-        assigned_to_user_id = request.form.get(
+        raw_assigned_to_user_id = request.form.get(
             "assigned_to_user_id",
             ""
-        ).strip()
+        )
 
         due_date = None
         error = None
@@ -20322,25 +20325,14 @@ def shift_note_action_new(note_id):
         ]:
             error = "Invalid priority."
 
-        if assigned_to_user_id:
-
-            try:
-                assigned_to_user_id = int(
-                    assigned_to_user_id
-                )
-            except ValueError:
-                error = "Invalid assigned user."
-
-            if (
-                isinstance(assigned_to_user_id, int)
-                and assigned_to_user_id not in {
-                    user["user_id"] for user in active_users
-                }
-            ):
-                error = "Invalid assigned user."
-
-        else:
+        try:
+            assigned_to_user_id = parse_active_action_assignee(
+                conn,
+                raw_assigned_to_user_id
+            )
+        except ValueError:
             assigned_to_user_id = None
+            error = "Invalid assigned user."
 
         if error:
             conn.close()
@@ -20363,7 +20355,7 @@ def shift_note_action_new(note_id):
             source_table="shift_notes",
             source_id=note_id,
             shift_id=None,
-            created_by_user_id=session["user_id"],
+            created_by_user_id=actor["user_id"],
             assigned_to_user_id=assigned_to_user_id,
             priority=priority,
             due_date=due_date
@@ -23548,14 +23540,12 @@ def housekeeping_action_new(entry_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
-        return "Access denied", 403
-
     conn = get_db()
+    try:
+        actor = get_action_management_actor(conn, session["user_id"])
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
     entry = conn.execute("""
         SELECT
@@ -23609,10 +23599,10 @@ def housekeeping_action_new(entry_id):
             "Medium"
         )
 
-        assigned_to_user_id = request.form.get(
+        raw_assigned_to_user_id = request.form.get(
             "assigned_to_user_id",
             ""
-        ).strip()
+        )
 
         error = None
 
@@ -23626,12 +23616,14 @@ def housekeeping_action_new(entry_id):
         ]:
             error = "Invalid priority."
 
-        if assigned_to_user_id:
-            assigned_to_user_id = int(
-                assigned_to_user_id
+        try:
+            assigned_to_user_id = parse_active_action_assignee(
+                conn,
+                raw_assigned_to_user_id
             )
-        else:
+        except ValueError:
             assigned_to_user_id = None
+            error = "Invalid assigned user."
 
         if error:
             conn.close()
@@ -23654,7 +23646,7 @@ def housekeeping_action_new(entry_id):
             source_table="shift_housekeeping_task_entries",
             source_id=entry_id,
             shift_id=entry["shift_id"],
-            created_by_user_id=session["user_id"],
+            created_by_user_id=actor["user_id"],
             assigned_to_user_id=assigned_to_user_id,
             priority=priority
         )
@@ -23996,14 +23988,12 @@ def toileting_action_new(entry_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
-        return "Access denied", 403
-
     conn = get_db()
+    try:
+        actor = get_action_management_actor(conn, session["user_id"])
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
     entry = conn.execute("""
         SELECT
@@ -24061,10 +24051,10 @@ def toileting_action_new(entry_id):
             "Medium"
         )
 
-        assigned_to_user_id = request.form.get(
+        raw_assigned_to_user_id = request.form.get(
             "assigned_to_user_id",
             ""
-        ).strip()
+        )
 
         error = None
 
@@ -24078,12 +24068,14 @@ def toileting_action_new(entry_id):
         ]:
             error = "Invalid priority."
 
-        if assigned_to_user_id:
-            assigned_to_user_id = int(
-                assigned_to_user_id
+        try:
+            assigned_to_user_id = parse_active_action_assignee(
+                conn,
+                raw_assigned_to_user_id
             )
-        else:
+        except ValueError:
             assigned_to_user_id = None
+            error = "Invalid assigned user."
 
         if error:
             conn.close()
@@ -24106,7 +24098,7 @@ def toileting_action_new(entry_id):
             source_table="toileting_events",
             source_id=entry_id,
             shift_id=entry["shift_id"],
-            created_by_user_id=session["user_id"],
+            created_by_user_id=actor["user_id"],
             assigned_to_user_id=assigned_to_user_id,
             priority=priority
         )
@@ -24388,14 +24380,12 @@ def care_action_new(entry_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
-        return "Access denied", 403
-
     conn = get_db()
+    try:
+        actor = get_action_management_actor(conn, session["user_id"])
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
     entry = conn.execute("""
         SELECT
@@ -24447,10 +24437,10 @@ def care_action_new(entry_id):
             "Medium"
         )
 
-        assigned_to_user_id = request.form.get(
+        raw_assigned_to_user_id = request.form.get(
             "assigned_to_user_id",
             ""
-        ).strip()
+        )
 
         error = None
 
@@ -24464,12 +24454,14 @@ def care_action_new(entry_id):
         ]:
             error = "Invalid priority."
 
-        if assigned_to_user_id:
-            assigned_to_user_id = int(
-                assigned_to_user_id
+        try:
+            assigned_to_user_id = parse_active_action_assignee(
+                conn,
+                raw_assigned_to_user_id
             )
-        else:
+        except ValueError:
             assigned_to_user_id = None
+            error = "Invalid assigned user."
 
         if error:
             conn.close()
@@ -24492,7 +24484,7 @@ def care_action_new(entry_id):
             source_table="shift_care_task_entries",
             source_id=entry_id,
             shift_id=entry["shift_id"],
-            created_by_user_id=session["user_id"],
+            created_by_user_id=actor["user_id"],
             assigned_to_user_id=assigned_to_user_id,
             priority=priority
         )
@@ -24928,6 +24920,40 @@ def create_action(
 
     return action_id
 
+
+def get_action_management_actor(conn, user_id):
+    """Return an active user with Action-management authority."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to create or manage Actions."
+        )
+    return actor
+
+
+def parse_active_action_assignee(conn, raw_value):
+    """Return an active assignee ID or raise a controlled validation error."""
+    raw_value = (raw_value or "").strip()
+    if not raw_value:
+        return None
+
+    try:
+        assignee_id = int(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Invalid assigned user.") from error
+
+    assignee = conn.execute("""
+        SELECT user_id
+        FROM users
+        WHERE user_id = ?
+          AND active = 1
+    """, (assignee_id,)).fetchone()
+
+    if assignee is None:
+        raise ValueError("Invalid assigned user.")
+
+    return assignee["user_id"]
+
 @app.route("/actions")
 def actions():
     if "user_id" not in session:
@@ -25200,18 +25226,29 @@ def action_detail(action_id):
             old_priority = action["priority"]
             old_assigned_to_user_id = action["assigned_to_user_id"]
 
-            status = request.form["status"]
-            priority = request.form["priority"]
-            assigned_to_user_id = request.form.get("assigned_to_user_id")
+            status = request.form.get("status", "").strip()
+            priority = request.form.get("priority", "").strip()
+            raw_assigned_to_user_id = request.form.get(
+                "assigned_to_user_id",
+                ""
+            )
 
             if status not in ACTION_STATUSES:
                 conn.close()
                 return "Invalid action status", 400
 
-            if assigned_to_user_id == "":
-                assigned_to_user_id = None
-            else:
-                assigned_to_user_id = int(assigned_to_user_id)
+            if priority not in ACTION_PRIORITIES:
+                conn.close()
+                return "Invalid action priority", 400
+
+            try:
+                assigned_to_user_id = parse_active_action_assignee(
+                    conn,
+                    raw_assigned_to_user_id
+                )
+            except ValueError as error:
+                conn.close()
+                return str(error), 400
 
             conn.execute("""
                 UPDATE action_items

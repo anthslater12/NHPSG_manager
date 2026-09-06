@@ -581,6 +581,111 @@ class IncidentManagementEngagementTests(unittest.TestCase):
             0
         )
 
+    def test_management_action_update_validates_all_fields_atomically(self):
+        self.login(2)
+
+        for field, value, expected_text in (
+            ("status", "Not A Status", b"Invalid action status"),
+            ("priority", "Urgent", b"Invalid action priority"),
+            ("assigned_to_user_id", "not-an-int", b"Invalid assigned user"),
+            ("assigned_to_user_id", "999", b"Invalid assigned user"),
+            ("assigned_to_user_id", "5", b"Invalid assigned user"),
+        ):
+            action_id = self.add_action(
+                f"Invalid update {field} {value}",
+                assigned_to_user_id=1,
+                status="Open",
+                priority="Medium"
+            )
+            before = self.rows("""
+                SELECT status, priority, assigned_to_user_id,
+                       acknowledged_at, completed_at, closed_at
+                FROM action_items
+                WHERE action_id = ?
+            """, (action_id,))[0]
+            audit_before = self.rows("""
+                SELECT activity_type, details
+                FROM activity_log
+                WHERE related_table = 'action_items'
+                  AND related_id = ?
+                ORDER BY activity_id
+            """, (action_id,))
+
+            form = {
+                "form_type": "update",
+                "status": "Acknowledged",
+                "priority": "High",
+                "assigned_to_user_id": "1",
+            }
+            form[field] = value
+            response = self.client.post(
+                f"/action/{action_id}",
+                data=form
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn(expected_text, response.data)
+
+            after = self.rows("""
+                SELECT status, priority, assigned_to_user_id,
+                       acknowledged_at, completed_at, closed_at
+                FROM action_items
+                WHERE action_id = ?
+            """, (action_id,))[0]
+            audit_after = self.rows("""
+                SELECT activity_type, details
+                FROM activity_log
+                WHERE related_table = 'action_items'
+                  AND related_id = ?
+                ORDER BY activity_id
+            """, (action_id,))
+            self.assertEqual(tuple(after), tuple(before))
+            self.assertEqual([tuple(row) for row in audit_after],
+                             [tuple(row) for row in audit_before])
+
+        valid_action_id = self.add_action(
+            "Valid management update",
+            assigned_to_user_id=1
+        )
+        response = self.client.post(
+            f"/action/{valid_action_id}",
+            data={
+                "form_type": "update",
+                "status": "Acknowledged",
+                "priority": "High",
+                "assigned_to_user_id": "6",
+            }
+        )
+        self.assertEqual(response.status_code, 302)
+        valid_action = self.rows("""
+            SELECT status, priority, assigned_to_user_id, acknowledged_at
+            FROM action_items
+            WHERE action_id = ?
+        """, (valid_action_id,))[0]
+        self.assertEqual(valid_action["status"], "Acknowledged")
+        self.assertEqual(valid_action["priority"], "High")
+        self.assertEqual(valid_action["assigned_to_user_id"], 6)
+        self.assertIsNotNone(valid_action["acknowledged_at"])
+
+        blank_action_id = self.add_action(
+            "Blank assignment update",
+            assigned_to_user_id=1
+        )
+        response = self.client.post(
+            f"/action/{blank_action_id}",
+            data={
+                "form_type": "update",
+                "status": "Open",
+                "priority": "Low",
+                "assigned_to_user_id": "",
+            }
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIsNone(self.rows(
+            "SELECT assigned_to_user_id FROM action_items "
+            "WHERE action_id = ?",
+            (blank_action_id,)
+        )[0]["assigned_to_user_id"])
+
     def test_incident_detail_preserves_management_review_navigation(self):
         for user_id in (4, 2, 3):
             self.login(user_id)
