@@ -24861,6 +24861,13 @@ def create_action(
     priority="Medium",
     due_date=None
 ):
+    """Persist an Action and its audit event for an operational record.
+
+    ``source_table`` and ``source_id`` form the polymorphic link back to the
+    originating record. ``shift_id`` is optional because some source records,
+    such as incidents and shift notes, are not directly owned by a shift.
+    The caller controls the surrounding transaction.
+    """
     cur = conn.execute("""
         INSERT INTO action_items
         (
@@ -24912,6 +24919,8 @@ def actions():
 
     conn = get_db()
     try:
+        # This is the broad management/review queue; worker access is isolated
+        # to the assignment-scoped /my-actions route below.
         get_behaviour_review_or_management_actor(
             conn,
             session["user_id"]
@@ -24950,6 +24959,7 @@ def actions():
 
 @app.route("/my-actions")
 def my_actions():
+    """Show Actions assigned to the current active database user only."""
     if "user_id" not in session:
         return redirect(url_for("login"))
 
@@ -24963,6 +24973,8 @@ def my_actions():
         conn.close()
         return "Access denied", 403
 
+    # Assigned Support Workers must not receive another user's or an
+    # unassigned Action through this worker-facing list.
     actions = conn.execute("""
         SELECT
             ai.*,
@@ -24993,6 +25005,7 @@ def my_actions():
 
 @app.route("/action/<int:action_id>", methods=["GET", "POST"])
 def action_detail(action_id):
+    """Render an Action for management or its specifically assigned worker."""
 
     if "user_id" not in session:
         return redirect(url_for("login"))
@@ -25010,6 +25023,9 @@ def action_detail(action_id):
     can_manage_action = (
         actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
     )
+    # Preserve the established immediate denial for non-management POSTs.
+    # Support Workers are checked after loading the Action so ownership can be
+    # evaluated for their read-only GET path.
     if (
         request.method == "POST"
         and actor["role"] != "Support Worker"
@@ -25029,6 +25045,8 @@ def action_detail(action_id):
         conn.close()
         return "Action not found", 404
 
+    # Management/review-authority users retain broad read access. A Support
+    # Worker may read only the Action assigned to the active database user.
     is_management_actor = (
         actor["role"] in BEHAVIOUR_REVIEW_AUTHORITY_ROLES
     )
@@ -25040,6 +25058,8 @@ def action_detail(action_id):
         conn.close()
         return "Access denied", 403
 
+    # Viewing an assigned Action is deliberately separate from management
+    # controls; only strict action-authority roles may submit POST changes.
     if request.method == "POST" and not can_manage_action:
         conn.close()
         return "Access denied", 403

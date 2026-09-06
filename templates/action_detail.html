@@ -7,6 +7,7 @@
     <h2>Action Detail</h2>
 
     <p>
+        {# Worker views return to the assignment-scoped list; management views retain the broad queue. #}
         {% if assigned_worker_view %}
             <a href="{{ url_for('my_actions') }}">← Back to My Actions</a>
         {% else %}
@@ -59,6 +60,7 @@
         <tr>
             <th>Source</th>
             <td>
+                {# source_table/source_id identify the originating operational record; shift context is optional. #}
                 {{ action.source_table }}
                 {% if action.source_id %}
                     #{{ action.source_id }}
@@ -127,6 +129,7 @@
 
     {% endif %}
 
+    {# Assigned workers receive read-only detail; these follow-up controls remain management-only. #}
     {% if can_manage_action %}
     <hr>
 
