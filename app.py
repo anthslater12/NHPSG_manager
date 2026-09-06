@@ -197,6 +197,22 @@ BEHAVIOUR_REVIEW_AUTHORITY_ROLES = frozenset((
     "Behaviour Consultant",
 ))
 FOOD_FLUID_MANAGEMENT_ROLES = BEHAVIOUR_VOID_AUTHORITY_ROLES
+ACTION_STATUSES = frozenset((
+    "Open",
+    "Acknowledged",
+    "In Progress",
+    "Waiting",
+    "Completed",
+    "Closed",
+))
+WORKER_ACTION_STATUS_TRANSITIONS = {
+    "Open": ("Acknowledged", "In Progress"),
+    "Acknowledged": ("In Progress", "Completed"),
+    "In Progress": ("Completed",),
+    "Waiting": (),
+    "Completed": (),
+    "Closed": (),
+}
 BEHAVIOUR_CATEGORY_LABELS = {
     "aggression_towards_others": "Aggression towards others",
     "injury_to_others": "Injury to others",
@@ -25058,15 +25074,122 @@ def action_detail(action_id):
         conn.close()
         return "Access denied", 403
 
-    # Viewing an assigned Action is deliberately separate from management
-    # controls; only strict action-authority roles may submit POST changes.
-    if request.method == "POST" and not can_manage_action:
-        conn.close()
-        return "Access denied", 403
-
     if request.method == "POST":
 
         form_type = request.form.get("form_type")
+
+        if not can_manage_action:
+
+            if action["status"] == "Closed":
+                conn.close()
+                return "Closed Actions are read-only", 403
+
+            if form_type == "worker_status":
+
+                requested_status = request.form.get("status", "").strip()
+                allowed_statuses = WORKER_ACTION_STATUS_TRANSITIONS.get(
+                    action["status"],
+                    ()
+                )
+
+                if requested_status not in allowed_statuses:
+                    conn.close()
+                    return "Invalid worker status transition", 400
+
+                conn.execute("""
+                    UPDATE action_items
+                    SET status = ?,
+                        acknowledged_at = CASE
+                            WHEN ? = 'Acknowledged'
+                                 AND acknowledged_at IS NULL
+                            THEN CURRENT_TIMESTAMP
+                            ELSE acknowledged_at
+                        END,
+                        completed_at = CASE
+                            WHEN ? = 'Completed'
+                                 AND completed_at IS NULL
+                            THEN CURRENT_TIMESTAMP
+                            ELSE completed_at
+                        END
+                    WHERE action_id = ?
+                      AND assigned_to_user_id = ?
+                """, (
+                    requested_status,
+                    requested_status,
+                    requested_status,
+                    action_id,
+                    actor["user_id"]
+                ))
+
+                log_activity(
+                    conn,
+                    activity_class="ACTION",
+                    activity_type="action_status_changed",
+                    summary=f"Action status changed: {action['title']}",
+                    user_id=actor["user_id"],
+                    shift_id=action["shift_id"],
+                    related_table="action_items",
+                    related_id=action_id,
+                    details=(
+                        f"Status changed from {action['status']} "
+                        f"to {requested_status}"
+                    ),
+                    success=1
+                )
+
+                conn.commit()
+                conn.close()
+
+                return redirect(
+                    url_for("action_detail", action_id=action_id)
+                )
+
+            if form_type == "worker_comment":
+
+                comment = request.form.get("comment", "").strip()
+
+                if not comment:
+                    conn.close()
+                    return "Comment is required", 400
+
+                cur = conn.execute("""
+                    INSERT INTO action_comments
+                    (
+                        action_id,
+                        user_id,
+                        comment
+                    )
+                    VALUES (?, ?, ?)
+                """, (
+                    action_id,
+                    actor["user_id"],
+                    comment
+                ))
+
+                comment_id = cur.lastrowid
+
+                log_activity(
+                    conn,
+                    activity_class="ACTION",
+                    activity_type="action_comment_added",
+                    summary=f"Comment added to action: {action['title']}",
+                    user_id=actor["user_id"],
+                    shift_id=action["shift_id"],
+                    related_table="action_comments",
+                    related_id=comment_id,
+                    details=comment,
+                    success=1
+                )
+
+                conn.commit()
+                conn.close()
+
+                return redirect(
+                    url_for("action_detail", action_id=action_id)
+                )
+
+            conn.close()
+            return "Access denied", 403
 
         #
         # Update Action
@@ -25080,6 +25203,10 @@ def action_detail(action_id):
             status = request.form["status"]
             priority = request.form["priority"]
             assigned_to_user_id = request.form.get("assigned_to_user_id")
+
+            if status not in ACTION_STATUSES:
+                conn.close()
+                return "Invalid action status", 400
 
             if assigned_to_user_id == "":
                 assigned_to_user_id = None
@@ -25247,6 +25374,8 @@ def action_detail(action_id):
         ORDER BY ac.created_at
     """, (action_id,)).fetchall()
 
+    # Comment audit rows use action_comments as their related table, while
+    # status and assignment events remain related directly to action_items.
     history = conn.execute("""
         SELECT
             al.*,
@@ -25256,11 +25385,21 @@ def action_detail(action_id):
         LEFT JOIN users u
           ON al.user_id = u.user_id
 
-        WHERE al.related_table = 'action_items'
-        AND al.related_id = ?
+        WHERE (
+            al.related_table = 'action_items'
+            AND al.related_id = ?
+        )
+        OR (
+            al.related_table = 'action_comments'
+            AND al.related_id IN (
+                SELECT comment_id
+                FROM action_comments
+                WHERE action_id = ?
+            )
+        )
 
         ORDER BY al.activity_datetime
-    """, (action_id,)).fetchall()
+    """, (action_id, action_id)).fetchall()
 
     conn.close()
 
@@ -25271,7 +25410,11 @@ def action_detail(action_id):
         comments=comments,
         history=history,
         can_manage_action=can_manage_action,
-        assigned_worker_view=is_assigned_worker
+        assigned_worker_view=is_assigned_worker,
+        worker_status_options=WORKER_ACTION_STATUS_TRANSITIONS.get(
+            action["status"],
+            ()
+        )
     )
 
 #####################################################################

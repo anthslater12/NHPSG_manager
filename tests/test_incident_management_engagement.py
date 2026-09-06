@@ -336,6 +336,251 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         self.assertNotIn(b"Update Action", consultant_detail.data)
         self.assertNotIn(b"Add Comment", consultant_detail.data)
 
+    def test_assigned_worker_can_progress_action_comment_and_view_history(self):
+        action_id = self.add_action(
+            "Worker lifecycle action",
+            assigned_to_user_id=1,
+            priority="High",
+            due_date="2026-08-10"
+        )
+
+        self.login(1)
+        initial = self.client.get(f"/action/{action_id}")
+        self.assertEqual(initial.status_code, 200)
+        self.assertIn(b"Worker Response", initial.data)
+        self.assertIn(b">Acknowledged<", initial.data)
+        self.assertIn(b">In Progress<", initial.data)
+        self.assertNotIn(b'name="assigned_to_user_id"', initial.data)
+        self.assertNotIn(b'name="priority"', initial.data)
+        self.assertNotIn(b"Update Action", initial.data)
+
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "worker_status",
+                    "status": "Acknowledged",
+                }
+            ).status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "worker_comment",
+                    "comment": "  Worker started follow-up.  ",
+                }
+            ).status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "worker_status",
+                    "status": "In Progress",
+                }
+            ).status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "worker_status",
+                    "status": "Completed",
+                }
+            ).status_code,
+            302
+        )
+
+        action = self.rows("""
+            SELECT status, priority, assigned_to_user_id,
+                   acknowledged_at, completed_at, closed_at
+            FROM action_items
+            WHERE action_id = ?
+        """, (action_id,))[0]
+        self.assertEqual(action["status"], "Completed")
+        self.assertEqual(action["priority"], "High")
+        self.assertEqual(action["assigned_to_user_id"], 1)
+        self.assertIsNotNone(action["acknowledged_at"])
+        self.assertIsNotNone(action["completed_at"])
+        self.assertIsNone(action["closed_at"])
+
+        comment = self.rows("""
+            SELECT user_id, comment
+            FROM action_comments
+            WHERE action_id = ?
+        """, (action_id,))[0]
+        self.assertEqual(comment["user_id"], 1)
+        self.assertEqual(comment["comment"], "Worker started follow-up.")
+
+        activity = self.rows("""
+            SELECT activity_type, user_id, related_table, related_id, details
+            FROM activity_log
+            WHERE related_id = ?
+               OR related_id IN (
+                   SELECT comment_id
+                   FROM action_comments
+                   WHERE action_id = ?
+               )
+            ORDER BY activity_id
+        """, (action_id, action_id))
+        self.assertEqual(
+            [row["activity_type"] for row in activity],
+            [
+                "action_status_changed",
+                "action_comment_added",
+                "action_status_changed",
+                "action_status_changed",
+            ]
+        )
+        self.assertTrue(all(row["user_id"] == 1 for row in activity))
+        self.assertEqual(activity[1]["related_table"], "action_comments")
+        self.assertIn("Worker started follow-up.", activity[1]["details"])
+
+        worker_detail = self.client.get(f"/action/{action_id}")
+        self.assertIn(b"Worker started follow-up.", worker_detail.data)
+        self.assertIn(b"Action status changed", worker_detail.data)
+        self.assertIn(b"No further worker status changes", worker_detail.data)
+        self.assertNotIn(b'<select name="status"', worker_detail.data)
+
+        self.login(2)
+        management_detail = self.client.get(f"/action/{action_id}")
+        self.assertEqual(management_detail.status_code, 200)
+        self.assertIn(b"Worker started follow-up.", management_detail.data)
+        self.assertIn(b"Completed", management_detail.data)
+        self.assertIn(b"Update Action", management_detail.data)
+
+    def test_worker_status_and_fields_are_strictly_limited(self):
+        action_id = self.add_action(
+            "Restricted worker action",
+            assigned_to_user_id=1,
+            priority="High"
+        )
+        other_action_id = self.add_action(
+            "Another worker action",
+            assigned_to_user_id=6
+        )
+
+        self.login(1)
+        for status in ("Closed", "Completed", "Not A Status"):
+            response = self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "worker_status",
+                    "status": status,
+                }
+            )
+            self.assertEqual(response.status_code, 400)
+
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "worker_comment",
+                    "comment": "   ",
+                }
+            ).status_code,
+            400
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "worker_status",
+                    "status": "Acknowledged",
+                    "priority": "Low",
+                    "assigned_to_user_id": "6",
+                }
+            ).status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "update",
+                    "status": "In Progress",
+                    "priority": "Low",
+                    "assigned_to_user_id": "6",
+                }
+            ).status_code,
+            403
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/action/{other_action_id}",
+                data={
+                    "form_type": "worker_status",
+                    "status": "Acknowledged",
+                }
+            ).status_code,
+            403
+        )
+
+        action = self.rows("""
+            SELECT status, priority, assigned_to_user_id
+            FROM action_items
+            WHERE action_id = ?
+        """, (action_id,))[0]
+        self.assertEqual(action["status"], "Acknowledged")
+        self.assertEqual(action["priority"], "High")
+        self.assertEqual(action["assigned_to_user_id"], 1)
+
+    def test_management_can_still_close_action(self):
+        action_id = self.add_action(
+            "Management close action",
+            assigned_to_user_id=1
+        )
+
+        self.login(2)
+        response = self.client.post(
+            f"/action/{action_id}",
+            data={
+                "form_type": "update",
+                "status": "Closed",
+                "priority": "Low",
+                "assigned_to_user_id": "1",
+            }
+        )
+        self.assertEqual(response.status_code, 302)
+        action = self.rows("""
+            SELECT status, priority, assigned_to_user_id, closed_at
+            FROM action_items
+            WHERE action_id = ?
+        """, (action_id,))[0]
+        self.assertEqual(action["status"], "Closed")
+        self.assertEqual(action["priority"], "Low")
+        self.assertEqual(action["assigned_to_user_id"], 1)
+        self.assertIsNotNone(action["closed_at"])
+
+        self.login(1)
+        worker_detail = self.client.get(f"/action/{action_id}")
+        self.assertEqual(worker_detail.status_code, 200)
+        self.assertIn(b"Closed", worker_detail.data)
+        self.assertNotIn(b"Worker Response", worker_detail.data)
+        self.assertNotIn(b"Add Update", worker_detail.data)
+        self.assertNotIn(b'form_type" value="worker_comment"', worker_detail.data)
+
+        worker_post = self.client.post(
+            f"/action/{action_id}",
+            data={
+                "form_type": "worker_comment",
+                "comment": "Late worker update",
+            }
+        )
+        self.assertEqual(worker_post.status_code, 403)
+        self.assertEqual(
+            self.rows(
+                "SELECT COUNT(*) AS count FROM action_comments "
+                "WHERE action_id = ?",
+                (action_id,)
+            )[0]["count"],
+            0
+        )
+
     def test_incident_detail_preserves_management_review_navigation(self):
         for user_id in (4, 2, 3):
             self.login(user_id)
