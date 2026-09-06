@@ -1480,6 +1480,17 @@ def get_behaviour_review_or_management_actor(conn, user_id):
     return validate_behaviour_review_authority(conn, user_id)
 
 
+def get_behaviour_shift_context(conn, shift_id):
+    """Return the existing shift context for a Behaviour occurrence."""
+    if shift_id is None:
+        return None
+    row = conn.execute(
+        "SELECT * FROM shifts WHERE shift_id = ?",
+        (shift_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 STORYLINE_REVIEW_AUTHORITY_ROLES = frozenset((
     *BEHAVIOUR_VOID_AUTHORITY_ROLES,
     "Behaviour Consultant",
@@ -21342,11 +21353,35 @@ def behaviour_review_detail(occurrence_id):
             source_table="behaviour_occurrences",
             source_id=occurrence_id
         )
+        linked_actions = conn.execute("""
+            SELECT
+                ai.action_id,
+                ai.title,
+                ai.status,
+                ai.priority,
+                ai.created_at,
+                assigned_to.full_name AS assigned_to
+            FROM action_items ai
+            LEFT JOIN users assigned_to
+                ON ai.assigned_to_user_id = assigned_to.user_id
+            WHERE ai.source_table = 'behaviour_occurrences'
+              AND ai.source_id = ?
+            ORDER BY ai.created_at DESC, ai.action_id DESC
+        """, (occurrence_id,)).fetchall()
+        shift_context = get_behaviour_shift_context(
+            conn, occurrence["shift_id"]
+        )
     except PermissionError:
         return "Access denied", 403
     finally:
         conn.close()
 
+    if shift_context:
+        occurrence.update({
+            key: shift_context[key]
+            for key in ("shift_date", "shift_type")
+            if key in shift_context
+        })
     local_time = behaviour_utc_to_vancouver(
         occurrence["occurred_at_utc"]
     )
@@ -21363,6 +21398,10 @@ def behaviour_review_detail(occurrence_id):
         management_notes=management_notes,
         current_user_reviewed=any(
             review["user_id"] == actor["user_id"] for review in reviews
+        ),
+        linked_actions=linked_actions,
+        can_manage_actions=(
+            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
         ),
         storyline_return_context=_storyline_return_context(
             request.args, occurrence["client_id"]
@@ -21434,6 +21473,149 @@ def add_behaviour_management_note(occurrence_id):
         occurrence_id=occurrence_id,
         **(return_context or {})
     ))
+
+
+@app.route(
+    "/manager-review/behaviour/<int:occurrence_id>/action/new",
+    methods=["GET", "POST"]
+)
+def behaviour_action_new(occurrence_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn,
+            session["user_id"]
+        )
+        if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+            conn.close()
+            return "Access denied", 403
+
+        occurrence_row = conn.execute("""
+            SELECT bo.*, c.client_name,
+                   recorder.full_name AS recorder_name,
+                   voided_by.full_name AS voided_by_name
+            FROM behaviour_occurrences bo
+            JOIN clients c ON c.client_id = bo.client_id
+            JOIN users recorder ON recorder.user_id = bo.recorded_by_user_id
+            LEFT JOIN users voided_by ON voided_by.user_id = bo.voided_by_user_id
+            WHERE bo.behaviour_occurrence_id = ?
+        """, (occurrence_id,)).fetchone()
+        if occurrence_row is None:
+            conn.close()
+            return "Behaviour occurrence not found", 404
+
+        occurrence = dict(occurrence_row)
+        occurrence["local_time"] = behaviour_utc_to_vancouver(
+            occurrence["occurred_at_utc"]
+        ).strftime("%Y-%m-%d %H:%M")
+        shift_context = get_behaviour_shift_context(
+            conn, occurrence["shift_id"]
+        )
+        if shift_context:
+            occurrence.update({
+                key: shift_context[key]
+                for key in ("shift_date", "shift_type")
+                if key in shift_context
+            })
+
+        active_users = conn.execute("""
+            SELECT user_id, full_name, role
+            FROM users
+            WHERE active = 1
+            ORDER BY full_name
+        """).fetchall()
+        return_context = _storyline_return_context(
+            request.args if request.method == "GET" else request.form,
+            occurrence["client_id"]
+        )
+
+        if request.method == "POST":
+            title = request.form.get("title", "").strip()
+            description = request.form.get("description", "").strip()
+            priority = request.form.get("priority", "Medium").strip()
+            assigned_to_user_id = request.form.get(
+                "assigned_to_user_id", ""
+            ).strip()
+            error = None
+
+            if not title:
+                error = "Action title is required."
+            elif priority not in ["High", "Medium", "Low"]:
+                error = "Invalid priority."
+
+            if assigned_to_user_id:
+                try:
+                    assigned_to_user_id = int(assigned_to_user_id)
+                except ValueError:
+                    assigned_to_user_id = None
+                    error = "Invalid assigned user."
+                else:
+                    active_user_ids = {
+                        user["user_id"] for user in active_users
+                    }
+                    if assigned_to_user_id not in active_user_ids:
+                        error = "Invalid assigned user."
+            else:
+                assigned_to_user_id = None
+
+            if error:
+                conn.close()
+                return render_template(
+                    "behaviour_action_new.html",
+                    occurrence=occurrence,
+                    categories=_behaviour_categories_for_row(occurrence),
+                    abc_sections=_behaviour_week_abc_sections(occurrence),
+                    active_users=active_users,
+                    error=error,
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    assigned_to_user_id=assigned_to_user_id,
+                    storyline_return_context=return_context
+                ), 400
+
+            action_id = create_action(
+                conn,
+                title=title,
+                description=description or None,
+                source_table="behaviour_occurrences",
+                source_id=occurrence_id,
+                shift_id=occurrence["shift_id"],
+                created_by_user_id=actor["user_id"],
+                assigned_to_user_id=assigned_to_user_id,
+                priority=priority
+            )
+            conn.commit()
+            conn.close()
+            return redirect(url_for("action_detail", action_id=action_id))
+
+        default_description = (
+            f"Behaviour occurrence\n"
+            f"Client: {occurrence['client_name']}\n"
+            f"Occurred: {behaviour_utc_to_vancouver(occurrence['occurred_at_utc']).strftime('%Y-%m-%d %H:%M')}\n"
+            f"Record format: {occurrence['record_format']}\n"
+            f"Status: {occurrence['status']}"
+        )
+        conn.close()
+        return render_template(
+            "behaviour_action_new.html",
+            occurrence=occurrence,
+            categories=_behaviour_categories_for_row(occurrence),
+            abc_sections=_behaviour_week_abc_sections(occurrence),
+            active_users=active_users,
+            error=None,
+            title="Behaviour Follow-up",
+            description=default_description,
+            priority="Medium",
+            assigned_to_user_id=None,
+            storyline_return_context=return_context
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
 
 @app.route(
