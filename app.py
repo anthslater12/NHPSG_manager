@@ -21869,6 +21869,31 @@ def food_fluid_review_detail(entry_id):
 
         view_history = get_food_fluid_view_history(conn, entry_id)
         review_history = get_food_fluid_review_history(conn, entry_id)
+        management_notes = get_management_notes(
+            conn,
+            source_table="food_fluid_entries",
+            source_id=entry_id
+        )
+        linked_actions = conn.execute("""
+            SELECT
+                ai.action_id,
+                ai.title,
+                ai.status,
+                ai.priority,
+                ai.created_at,
+
+                assigned_to.full_name AS assigned_to
+
+            FROM action_items ai
+
+            LEFT JOIN users assigned_to
+                ON ai.assigned_to_user_id = assigned_to.user_id
+
+            WHERE ai.source_table = 'food_fluid_entries'
+              AND ai.source_id = ?
+
+            ORDER BY ai.created_at DESC, ai.action_id DESC
+        """, (entry_id,)).fetchall()
     except PermissionError:
         conn.rollback()
         conn.close()
@@ -21892,11 +21917,208 @@ def food_fluid_review_detail(entry_id):
         view_history=view_history,
         review_history=review_history,
         reviewed_by_current_user=reviewed_by_current_user,
+        management_notes=management_notes,
+        linked_actions=linked_actions,
+        can_manage_actions=(
+            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        ),
         state_filter=get_food_fluid_review_filter(),
         storyline_return_context=_storyline_return_context(
             request.args, entry["client_id"]
         )
     )
+
+
+@app.route(
+    "/manager-review/food-fluid/<int:entry_id>/management-note",
+    methods=["POST"]
+)
+def add_food_fluid_management_note(entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = get_food_fluid_review_actor(conn, session["user_id"])
+        entry = get_food_fluid_management_entry(conn, entry_id)
+        if entry is None:
+            conn.rollback()
+            return "Food & Fluid entry not found", 404
+
+        return_context = _storyline_return_context(
+            request.args, entry["client_id"]
+        )
+        note_text = request.form.get("note_text", "").strip()
+        if not note_text:
+            conn.rollback()
+            return redirect(url_for(
+                "food_fluid_review_detail",
+                entry_id=entry_id,
+                state=get_food_fluid_review_filter(),
+                note_error="Management note text is required.",
+                **(return_context or {})
+            ))
+
+        add_management_note(
+            conn,
+            source_table="food_fluid_entries",
+            source_id=entry_id,
+            note_text=note_text,
+            created_by_user_id=actor["user_id"],
+            visibility="management_only",
+            shift_id=entry["shift_id"]
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return redirect(url_for(
+        "food_fluid_review_detail",
+        entry_id=entry_id,
+        state=get_food_fluid_review_filter(),
+        **(return_context or {})
+    ))
+
+
+@app.route(
+    "/manager-review/food-fluid/<int:entry_id>/action/new",
+    methods=["GET", "POST"]
+)
+def food_fluid_action_new(entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_food_fluid_management_actor(
+            conn,
+            session["user_id"]
+        )
+        entry = get_food_fluid_management_entry(conn, entry_id)
+        if entry is None:
+            conn.close()
+            return "Food & Fluid entry not found", 404
+
+        active_users = conn.execute("""
+            SELECT
+                user_id,
+                full_name,
+                role
+            FROM users
+            WHERE active = 1
+            ORDER BY full_name
+        """).fetchall()
+
+        return_context = _storyline_return_context(
+            request.args, entry["client_id"]
+        )
+        state_filter = get_food_fluid_review_filter()
+
+        if request.method == "POST":
+            title = request.form.get("title", "").strip()
+            description = request.form.get("description", "").strip()
+            priority = request.form.get("priority", "Medium").strip()
+            assigned_to_user_id = request.form.get(
+                "assigned_to_user_id", ""
+            ).strip()
+            error = None
+
+            if not title:
+                error = "Action title is required."
+            elif priority not in ["High", "Medium", "Low"]:
+                error = "Invalid priority."
+
+            if assigned_to_user_id:
+                try:
+                    assigned_to_user_id = int(assigned_to_user_id)
+                except ValueError:
+                    assigned_to_user_id = None
+                    error = "Invalid assigned user."
+                else:
+                    active_user_ids = {
+                        user["user_id"] for user in active_users
+                    }
+                    if assigned_to_user_id not in active_user_ids:
+                        error = "Invalid assigned user."
+            else:
+                assigned_to_user_id = None
+
+            if error:
+                conn.close()
+                return render_template(
+                    "food_fluid_action_new.html",
+                    entry=entry,
+                    active_users=active_users,
+                    error=error,
+                    title=title,
+                    description=description,
+                    priority=priority,
+                    assigned_to_user_id=assigned_to_user_id,
+                    state_filter=state_filter,
+                    storyline_return_context=return_context
+                ), 400
+
+            action_id = create_action(
+                conn,
+                title=title,
+                description=description or None,
+                source_table="food_fluid_entries",
+                source_id=entry_id,
+                shift_id=entry["shift_id"],
+                created_by_user_id=actor["user_id"],
+                assigned_to_user_id=assigned_to_user_id,
+                priority=priority
+            )
+
+            conn.commit()
+            conn.close()
+
+            return redirect(url_for(
+                "action_detail",
+                action_id=action_id
+            ))
+
+        default_description = (
+            f"Food & Fluid entry\n"
+            f"Date: {entry['shift_date']}\n"
+            f"Shift: {entry['shift_type']}\n"
+            f"Client: {entry['client_name']}\n"
+            f"Event: {entry['event_local_display']}\n"
+            f"Interaction: {entry['interaction_type']}\n"
+            f"Item: {entry['item_description']}\n"
+            f"Outcome: {entry['outcome']}"
+        )
+        if entry["additional_details"]:
+            default_description += (
+                f"\nAdditional details: "
+                f"{entry['additional_details']}"
+            )
+
+        conn.close()
+        return render_template(
+            "food_fluid_action_new.html",
+            entry=entry,
+            active_users=active_users,
+            error=None,
+            title=f"Food & Fluid Follow-up: {entry['item_description']}",
+            description=default_description,
+            priority="Medium",
+            assigned_to_user_id=None,
+            state_filter=state_filter,
+            storyline_return_context=return_context
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
 
 @app.route(
