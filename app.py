@@ -20284,6 +20284,11 @@ def shift_note_action_new(note_id):
         conn.close()
         return "Shift note not found", 404
 
+    return_context = _storyline_return_context(
+        request.args,
+        entry["client_id"]
+    )
+
     active_users = conn.execute("""
         SELECT
             user_id,
@@ -20345,7 +20350,8 @@ def shift_note_action_new(note_id):
                 title=title,
                 description=description,
                 priority=priority,
-                assigned_to_user_id=assigned_to_user_id
+                assigned_to_user_id=assigned_to_user_id,
+                storyline_return_context=return_context
             )
 
         action_id = create_action(
@@ -20367,7 +20373,8 @@ def shift_note_action_new(note_id):
         return redirect(
             url_for(
                 "action_detail",
-                action_id=action_id
+                action_id=action_id,
+                **(return_context or {})
             )
         )
 
@@ -20392,7 +20399,8 @@ def shift_note_action_new(note_id):
         title="Shift Note Follow-up",
         description=default_description,
         priority="Medium",
-        assigned_to_user_id=None
+        assigned_to_user_id=None,
+        storyline_return_context=return_context
     )
 
 @app.route(
@@ -21601,7 +21609,11 @@ def behaviour_action_new(occurrence_id):
             )
             conn.commit()
             conn.close()
-            return redirect(url_for("action_detail", action_id=action_id))
+            return redirect(url_for(
+                "action_detail",
+                action_id=action_id,
+                **(return_context or {})
+            ))
 
         default_description = (
             f"Behaviour occurrence\n"
@@ -21912,7 +21924,8 @@ def sleep_action_new(sleep_event_id):
 
             return redirect(url_for(
                 "action_detail",
-                action_id=action_id
+                action_id=action_id,
+                **(return_context or {})
             ))
 
         default_description = (
@@ -22354,7 +22367,8 @@ def activity_action_new(activity_id):
 
             return redirect(url_for(
                 "action_detail",
-                action_id=action_id
+                action_id=action_id,
+                **(return_context or {})
             ))
 
         default_description = (
@@ -22740,7 +22754,8 @@ def food_fluid_action_new(entry_id):
 
             return redirect(url_for(
                 "action_detail",
-                action_id=action_id
+                action_id=action_id,
+                **(return_context or {})
             ))
 
         default_description = (
@@ -23557,7 +23572,8 @@ def housekeeping_action_new(entry_id):
             ht.task_name,
 
             s.shift_date,
-            s.shift_type
+            s.shift_type,
+            s.client_id
 
         FROM shift_housekeeping_task_entries hte
 
@@ -23574,6 +23590,11 @@ def housekeeping_action_new(entry_id):
     if entry is None:
         conn.close()
         return "Housekeeping task entry not found", 404
+
+    return_context = _storyline_return_context(
+        request.args,
+        entry["client_id"]
+    )
 
     active_users = conn.execute("""
         SELECT
@@ -23636,7 +23657,8 @@ def housekeeping_action_new(entry_id):
                 title=title,
                 description=description,
                 priority=priority,
-                assigned_to_user_id=assigned_to_user_id
+                assigned_to_user_id=assigned_to_user_id,
+                storyline_return_context=return_context
             )
 
         action_id = create_action(
@@ -23657,7 +23679,8 @@ def housekeeping_action_new(entry_id):
         return redirect(
             url_for(
                 "action_detail",
-                action_id=action_id
+                action_id=action_id,
+                **(return_context or {})
             )
         )
 
@@ -23687,7 +23710,8 @@ def housekeeping_action_new(entry_id):
         ),
         description=default_description,
         priority="Medium",
-        assigned_to_user_id=None
+        assigned_to_user_id=None,
+        storyline_return_context=return_context
     )
 
 @app.route(
@@ -24006,7 +24030,8 @@ def toileting_action_new(entry_id):
             te.general_comments,
 
             s.shift_date,
-            s.shift_type
+            s.shift_type,
+            s.client_id
 
         FROM toileting_events te
 
@@ -24021,6 +24046,10 @@ def toileting_action_new(entry_id):
         return "Toileting event not found", 404
 
     entry = dict(entry)
+    return_context = _storyline_return_context(
+        request.args,
+        entry["client_id"]
+    )
     entry["location_display"] = format_toileting_location(
         entry["location"], entry["location_other"]
     )
@@ -24088,7 +24117,8 @@ def toileting_action_new(entry_id):
                 title=title,
                 description=description,
                 priority=priority,
-                assigned_to_user_id=assigned_to_user_id
+                assigned_to_user_id=assigned_to_user_id,
+                storyline_return_context=return_context
             )
 
         action_id = create_action(
@@ -24109,7 +24139,8 @@ def toileting_action_new(entry_id):
         return redirect(
             url_for(
                 "action_detail",
-                action_id=action_id
+                action_id=action_id,
+                **(return_context or {})
             )
         )
 
@@ -24137,7 +24168,8 @@ def toileting_action_new(entry_id):
         title=f"Toileting Follow-up: {entry['event_type']}",
         description=default_description,
         priority="Medium",
-        assigned_to_user_id=None
+        assigned_to_user_id=None,
+        storyline_return_context=return_context
     )
 
 @app.route("/manager-review/care/<int:entry_id>")
@@ -24397,7 +24429,8 @@ def care_action_new(entry_id):
             ct.task_name,
 
             s.shift_date,
-            s.shift_type
+            s.shift_type,
+            s.client_id
 
         FROM shift_care_task_entries cte
 
@@ -24413,6 +24446,11 @@ def care_action_new(entry_id):
     if entry is None:
         conn.close()
         return "Care task entry not found", 404
+
+    return_context = _storyline_return_context(
+        request.args,
+        entry["client_id"]
+    )
 
     active_users = conn.execute("""
         SELECT
@@ -24474,7 +24512,8 @@ def care_action_new(entry_id):
                 title=title,
                 description=description,
                 priority=priority,
-                assigned_to_user_id=assigned_to_user_id
+                assigned_to_user_id=assigned_to_user_id,
+                storyline_return_context=return_context
             )
 
         action_id = create_action(
@@ -24495,7 +24534,8 @@ def care_action_new(entry_id):
         return redirect(
             url_for(
                 "action_detail",
-                action_id=action_id
+                action_id=action_id,
+                **(return_context or {})
             )
         )
 
@@ -24522,7 +24562,8 @@ def care_action_new(entry_id):
         title=f"Care Follow-up: {entry['task_name']}",
         description=default_description,
         priority="Medium",
-        assigned_to_user_id=None
+        assigned_to_user_id=None,
+        storyline_return_context=return_context
     )
 
 @app.route(
@@ -24954,6 +24995,125 @@ def parse_active_action_assignee(conn, raw_value):
 
     return assignee["user_id"]
 
+
+ACTION_SOURCE_DEFINITIONS = {
+    "shift_notes": {
+        "label": "Shift Note",
+        "endpoint": "shift_note_review_detail",
+        "id_parameter": "note_id",
+    },
+    "food_fluid_entries": {
+        "label": "Food & Fluid",
+        "endpoint": "food_fluid_review_detail",
+        "id_parameter": "entry_id",
+    },
+    "shift_activities": {
+        "label": "Activity",
+        "endpoint": "activity_review_detail",
+        "id_parameter": "activity_id",
+    },
+    "sleep_events": {
+        "label": "Sleep",
+        "endpoint": "sleep_review_detail",
+        "id_parameter": "sleep_event_id",
+    },
+    "behaviour_occurrences": {
+        "label": "Behaviour",
+        "endpoint": "behaviour_review_detail",
+        "id_parameter": "occurrence_id",
+    },
+    "incident_reports": {
+        "label": "Incident",
+        "endpoint": "incident_review_detail",
+        "id_parameter": "incident_id",
+    },
+    "shift_care_task_entries": {
+        "label": "Care",
+        "endpoint": "care_review_detail",
+        "id_parameter": "entry_id",
+    },
+    "toileting_events": {
+        "label": "Toileting",
+        "endpoint": "toileting_review_detail",
+        "id_parameter": "entry_id",
+    },
+    "shift_housekeeping_task_entries": {
+        "label": "Housekeeping",
+        "endpoint": "housekeeping_review_detail",
+        "id_parameter": "entry_id",
+    },
+    # Retain labels for historical Action records without guessing a route.
+    "behaviour_entries": {
+        "label": "Behaviour",
+    },
+    "medication_entries": {
+        "label": "Medication",
+    },
+    "care_entries": {
+        "label": "Care Entry",
+    },
+}
+
+
+def get_action_storyline_return_context(values):
+    """Keep only validated, non-redirect storyline parameters for an Action."""
+    storyline_client_id = values.get("storyline_client_id", type=int)
+    storyline_filter = values.get("storyline_filter", "")
+    storyline_page = values.get("storyline_page", type=int)
+    if (
+        storyline_client_id is None
+        or storyline_filter not in STORYLINE_FILTERS
+        or storyline_page is None
+        or storyline_page < 1
+    ):
+        return None
+    return {
+        "storyline_client_id": storyline_client_id,
+        "storyline_filter": storyline_filter,
+        "storyline_page": storyline_page,
+    }
+
+
+def get_action_source_context(action, can_link=False, return_context=None):
+    """Resolve safe display metadata and an optional source-review URL."""
+    definition = ACTION_SOURCE_DEFINITIONS.get(action["source_table"])
+    source_id = action["source_id"]
+    context = {
+        "label": (
+            definition["label"]
+            if definition is not None
+            else "Source record"
+        ),
+        "source_id": source_id,
+        "url": None,
+    }
+    if (
+        not can_link
+        or definition is None
+        or source_id is None
+        or "endpoint" not in definition
+        or "id_parameter" not in definition
+    ):
+        return context
+
+    try:
+        source_id = int(source_id)
+        url_values = {
+            definition["id_parameter"]: source_id
+        }
+        if return_context:
+            url_values.update(return_context)
+        context["url"] = url_for(
+            definition["endpoint"],
+            **url_values
+        )
+        context["source_id"] = source_id
+    except (TypeError, ValueError):
+        # Legacy or malformed source metadata remains visible without a link.
+        context["url"] = None
+
+    return context
+
 @app.route("/actions")
 def actions():
     if "user_id" not in session:
@@ -24991,6 +25151,14 @@ def actions():
             END,
             ai.created_at DESC
     """).fetchall()
+
+    actions = [
+        {
+            **dict(action),
+            "source_context": get_action_source_context(action)
+        }
+        for action in actions
+    ]
 
     conn.close()
 
@@ -25037,6 +25205,14 @@ def my_actions():
             END,
             ai.created_at DESC
     """, (actor["user_id"],)).fetchall()
+
+    actions = [
+        {
+            **dict(action),
+            "source_context": get_action_source_context(action)
+        }
+        for action in actions
+    ]
 
     conn.close()
 
@@ -25438,6 +25614,12 @@ def action_detail(action_id):
         ORDER BY al.activity_datetime
     """, (action_id, action_id)).fetchall()
 
+    source_context = get_action_source_context(
+        action,
+        can_link=not is_assigned_worker,
+        return_context=get_action_storyline_return_context(request.args)
+    )
+
     conn.close()
 
     return render_template(
@@ -25448,6 +25630,7 @@ def action_detail(action_id):
         history=history,
         can_manage_action=can_manage_action,
         assigned_worker_view=is_assigned_worker,
+        source_context=source_context,
         worker_status_options=WORKER_ACTION_STATUS_TRANSITIONS.get(
             action["status"],
             ()

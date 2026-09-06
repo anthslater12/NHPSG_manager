@@ -226,6 +226,8 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         self.assertIn(b"Worker action", action_list.data)
         self.assertNotIn(b"Other worker action", action_list.data)
         self.assertNotIn(b"Unassigned action", action_list.data)
+        self.assertIn(b"Incident", action_list.data)
+        self.assertNotIn(b"incident_reports", action_list.data)
         self.assertIn(
             f"/action/{own_action_id}".encode(),
             action_list.data
@@ -241,13 +243,15 @@ class IncidentManagementEngagementTests(unittest.TestCase):
             "2026-08-10",
             "Support Worker",
             "Program Manager",
-            "incident_reports",
+            "Incident",
             "#41",
             "Back to My Actions",
         ):
             self.assertIn(value.encode(), detail.data)
         self.assertNotIn(b"Update Action", detail.data)
         self.assertNotIn(b"Add Comment", detail.data)
+        self.assertNotIn(b"View Source Record", detail.data)
+        self.assertNotIn(b"/manager-review/incidents/41", detail.data)
 
         self.assertEqual(
             self.client.post(
@@ -329,12 +333,15 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         self.assertEqual(management_detail.status_code, 200)
         self.assertIn(b"Update Action", management_detail.data)
         self.assertIn(b"Add Comment", management_detail.data)
+        self.assertIn(b"View Source Record", management_detail.data)
+        self.assertIn(b"/manager-review/incidents/41", management_detail.data)
 
         self.login(7)
         consultant_detail = self.client.get(f"/action/{second_action_id}")
         self.assertEqual(consultant_detail.status_code, 200)
         self.assertNotIn(b"Update Action", consultant_detail.data)
         self.assertNotIn(b"Add Comment", consultant_detail.data)
+        self.assertIn(b"View Source Record", consultant_detail.data)
 
     def test_assigned_worker_can_progress_action_comment_and_view_history(self):
         action_id = self.add_action(
@@ -949,7 +956,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         action_id = self.rows("SELECT action_id FROM action_items")[0][0]
         action_detail = self.client.get(f"/action/{action_id}")
         self.assertEqual(action_detail.status_code, 200)
-        self.assertIn(b"View Source Incident", action_detail.data)
+        self.assertIn(b"View Source Record", action_detail.data)
         self.assertIn(b"/manager-review/incidents/41", action_detail.data)
 
         self.login(1)

@@ -60,35 +60,16 @@
         <tr>
             <th>Source</th>
             <td>
-                {# source_table/source_id identify the originating operational record; shift context is optional. #}
-                {{ action.source_table }}
-                {% if action.source_id %}
-                    #{{ action.source_id }}
+                {{ source_context.label }}
+                {% if source_context.source_id is not none %}
+                    #{{ source_context.source_id }}
                 {% endif %}
 
-                {% if (
-                    action.source_table == "shift_notes"
-                    and action.source_id
-                ) %}
+                {% if source_context.url %}
                     <br>
 
-                    <a href="{{ url_for(
-                        'shift_note_review_detail',
-                        note_id=action.source_id
-                    ) }}">
-                        View Source Shift Note
-                    </a>
-                {% elif (
-                    action.source_table == "incident_reports"
-                    and action.source_id
-                ) %}
-                    <br>
-
-                    <a href="{{ url_for(
-                        'incident_review_detail',
-                        incident_id=action.source_id
-                    ) }}">
-                        View Source Incident
+                    <a href="{{ source_context.url }}">
+                        View Source Record
                     </a>
                 {% endif %}
             </td>

@@ -32,22 +32,10 @@
 			
 			<td>
 
-				{% if action.source_table == "shift_notes" %}
-					Shift Note
-				{% elif action.source_table == "incident_reports" %}
-					Incident
-				{% elif action.source_table == "behaviour_entries" %}
-					Behaviour
-				{% elif action.source_table == "medication_entries" %}
-					Medication
-				{% elif action.source_table == "care_entries" %}
-					Care Entry
-				{% else %}
-					{{ action.source_table }}
-				{% endif %}
+				{{ action.source_context.label }}
 
-				{% if action.source_id %}
-					#{{ action.source_id }}
+				{% if action.source_context.source_id is not none %}
+					#{{ action.source_context.source_id }}
 				{% endif %}
 
 			</td>

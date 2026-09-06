@@ -32,9 +32,9 @@
             <td>{{ action.status }}</td>
 
             <td>
-                {{ action.source_table }}
-                {% if action.source_id %}
-                    #{{ action.source_id }}
+                {{ action.source_context.label }}
+                {% if action.source_context.source_id is not none %}
+                    #{{ action.source_context.source_id }}
                 {% endif %}
             </td>
 
