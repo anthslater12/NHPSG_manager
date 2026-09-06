@@ -24948,6 +24948,49 @@ def actions():
         actions=actions
     )
 
+@app.route("/my-actions")
+def my_actions():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_active_authenticated_user(
+            conn,
+            session["user_id"]
+        )
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
+
+    actions = conn.execute("""
+        SELECT
+            ai.*,
+            u.full_name AS assigned_to
+        FROM action_items ai
+
+        LEFT JOIN users u
+            ON ai.assigned_to_user_id = u.user_id
+
+        WHERE ai.assigned_to_user_id = ?
+
+        ORDER BY
+            CASE ai.priority
+                WHEN 'High' THEN 1
+                WHEN 'Medium' THEN 2
+                WHEN 'Low' THEN 3
+                ELSE 4
+            END,
+            ai.created_at DESC
+    """, (actor["user_id"],)).fetchall()
+
+    conn.close()
+
+    return render_template(
+        "my_actions.html",
+        actions=actions
+    )
+
 @app.route("/action/<int:action_id>", methods=["GET", "POST"])
 def action_detail(action_id):
 
@@ -24956,7 +24999,7 @@ def action_detail(action_id):
 
     conn = get_db()
     try:
-        actor = get_behaviour_review_or_management_actor(
+        actor = get_active_authenticated_user(
             conn,
             session["user_id"]
         )
@@ -24967,7 +25010,11 @@ def action_detail(action_id):
     can_manage_action = (
         actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
     )
-    if request.method == "POST" and not can_manage_action:
+    if (
+        request.method == "POST"
+        and actor["role"] != "Support Worker"
+        and not can_manage_action
+    ):
         conn.close()
         return "Access denied", 403
 
@@ -24981,6 +25028,21 @@ def action_detail(action_id):
     if action is None:
         conn.close()
         return "Action not found", 404
+
+    is_management_actor = (
+        actor["role"] in BEHAVIOUR_REVIEW_AUTHORITY_ROLES
+    )
+    is_assigned_worker = (
+        actor["role"] == "Support Worker"
+        and action["assigned_to_user_id"] == actor["user_id"]
+    )
+    if not is_management_actor and not is_assigned_worker:
+        conn.close()
+        return "Access denied", 403
+
+    if request.method == "POST" and not can_manage_action:
+        conn.close()
+        return "Access denied", 403
 
     if request.method == "POST":
 
@@ -25188,7 +25250,8 @@ def action_detail(action_id):
         users=users,
         comments=comments,
         history=history,
-        can_manage_action=can_manage_action
+        can_manage_action=can_manage_action,
+        assigned_worker_view=is_assigned_worker
     )
 
 #####################################################################

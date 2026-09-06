@@ -7,7 +7,11 @@
     <h2>Action Detail</h2>
 
     <p>
-        <a href="/actions">← Back to Actions</a>
+        {% if assigned_worker_view %}
+            <a href="{{ url_for('my_actions') }}">← Back to My Actions</a>
+        {% else %}
+            <a href="/actions">← Back to Actions</a>
+        {% endif %}
     </p>
 
     <table>

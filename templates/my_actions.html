@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+
+    <h2>My Actions</h2>
+
+    {% if actions %}
+
+    <table>
+
+        <tr>
+            <th>Created</th>
+            <th>Priority</th>
+            <th>Status</th>
+            <th>Source</th>
+            <th>Title</th>
+            <th>Due Date</th>
+            <th></th>
+        </tr>
+
+        {% for action in actions %}
+
+        <tr>
+
+            <td>{{ action.created_at }}</td>
+
+            <td>{{ action.priority }}</td>
+
+            <td>{{ action.status }}</td>
+
+            <td>
+                {{ action.source_table }}
+                {% if action.source_id %}
+                    #{{ action.source_id }}
+                {% endif %}
+            </td>
+
+            <td>{{ action.title }}</td>
+
+            <td>{{ action.due_date or "" }}</td>
+
+            <td>
+                <a href="{{ url_for('action_detail', action_id=action.action_id) }}">
+                    View
+                </a>
+            </td>
+
+        </tr>
+
+        {% endfor %}
+
+    </table>
+
+    {% else %}
+
+        <p>No actions assigned to you.</p>
+
+    {% endif %}
+
+</div>
+
+{% endblock %}
