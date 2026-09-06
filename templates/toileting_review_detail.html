@@ -70,6 +70,16 @@
             <td>{{ entry.location_display|default(entry.location) }}</td>
         </tr>
 
+        <tr>
+            <th>Active</th>
+            <td>{{ "Active" if entry.active else "Inactive" }}</td>
+        </tr>
+
+        <tr>
+            <th>Created</th>
+            <td>{{ entry.created_at or "Not recorded" }}</td>
+        </tr>
+
     </table>
 
     <h3>BM Information</h3>
@@ -86,6 +96,31 @@
             <tr>
                 <th>BM Consistency</th>
                 <td>{{ entry.bm_consistency or "—" }}</td>
+            </tr>
+
+            <tr>
+                <th>BM Colour</th>
+                <td>{{ entry.bm_colour or "Not recorded" }}</td>
+            </tr>
+
+            <tr>
+                <th>Estimated Bristol Type</th>
+                <td>{{ entry.estimated_bristol_type if entry.estimated_bristol_type is not none else "Not recorded" }}</td>
+            </tr>
+
+            <tr>
+                <th>Blood Observed</th>
+                <td>{{ "Yes" if entry.bm_blood_observed == 1 else "No" if entry.bm_blood_observed == 0 else "Not recorded" }}</td>
+            </tr>
+
+            <tr>
+                <th>Mucus Observed</th>
+                <td>{{ "Yes" if entry.bm_mucus_observed == 1 else "No" if entry.bm_mucus_observed == 0 else "Not recorded" }}</td>
+            </tr>
+
+            <tr>
+                <th>Unusual Colour</th>
+                <td>{{ "Yes" if entry.bm_unusual_colour == 1 else "No" if entry.bm_unusual_colour == 0 else "Not recorded" }}</td>
             </tr>
 
             <tr>
@@ -117,6 +152,26 @@
             <tr>
                 <th>Urine Volume</th>
                 <td>{{ entry.urine_volume or "—" }}</td>
+            </tr>
+
+            <tr>
+                <th>Urine Colour</th>
+                <td>{{ entry.urine_colour or "Not recorded" }}</td>
+            </tr>
+
+            <tr>
+                <th>Blood Observed</th>
+                <td>{{ "Yes" if entry.urine_blood_observed == 1 else "No" if entry.urine_blood_observed == 0 else "Not recorded" }}</td>
+            </tr>
+
+            <tr>
+                <th>Strong Odour Observed</th>
+                <td>{{ "Yes" if entry.urine_strong_odour == 1 else "No" if entry.urine_strong_odour == 0 else "Not recorded" }}</td>
+            </tr>
+
+            <tr>
+                <th>Unusual Colour</th>
+                <td>{{ "Yes" if entry.urine_unusual_colour == 1 else "No" if entry.urine_unusual_colour == 0 else "Not recorded" }}</td>
             </tr>
 
             <tr>
@@ -172,6 +227,43 @@
         <tr>
             <th>General Comments</th>
             <td>{{ entry.general_comments or "—" }}</td>
+        </tr>
+
+    </table>
+
+    <h3>Concerns</h3>
+
+    <table class="management-detail-table">
+
+        <tr>
+            <th>Pain or Distress</th>
+            <td>{{ "Yes" if entry.pain_or_distress == 1 else "No" if entry.pain_or_distress == 0 else "Not recorded" }}</td>
+        </tr>
+
+        <tr>
+            <th>Other Concern</th>
+            <td>{{ "Yes" if entry.other_concern == 1 else "No" if entry.other_concern == 0 else "Not recorded" }}</td>
+        </tr>
+
+        <tr>
+            <th>Concern Details</th>
+            <td>{{ entry.concern_details or "Not recorded" }}</td>
+        </tr>
+
+    </table>
+
+    <h3>Correction Context</h3>
+
+    <table class="management-detail-table">
+
+        <tr>
+            <th>Correction of Event ID</th>
+            <td>{{ entry.correction_of_event_id or "None" }}</td>
+        </tr>
+
+        <tr>
+            <th>Correction Reason</th>
+            <td>{{ entry.correction_reason or "Not recorded" }}</td>
         </tr>
 
     </table>

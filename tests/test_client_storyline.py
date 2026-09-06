@@ -160,21 +160,23 @@ class ClientStorylineTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def add_behaviour_occurrence(self, occurrence_id, client_id=1, status="Recorded"):
+    def add_behaviour_occurrence(
+        self, occurrence_id, client_id=1, status="Recorded", shift_id=None
+    ):
         conn = sqlite3.connect(self.path)
         conn.execute("""
             INSERT INTO behaviour_occurrences
             (behaviour_occurrence_id, client_id, occurred_at_utc,
              aggression_towards_others, notes, recorded_by_user_id,
              recorded_at_utc, submission_token, status,
-             voided_by_user_id, voided_at_utc, void_reason)
+             voided_by_user_id, voided_at_utc, void_reason, shift_id)
             VALUES (?, ?, '2026-08-02T17:00:00Z', 1, 'Behaviour notes',
                     1, '2026-08-02T17:01:00Z', ?, ?,
                     CASE WHEN ? = 'Voided' THEN 2 ELSE NULL END,
                     CASE WHEN ? = 'Voided' THEN '2026-08-02T17:02:00Z' ELSE NULL END,
-                    CASE WHEN ? = 'Voided' THEN 'Test void' ELSE NULL END)
+                    CASE WHEN ? = 'Voided' THEN 'Test void' ELSE NULL END, ?)
         """, (occurrence_id, client_id, f"behaviour-{occurrence_id}", status,
-               status, status, status))
+               status, status, status, shift_id))
         conn.commit()
         conn.close()
 
@@ -1355,6 +1357,93 @@ class ClientStorylineTests(unittest.TestCase):
         """).fetchone()
         conn.close()
         self.assertEqual(note, ("Consultant follow-up", 9, "management_only"))
+
+    def test_behaviour_detail_displays_only_linked_actions_and_management_hub(self):
+        self.add_behaviour_occurrence(47)
+        conn = sqlite3.connect(self.path)
+        conn.executemany("""
+            INSERT INTO action_items
+            (title, source_table, source_id, created_by_user_id, priority)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            ("Behaviour linked action", "behaviour_occurrences", 47, 2, "High"),
+            ("Unrelated action", "behaviour_occurrences", 999, 2, "Low"),
+        ))
+        conn.commit()
+        conn.close()
+
+        self.login(2, "Program Manager")
+        page = self.client.get("/manager-review/behaviour/47").data
+        self.assertIn(b"Linked Actions", page)
+        self.assertIn(b"Behaviour linked action", page)
+        self.assertNotIn(b"Unrelated action", page)
+        self.assertIn(b"Create Action", page)
+        self.assertIn(b"/manager-review", page)
+        self.assertIn(b"Not linked to a shift", page)
+
+    def test_behaviour_action_creation_preserves_source_shift_and_fields(self):
+        self.add_behaviour_occurrence(48, shift_id=10)
+        self.login(2, "Program Manager")
+
+        form = self.client.get(
+            "/manager-review/behaviour/48/action/new?storyline_client_id=1&"
+            "storyline_filter=Behaviour&storyline_page=4"
+        )
+        self.assertEqual(form.status_code, 200)
+        self.assertIn(b"Create Behaviour Action", form.data)
+        self.assertIn(b"Shift #10", form.data)
+        self.assertIn(b"2026-08-02 10:00", form.data)
+        self.assertNotIn(b"2026-08-02T17:00:00Z", form.data)
+        self.assertIn(b"storyline_client_id", form.data)
+
+        created = self.client.post(
+            "/manager-review/behaviour/48/action/new",
+            data={
+                "title": "Behaviour follow-up",
+                "description": "Review with the team",
+                "priority": "High",
+                "assigned_to_user_id": "1",
+                "storyline_client_id": "1",
+                "storyline_filter": "Behaviour",
+                "storyline_page": "4",
+            }
+        )
+        self.assertEqual(created.status_code, 302)
+        conn = sqlite3.connect(self.path)
+        action = conn.execute("""
+            SELECT title, description, priority, source_table, source_id,
+                   shift_id, created_by_user_id, assigned_to_user_id
+            FROM action_items
+            WHERE title = 'Behaviour follow-up'
+        """).fetchone()
+        conn.close()
+        self.assertEqual(action, (
+            "Behaviour follow-up", "Review with the team", "High",
+            "behaviour_occurrences", 48, 10, 2, 1
+        ))
+
+    def test_behaviour_action_authorization_matches_create_link(self):
+        self.add_behaviour_occurrence(49)
+        cases = (
+            (5, "Admin", 200, True),
+            (2, "Program Manager", 200, True),
+            (6, "Director", 200, True),
+            (9, "Behaviour Consultant", 403, False),
+            (1, "Support Worker", 403, False),
+            (8, "Program Manager", 403, False),
+            (10, "Behaviour Consultant", 403, False),
+        )
+        for user_id, role, expected_status, can_create in cases:
+            self.login(user_id, role)
+            detail = self.client.get("/manager-review/behaviour/49")
+            action_route = self.client.get(
+                "/manager-review/behaviour/49/action/new"
+            )
+            self.assertEqual(action_route.status_code, expected_status)
+            if can_create:
+                self.assertIn(b"Create Action", detail.data)
+            else:
+                self.assertNotIn(b"Create Action", detail.data)
 
     def test_behaviour_consultant_matches_manager_storyline_access(self):
         occurrence_id = 45

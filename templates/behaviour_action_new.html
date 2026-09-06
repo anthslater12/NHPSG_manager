@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Create Behaviour Action</h2>
+
+    <p>
+        <a href="{{ url_for(
+            'behaviour_review_detail',
+            occurrence_id=occurrence.behaviour_occurrence_id,
+            storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
+            storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
+            storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
+        ) }}">&larr; Back to Behaviour Management Review</a>
+    </p>
+
+    <h3>Source Record</h3>
+    <table class="management-detail-table">
+        <tr><th>Client</th><td>{{ occurrence.client_name }}</td></tr>
+        <tr><th>Shift</th><td>{% if occurrence.shift_id %}{% if occurrence.shift_date %}{{ occurrence.shift_date }} {{ occurrence.shift_type }}{% else %}Shift #{{ occurrence.shift_id }}{% endif %}{% else %}Not linked to a shift{% endif %}</td></tr>
+        <tr><th>Occurred</th><td>{{ occurrence.local_time }}</td></tr>
+        <tr><th>Record Format</th><td>{{ occurrence.record_format }}</td></tr>
+        <tr><th>Status</th><td>{{ occurrence.status }}</td></tr>
+        <tr><th>Recorded By</th><td>{{ occurrence.recorder_name }}</td></tr>
+        {% if occurrence.record_format == 'ABC' %}
+            {% for section in abc_sections %}
+                <tr><th>{{ section.heading }}</th><td>{% if section.items %}{{ section.items|join(', ') }}{% endif %}{% if section.other_details %} {{ section.other_details }}{% endif %}</td></tr>
+            {% endfor %}
+        {% else %}
+            <tr><th>Categories</th><td>{{ categories|join(', ') if categories else 'None recorded' }}</td></tr>
+            <tr><th>Notes</th><td>{{ occurrence.notes or 'No notes recorded.' }}</td></tr>
+        {% endif %}
+    </table>
+
+    {% if error %}<p class="error-message">{{ error }}</p>{% endif %}
+
+    <form method="post">
+        {% if storyline_return_context %}
+            <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
+            <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
+            <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+        {% endif %}
+        <p>
+            <label for="title">Action Title</label><br>
+            <input type="text" id="title" name="title" value="{{ title }}" required>
+        </p>
+        <p>
+            <label for="description">Description</label><br>
+            <textarea id="description" name="description" rows="8">{{ description }}</textarea>
+        </p>
+        <p>
+            <label for="priority">Priority</label><br>
+            <select id="priority" name="priority">
+                <option value="High"{% if priority == "High" %} selected{% endif %}>High</option>
+                <option value="Medium"{% if priority == "Medium" %} selected{% endif %}>Medium</option>
+                <option value="Low"{% if priority == "Low" %} selected{% endif %}>Low</option>
+            </select>
+        </p>
+        <p>
+            <label for="assigned_to_user_id">Assign To</label><br>
+            <select id="assigned_to_user_id" name="assigned_to_user_id">
+                <option value="">Unassigned</option>
+                {% for user in active_users %}
+                    <option value="{{ user.user_id }}"{% if assigned_to_user_id == user.user_id %} selected{% endif %}>{{ user.full_name }} &mdash; {{ user.role }}</option>
+                {% endfor %}
+            </select>
+        </p>
+        <button type="submit">Create Action</button>
+    </form>
+</div>
+{% endblock %}

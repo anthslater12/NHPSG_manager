@@ -90,6 +90,45 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
                 UNIQUE(source_table, source_id, user_id)
             );
 
+            CREATE TABLE management_notes (
+                management_note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                note_text TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'management_only',
+                created_by_user_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                active INTEGER NOT NULL DEFAULT 1,
+                shared_at TEXT,
+                shared_by_user_id INTEGER
+            );
+
+            CREATE TABLE action_items (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'Open',
+                priority TEXT DEFAULT 'Medium',
+                source_table TEXT,
+                source_id INTEGER,
+                assigned_to_user_id INTEGER,
+                created_by_user_id INTEGER,
+                due_date TEXT,
+                acknowledged_at TEXT,
+                completed_at TEXT,
+                closed_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                shift_id INTEGER
+            );
+
+            CREATE TABLE action_comments (
+                comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                comment TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
             INSERT INTO users
                 (user_id, username, password_hash, full_name, role, active)
             VALUES
@@ -493,6 +532,151 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
         self.assertIn("Admin User", voided)
         self.assertIn("Entered in error", voided)
         self.assertIn("2024-01-15 09:02", voided)
+
+    def test_management_notes_display_and_persist_for_food_fluid_entry(self):
+        conn = self.connect()
+        conn.execute("""
+            INSERT INTO management_notes (
+                source_table, source_id, note_text, visibility,
+                created_by_user_id, created_at, active
+            ) VALUES (
+                'food_fluid_entries', 1, 'Review the refusal pattern',
+                'management_only', 2, '2026-07-25 12:10:00', 1
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        self.login(1)
+        detail = self.client.get(
+            "/manager-review/food-fluid/1"
+        ).get_data(as_text=True)
+        self.assertIn("Management Notes", detail)
+        self.assertIn("Review the refusal pattern", detail)
+        self.assertIn("Manager User", detail)
+        self.assertIn("This note is visible to management only.", detail)
+
+        response = self.client.post(
+            "/manager-review/food-fluid/1/management-note?state=awaiting_review",
+            data={"note_text": "Follow up with the support team."},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self.connect()
+        note = conn.execute("""
+            SELECT management_note_id, source_table, source_id, note_text,
+                   visibility, created_by_user_id
+            FROM management_notes
+            WHERE note_text = 'Follow up with the support team.'
+        """).fetchone()
+        activity = conn.execute("""
+            SELECT activity_class, activity_type, user_id, shift_id,
+                   related_table, related_id
+            FROM activity_log
+            WHERE activity_type = 'management_note_added'
+        """).fetchone()
+        conn.close()
+
+        self.assertEqual(tuple(note), (
+            note["management_note_id"], "food_fluid_entries", 1,
+            "Follow up with the support team.",
+            "management_only", 1,
+        ))
+        self.assertEqual(activity["activity_class"], "MANAGEMENT_NOTE")
+        self.assertEqual(activity["activity_type"], "management_note_added")
+        self.assertEqual(activity["user_id"], 1)
+        self.assertEqual(activity["shift_id"], 10)
+        self.assertEqual(activity["related_table"], "management_notes")
+        self.assertEqual(
+            activity["related_id"], note["management_note_id"]
+        )
+
+    def test_management_note_route_requires_food_fluid_review_authority(self):
+        self.login(4, session_role="Admin")
+        before = self.count_rows("management_notes")
+        response = self.client.post(
+            "/manager-review/food-fluid/1/management-note",
+            data={"note_text": "Not authorized."},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.count_rows("management_notes"), before)
+
+    def test_linked_actions_display_and_create_with_food_fluid_source_context(self):
+        conn = self.connect()
+        conn.execute("""
+            INSERT INTO action_items (
+                title, description, status, priority, source_table,
+                source_id, assigned_to_user_id, created_by_user_id,
+                created_at, shift_id
+            ) VALUES (
+                'Check meal support plan', 'Review recent refusals',
+                'Open', 'High', 'food_fluid_entries', 1, 4, 2,
+                '2026-07-25 12:20:00', 10
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        self.login(1)
+        detail = self.client.get(
+            "/manager-review/food-fluid/1"
+        ).get_data(as_text=True)
+        self.assertIn("Linked Actions", detail)
+        self.assertIn("Check meal support plan", detail)
+        self.assertIn("Create Action", detail)
+
+        form = self.client.get(
+            "/manager-review/food-fluid/1/action/new?state=reviewed"
+        )
+        self.assertEqual(form.status_code, 200)
+        self.assertIn(b"Create Food &amp; Fluid Action", form.data)
+
+        response = self.client.post(
+            "/manager-review/food-fluid/1/action/new?state=reviewed",
+            data={
+                "title": "Discuss refused item",
+                "description": "Discuss with the team.",
+                "priority": "Medium",
+                "assigned_to_user_id": "4",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(
+            "/action/",
+            response.headers["Location"],
+        )
+
+        conn = self.connect()
+        action = conn.execute("""
+            SELECT title, description, priority, source_table, source_id,
+                   shift_id, created_by_user_id, assigned_to_user_id
+            FROM action_items
+            WHERE title = 'Discuss refused item'
+        """).fetchone()
+        conn.close()
+        self.assertEqual(tuple(action), (
+            "Discuss refused item", "Discuss with the team.", "Medium",
+            "food_fluid_entries", 1, 10, 1, 4,
+        ))
+
+    def test_food_fluid_action_route_is_manager_only(self):
+        for user_id in (4, 5):
+            with self.subTest(user_id=user_id):
+                self.login(user_id, session_role="Admin")
+                self.assertEqual(
+                    self.client.get(
+                        "/manager-review/food-fluid/1/action/new"
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    self.client.post(
+                        "/manager-review/food-fluid/1/action/new",
+                        data={"title": "Not authorized"},
+                    ).status_code,
+                    403,
+                )
+        self.assertEqual(self.count_rows("action_items"), 0)
 
     def test_no_inline_management_void_controls(self):
         self.login(1)

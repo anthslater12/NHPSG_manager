@@ -95,13 +95,42 @@ class ShiftActivitiesTests(unittest.TestCase):
                 WHERE active = 1;
 
                 CREATE TABLE action_items (
-                    action_id INTEGER PRIMARY KEY,
-                    title TEXT,
-                    due_date TEXT,
-                    priority TEXT,
-                    status TEXT,
+                    action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    status TEXT DEFAULT 'Open',
+                    priority TEXT DEFAULT 'Medium',
+                    source_table TEXT,
+                    source_id INTEGER,
                     assigned_to_user_id INTEGER,
-                    created_at TEXT
+                    created_by_user_id INTEGER,
+                    due_date TEXT,
+                    acknowledged_at TEXT,
+                    completed_at TEXT,
+                    closed_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    shift_id INTEGER
+                );
+
+                CREATE TABLE action_comments (
+                    comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    comment TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE management_notes (
+                    management_note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_table TEXT NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    note_text TEXT NOT NULL,
+                    visibility TEXT NOT NULL DEFAULT 'management_only',
+                    created_by_user_id INTEGER NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    shared_at TEXT,
+                    shared_by_user_id INTEGER
                 );
 
                 CREATE TABLE shift_notes (
@@ -129,7 +158,8 @@ class ShiftActivitiesTests(unittest.TestCase):
                     (6, 'Admin User', 'Admin', 1),
                     (7, 'Manager User', 'Program Manager', 1),
                     (8, 'Director User', 'Director', 1),
-                    (9, 'Inactive Manager', 'Admin', 0);
+                    (9, 'Consultant User', 'Behaviour Consultant', 1),
+                    (10, 'Inactive Manager', 'Admin', 0);
 
                 INSERT INTO clients VALUES
                     (1, 'Client One', 1),
@@ -401,7 +431,7 @@ class ShiftActivitiesTests(unittest.TestCase):
             self.client.get("/manager-review/activities").status_code,
             403
         )
-        self.login(9, "Admin")
+        self.login(10, "Admin")
         self.assertEqual(
             self.client.get("/manager-review/activities").status_code,
             403
@@ -454,6 +484,234 @@ class ShiftActivitiesTests(unittest.TestCase):
             and audit["summary"] == "Review acknowledgement recorded"
             for audit in review_audits
         ))
+
+    def test_management_notes_display_and_persist_for_activity(self):
+        activity_id = self.insert_activity(description="Meal preparation")
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute("""
+                INSERT INTO management_notes (
+                    source_table, source_id, note_text, visibility,
+                    created_by_user_id, created_at, active
+                ) VALUES (
+                    'shift_activities', ?, 'Review activity support needs',
+                    'management_only', 7, '2026-08-03 12:10:00', 1
+                )
+            """, (activity_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login(6, "Admin")
+        detail = self.client.get(
+            f"/manager-review/activities/{activity_id}"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Back to Management Review", detail.data)
+        self.assertIn(b"Meal preparation", detail.data)
+        self.assertIn(b"09:00", detail.data)
+        self.assertIn(b"Management Notes", detail.data)
+        self.assertIn(b"Review activity support needs", detail.data)
+        self.assertIn(b"Manager User", detail.data)
+        self.assertIn(b"This note is visible to management only.", detail.data)
+
+        response = self.client.post(
+            f"/manager-review/activities/{activity_id}/management-note?"
+            "storyline_client_id=1&storyline_filter=Activity&"
+            "storyline_page=2",
+            data={"note_text": "  Confirm activity staffing.  "}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("filter=Activity", response.headers["Location"])
+
+        rows = self.rows("""
+            SELECT source_table, source_id, note_text, visibility,
+                   created_by_user_id
+            FROM management_notes
+            WHERE source_table = 'shift_activities'
+              AND source_id = ?
+            ORDER BY management_note_id
+        """, (activity_id,))
+        self.assertEqual(rows, [{
+            "source_table": "shift_activities",
+            "source_id": activity_id,
+            "note_text": "Review activity support needs",
+            "visibility": "management_only",
+            "created_by_user_id": 7,
+        }, {
+            "source_table": "shift_activities",
+            "source_id": activity_id,
+            "note_text": "Confirm activity staffing.",
+            "visibility": "management_only",
+            "created_by_user_id": 6,
+        }])
+        audit = self.rows("""
+            SELECT activity_class, activity_type, user_id, shift_id,
+                   related_table, related_id
+            FROM activity_log
+            WHERE activity_type = 'management_note_added'
+        """)
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["activity_class"], "MANAGEMENT_NOTE")
+        self.assertEqual(audit[0]["user_id"], 6)
+        self.assertEqual(audit[0]["shift_id"], 10)
+        self.assertEqual(audit[0]["related_table"], "management_notes")
+
+    def test_behaviour_consultant_can_add_activity_management_note(self):
+        activity_id = self.insert_activity()
+        self.login(9, "Behaviour Consultant")
+        detail = self.client.get(
+            f"/manager-review/activities/{activity_id}"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Add Management Note", detail.data)
+        response = self.client.post(
+            f"/manager-review/activities/{activity_id}/management-note",
+            data={"note_text": "Consultant follow-up"}
+        )
+        self.assertEqual(response.status_code, 302)
+        rows = self.rows("""
+            SELECT created_by_user_id, visibility
+            FROM management_notes
+            WHERE source_table = 'shift_activities'
+              AND source_id = ?
+        """, (activity_id,))
+        self.assertEqual(rows, [{
+            "created_by_user_id": 9,
+            "visibility": "management_only",
+        }])
+
+    def test_activity_management_note_route_denies_support_workers(self):
+        activity_id = self.insert_activity()
+        self.login(1, "Support Worker")
+        response = self.client.post(
+            f"/manager-review/activities/{activity_id}/management-note",
+            data={"note_text": "Not allowed"}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            self.rows("SELECT * FROM management_notes"),
+            []
+        )
+
+    def test_linked_actions_display_and_create_for_activity(self):
+        activity_id = self.insert_activity(description="Community outing")
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute("""
+                INSERT INTO action_items (
+                    title, description, status, priority, source_table,
+                    source_id, assigned_to_user_id, created_by_user_id,
+                    created_at, shift_id
+                ) VALUES (
+                    'Review activity plan', 'Check support plan', 'Open',
+                    'High', 'shift_activities', ?, 1, 7,
+                    '2026-08-03 12:20:00', 10
+                )
+            """, (activity_id,))
+            conn.execute("""
+                INSERT INTO action_items (
+                    title, source_table, source_id, created_at, shift_id
+                ) VALUES (
+                    'Unrelated action', 'shift_notes', 99,
+                    '2026-08-03 12:21:00', 10
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login(6, "Admin")
+        detail = self.client.get(
+            f"/manager-review/activities/{activity_id}?"
+            "storyline_client_id=1&storyline_filter=Activity&"
+            "storyline_page=2"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Linked Actions", detail.data)
+        self.assertIn(b"Review activity plan", detail.data)
+        self.assertNotIn(b"Unrelated action", detail.data)
+        self.assertIn(b"Create Action", detail.data)
+
+        form = self.client.get(
+            f"/manager-review/activities/{activity_id}/action/new?"
+            "storyline_client_id=1&storyline_filter=Activity&"
+            "storyline_page=2"
+        )
+        self.assertEqual(form.status_code, 200)
+        self.assertIn(b"Create Activity Action", form.data)
+        self.assertIn(b"Community outing", form.data)
+        self.assertIn(b"filter=Activity", form.data)
+
+        response = self.client.post(
+            f"/manager-review/activities/{activity_id}/action/new",
+            data={
+                "title": "Confirm outing support",
+                "description": "Confirm staffing.",
+                "priority": "Medium",
+                "assigned_to_user_id": "1",
+            }
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/action/", response.headers["Location"])
+
+        actions = self.rows("""
+            SELECT title, description, priority, source_table, source_id,
+                   shift_id, created_by_user_id, assigned_to_user_id
+            FROM action_items
+            WHERE source_table = 'shift_activities'
+              AND source_id = ?
+            ORDER BY action_id
+        """, (activity_id,))
+        self.assertEqual(actions[-1], {
+            "title": "Confirm outing support",
+            "description": "Confirm staffing.",
+            "priority": "Medium",
+            "source_table": "shift_activities",
+            "source_id": activity_id,
+            "shift_id": 10,
+            "created_by_user_id": 6,
+            "assigned_to_user_id": 1,
+        })
+
+    def test_activity_action_link_and_route_use_strict_management_roles(self):
+        activity_id = self.insert_activity()
+
+        self.login(9, "Behaviour Consultant")
+        consultant_detail = self.client.get(
+            f"/manager-review/activities/{activity_id}"
+        )
+        self.assertEqual(consultant_detail.status_code, 200)
+        self.assertNotIn(b"Create Action", consultant_detail.data)
+        self.assertEqual(
+            self.client.get(
+                f"/manager-review/activities/{activity_id}/action/new"
+            ).status_code,
+            403
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/manager-review/activities/{activity_id}/action/new",
+                data={"title": "Not allowed"}
+            ).status_code,
+            403
+        )
+
+        self.login(10, "Admin")
+        self.assertEqual(
+            self.client.get(
+                f"/manager-review/activities/{activity_id}/action/new"
+            ).status_code,
+            403
+        )
+
+        self.login(1, "Support Worker")
+        self.assertEqual(
+            self.client.get(
+                f"/manager-review/activities/{activity_id}/action/new"
+            ).status_code,
+            403
+        )
 
     def test_personal_dashboard_count_and_preview(self):
         activity_ids = [

@@ -72,13 +72,53 @@ class SleepStorylineReviewTests(unittest.TestCase):
                 ON acknowledgements(source_table, source_id, user_id)
                 WHERE active = 1;
 
+            CREATE TABLE management_notes (
+                management_note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                note_text TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'management_only',
+                created_by_user_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                active INTEGER NOT NULL DEFAULT 1,
+                shared_at TEXT,
+                shared_by_user_id INTEGER
+            );
+
+            CREATE TABLE action_items (
+                action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'Open',
+                priority TEXT DEFAULT 'Medium',
+                source_table TEXT,
+                source_id INTEGER,
+                assigned_to_user_id INTEGER,
+                created_by_user_id INTEGER,
+                due_date TEXT,
+                acknowledged_at TEXT,
+                completed_at TEXT,
+                closed_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                shift_id INTEGER
+            );
+
+            CREATE TABLE action_comments (
+                comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                comment TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
             INSERT INTO users VALUES
                 (1, 'Worker', 'Support Worker', 1),
                 (2, 'Admin User', 'Admin', 1),
                 (3, 'Director User', 'Director', 1),
                 (4, 'Program Manager User', 'Program Manager', 1),
                 (5, 'Other Manager', 'Program Manager', 1),
-                (6, 'Inactive Admin', 'Admin', 0);
+                (6, 'Inactive Admin', 'Admin', 0),
+                (7, 'Consultant User', 'Behaviour Consultant', 1);
             INSERT INTO clients VALUES
                 (1, 'Client One', 1),
                 (2, 'Client Two', 1);
@@ -252,6 +292,192 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.assertIn(b"Settled after music", response.data)
         self.assertIn(b"Worker", response.data)
         self.assertIn(b"2026-08-02 15:31:00", response.data)
+
+    def test_management_notes_display_and_persist_for_sleep_event(self):
+        self.add_sleep_event(1)
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO management_notes (
+                source_table, source_id, note_text, visibility,
+                created_by_user_id, created_at, active
+            ) VALUES (
+                'sleep_events', 1, 'Review overnight pattern',
+                'management_only', 4, '2026-08-02 12:10:00', 1
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        self.login(2, "Admin")
+        detail = self.client.get(
+            "/manager-review/sleep/1?storyline_client_id=1&"
+            "storyline_filter=Sleep&storyline_page=2"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Back to Management Review", detail.data)
+        self.assertIn(b"Management Notes", detail.data)
+        self.assertIn(b"Review overnight pattern", detail.data)
+        self.assertIn(b"Program Manager User", detail.data)
+        self.assertIn(b"This note is visible to management only.", detail.data)
+        self.assertIn(b"Settled after music", detail.data)
+
+        response = self.client.post(
+            "/manager-review/sleep/1/management-note?"
+            "storyline_client_id=1&storyline_filter=Sleep&storyline_page=2",
+            data={"note_text": "  Check overnight support plan.  "}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("storyline_filter=Sleep", response.location)
+
+        conn = sqlite3.connect(self.path)
+        note = conn.execute("""
+            SELECT source_table, source_id, note_text, visibility,
+                   created_by_user_id
+            FROM management_notes
+            WHERE note_text = 'Check overnight support plan.'
+        """).fetchone()
+        audit = conn.execute("""
+            SELECT activity_class, activity_type, user_id, shift_id,
+                   related_table, related_id
+            FROM activity_log
+            WHERE activity_type = 'management_note_added'
+        """).fetchone()
+        conn.close()
+        self.assertEqual(
+            note,
+            ('sleep_events', 1, 'Check overnight support plan.',
+             'management_only', 2)
+        )
+        self.assertEqual(audit[0], "MANAGEMENT_NOTE")
+        self.assertEqual(audit[1], "management_note_added")
+        self.assertEqual(audit[2], 2)
+        self.assertEqual(audit[3], 10)
+        self.assertEqual(audit[4], "management_notes")
+
+    def test_behaviour_consultant_can_add_sleep_management_note(self):
+        self.add_sleep_event(1)
+        self.login(7, "Behaviour Consultant")
+        detail = self.client.get("/manager-review/sleep/1")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Add Management Note", detail.data)
+        response = self.client.post(
+            "/manager-review/sleep/1/management-note",
+            data={"note_text": "Consultant sleep follow-up"}
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = sqlite3.connect(self.path)
+        note = conn.execute("""
+            SELECT created_by_user_id, visibility
+            FROM management_notes
+            WHERE source_table = 'sleep_events' AND source_id = 1
+        """).fetchone()
+        conn.close()
+        self.assertEqual(note, (7, "management_only"))
+
+    def test_sleep_management_note_route_denies_support_worker(self):
+        self.add_sleep_event(1)
+        self.login(1, "Support Worker")
+        response = self.client.post(
+            "/manager-review/sleep/1/management-note",
+            data={"note_text": "Not allowed"}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_linked_actions_display_and_create_for_sleep_event(self):
+        self.add_sleep_event(1)
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO action_items (
+                title, description, status, priority, source_table,
+                source_id, assigned_to_user_id, created_by_user_id,
+                created_at, shift_id
+            ) VALUES (
+                'Review sleep pattern', 'Check overnight support', 'Open',
+                'High', 'sleep_events', 1, 1, 4,
+                '2026-08-02 12:20:00', 10
+            )
+        """)
+        conn.execute("""
+            INSERT INTO action_items (
+                title, source_table, source_id, created_at, shift_id
+            ) VALUES (
+                'Unrelated action', 'shift_notes', 99,
+                '2026-08-02 12:21:00', 10
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        self.login(2, "Admin")
+        detail = self.client.get(
+            "/manager-review/sleep/1?storyline_client_id=1&"
+            "storyline_filter=Sleep&storyline_page=2"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Linked Actions", detail.data)
+        self.assertIn(b"Review sleep pattern", detail.data)
+        self.assertNotIn(b"Unrelated action", detail.data)
+        self.assertIn(b"Create Action", detail.data)
+
+        form = self.client.get(
+            "/manager-review/sleep/1/action/new?"
+            "storyline_client_id=1&storyline_filter=Sleep&storyline_page=2"
+        )
+        self.assertEqual(form.status_code, 200)
+        self.assertIn(b"Create Sleep Action", form.data)
+        self.assertIn(b"Fell Asleep", form.data)
+        self.assertIn(b"filter=Sleep", form.data)
+
+        response = self.client.post(
+            "/manager-review/sleep/1/action/new",
+            data={
+                "title": "Confirm overnight plan",
+                "description": "Confirm staffing.",
+                "priority": "Medium",
+                "assigned_to_user_id": "1",
+            }
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/action/", response.location)
+
+        conn = sqlite3.connect(self.path)
+        action = conn.execute("""
+            SELECT title, description, priority, source_table, source_id,
+                   shift_id, created_by_user_id, assigned_to_user_id
+            FROM action_items
+            WHERE title = 'Confirm overnight plan'
+        """).fetchone()
+        conn.close()
+        self.assertEqual(
+            action,
+            ('Confirm overnight plan', 'Confirm staffing.', 'Medium',
+             'sleep_events', 1, 10, 2, 1)
+        )
+
+    def test_sleep_action_link_and_route_use_strict_management_roles(self):
+        self.add_sleep_event(1)
+        self.login(7, "Behaviour Consultant")
+        detail = self.client.get("/manager-review/sleep/1")
+        self.assertEqual(detail.status_code, 200)
+        self.assertNotIn(b"Create Action", detail.data)
+        self.assertEqual(
+            self.client.get("/manager-review/sleep/1/action/new").status_code,
+            403
+        )
+        self.assertEqual(
+            self.client.post(
+                "/manager-review/sleep/1/action/new",
+                data={"title": "Not allowed"}
+            ).status_code,
+            403
+        )
+
+        self.login(6, "Admin")
+        self.assertEqual(
+            self.client.get("/manager-review/sleep/1/action/new").status_code,
+            403
+        )
 
     def test_woke_up_and_blank_note_render_cleanly(self):
         self.add_sleep_event(2, event_type="woke_up", note=None)

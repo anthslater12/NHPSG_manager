@@ -15,8 +15,11 @@
 
     <p><a href="{{ url_for('behaviour_weekly', monday=occurrence.week_monday) }}">&larr; Return to Behaviour</a></p>
 
+    <p><a href="{{ url_for('manager_review_hub') }}">&larr; Back to Management Review</a></p>
+
     <table class="management-detail-table">
         <tr><th>Client</th><td>{{ occurrence.client_name }}</td></tr>
+        <tr><th>Shift</th><td>{% if occurrence.shift_id %}{% if occurrence.shift_date %}{{ occurrence.shift_date }} {{ occurrence.shift_type }}{% else %}Shift #{{ occurrence.shift_id }}{% endif %}{% else %}Not linked to a shift{% endif %}</td></tr>
         <tr><th>Occurred</th><td>{{ occurrence.local_time }}</td></tr>
         <tr><th>Recorded By</th><td>{{ occurrence.recorder_name }}</td></tr>
         <tr><th>Record Format</th><td>{{ occurrence.record_format }}</td></tr>
@@ -107,6 +110,45 @@
         {% endfor %}
     {% else %}
         <p>No Management Notes have been added.</p>
+    {% endif %}
+
+    <h3>Linked Actions</h3>
+
+    {% if can_manage_actions %}
+        <p>
+            <a href="{{ url_for(
+                'behaviour_action_new',
+                occurrence_id=occurrence.behaviour_occurrence_id,
+                storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
+                storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
+                storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
+            ) }}">Create Action</a>
+        </p>
+    {% endif %}
+
+    {% if linked_actions %}
+        <table>
+            <tr>
+                <th>Created</th>
+                <th>Priority</th>
+                <th>Status</th>
+                <th>Title</th>
+                <th>Assigned To</th>
+                <th>View</th>
+            </tr>
+            {% for action in linked_actions %}
+                <tr>
+                    <td>{{ action.created_at }}</td>
+                    <td>{{ action.priority }}</td>
+                    <td>{{ action.status }}</td>
+                    <td>{{ action.title }}</td>
+                    <td>{{ action.assigned_to or "Unassigned" }}</td>
+                    <td><a href="{{ url_for('action_detail', action_id=action.action_id) }}">View</a></td>
+                </tr>
+            {% endfor %}
+        </table>
+    {% else %}
+        <p>No Actions are linked to this Behaviour occurrence.</p>
     {% endif %}
 </div>
 {% endblock %}
