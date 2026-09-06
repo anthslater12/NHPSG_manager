@@ -57,6 +57,7 @@ class ToiletingReviewDatetimeTests(unittest.TestCase):
             ),
             "event_type": "BM",
             "location": "Bathroom <A>",
+            "location_other": None,
             "client_name": "Client",
             "recorded_by": "Worker",
             "shift_id": 3,
@@ -64,14 +65,30 @@ class ToiletingReviewDatetimeTests(unittest.TestCase):
             "shift_type": "Day",
             "bm_size": "Medium",
             "bm_consistency": "Formed",
+            "bm_colour": None,
+            "estimated_bristol_type": None,
+            "bm_blood_observed": 0,
+            "bm_mucus_observed": 0,
+            "bm_unusual_colour": 0,
             "bm_unusual_details": None,
             "urine_volume": None,
+            "urine_colour": None,
+            "urine_blood_observed": 0,
+            "urine_strong_odour": 0,
+            "urine_unusual_colour": 0,
             "urine_unusual_details": None,
+            "pain_or_distress": 0,
+            "other_concern": 0,
+            "concern_details": None,
             "behaviour_before": None,
             "behaviour_during": None,
             "behaviour_after": None,
             "behaviour_comments": None,
             "general_comments": None,
+            "correction_of_event_id": None,
+            "correction_reason": None,
+            "active": 1,
+            "created_at": "2026-08-04 15:55:00",
         }
         return values
 
@@ -100,6 +117,82 @@ class ToiletingReviewDatetimeTests(unittest.TestCase):
             page = self.render(template, entry)
             self.assertIn("2026-08-04 15:49", page)
             self.assertNotIn("2026-08-04T15:49", page)
+
+    def test_detail_renders_complete_operational_record(self):
+        entry = self.entry("2026-08-04T15:49")
+        entry.update({
+            "event_type": "Both",
+            "bm_colour": "Brown",
+            "estimated_bristol_type": 4,
+            "bm_blood_observed": 1,
+            "bm_mucus_observed": 0,
+            "bm_unusual_colour": 1,
+            "urine_colour": "Pale yellow",
+            "urine_blood_observed": 0,
+            "urine_strong_odour": 1,
+            "urine_unusual_colour": 0,
+            "pain_or_distress": 1,
+            "other_concern": 1,
+            "concern_details": "Client reported discomfort",
+            "correction_of_event_id": 6,
+            "correction_reason": "Corrected event details",
+            "active": 1,
+        })
+        page = self.render("toileting_review_detail.html", entry)
+
+        for label, value in (
+            ("BM Colour", "Brown"),
+            ("Estimated Bristol Type", "4"),
+            ("Mucus Observed", "No"),
+            ("Urine Colour", "Pale yellow"),
+            ("Strong Odour Observed", "Yes"),
+            ("Pain or Distress", "Yes"),
+            ("Other Concern", "Yes"),
+            ("Concern Details", "Client reported discomfort"),
+            ("Correction of Event ID", "6"),
+            ("Correction Reason", "Corrected event details"),
+            ("Active", "Active"),
+            ("Created", "2026-08-04 15:55:00"),
+        ):
+            self.assertIn(label, page)
+            self.assertIn(value, page)
+
+        self.assertIn("Blood Observed", page)
+        self.assertIn("Unusual Colour", page)
+
+    def test_optional_operational_values_use_clean_fallbacks(self):
+        entry = self.entry("2026-08-04T15:49")
+        entry["event_type"] = "Both"
+        page = self.render("toileting_review_detail.html", entry)
+
+        self.assertIn("Not recorded", page)
+        self.assertIn("None", page)
+
+    def test_nullable_boolean_fields_render_yes_no_or_not_recorded(self):
+        fields = (
+            ("bm_blood_observed", "Blood Observed", 0),
+            ("bm_mucus_observed", "Mucus Observed", 0),
+            ("bm_unusual_colour", "Unusual Colour", 0),
+            ("urine_blood_observed", "Blood Observed", 1),
+            ("urine_strong_odour", "Strong Odour Observed", 0),
+            ("urine_unusual_colour", "Unusual Colour", 1),
+            ("pain_or_distress", "Pain or Distress", 0),
+            ("other_concern", "Other Concern", 0),
+        )
+
+        for field, label, occurrence in fields:
+            for value, expected in ((1, "Yes"), (0, "No"), (None, "Not recorded")):
+                entry = self.entry("2026-08-04T15:49")
+                entry["event_type"] = "Both"
+                entry[field] = value
+                page = self.render("toileting_review_detail.html", entry)
+
+                marker = f"<th>{label}</th>"
+                start = -1
+                for _ in range(occurrence + 1):
+                    start = page.index(marker, start + 1)
+                row = page[start:page.index("</tr>", start)]
+                self.assertIn(expected, row, (field, value, row))
 
     def test_blank_and_malformed_values_fail_safe_without_raw_iso(self):
         for value in ("", None, "not-a-date"):
