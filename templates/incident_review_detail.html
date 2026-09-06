@@ -18,6 +18,14 @@
         </p>
     {% endif %}
 
+    {% if can_access_management_review %}
+        <p>
+            <a href="{{ url_for('manager_review_hub') }}">
+                &larr; Back to Management Review
+            </a>
+        </p>
+    {% endif %}
+
     <p>
         <a href="{{ url_for('incident_list') }}">
             &larr; Return to Incident Reports

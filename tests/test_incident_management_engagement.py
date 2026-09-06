@@ -132,7 +132,8 @@ class IncidentManagementEngagementTests(unittest.TestCase):
                 (3, 'Director', 'Director', 1),
                 (4, 'Admin', 'Admin', 1),
                 (5, 'Inactive Manager', 'Program Manager', 0),
-                (6, 'Assigned Worker', 'Support Worker', 1);
+                (6, 'Assigned Worker', 'Support Worker', 1),
+                (7, 'Behaviour Consultant', 'Behaviour Consultant', 1);
             INSERT INTO clients VALUES (1, 'Client One', 1);
             INSERT INTO shifts VALUES (10, 1, '2026-08-02', 'Day', 'Open');
             INSERT INTO shift_staff VALUES (100, 10, 1, 1);
@@ -166,6 +167,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
             4: "Admin",
             5: "Program Manager",
             6: "Support Worker",
+            7: "Behaviour Consultant",
         }
         with self.client.session_transaction() as session:
             session.update(user_id=user_id, role=roles[user_id])
@@ -176,6 +178,70 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         result = conn.execute(sql, params).fetchall()
         conn.close()
         return result
+
+    def test_incident_detail_preserves_management_review_navigation(self):
+        for user_id in (4, 2, 3):
+            self.login(user_id)
+            detail = self.client.get(
+                "/manager-review/incidents/41?"
+                "storyline_client_id=1&storyline_filter=Incident&storyline_page=2"
+            )
+            self.assertEqual(detail.status_code, 200)
+            self.assertIn(b"Back to Management Review", detail.data)
+            self.assertIn(b'href="/manager-review"', detail.data)
+            self.assertIn(b"Return to Incident Reports", detail.data)
+            self.assertIn(b"Back to Client Storyline", detail.data)
+
+        self.login(7)
+        consultant_detail = self.client.get(
+            "/manager-review/incidents/41?"
+            "storyline_client_id=1&storyline_filter=Incident&storyline_page=2"
+        )
+        self.assertEqual(consultant_detail.status_code, 200)
+        self.assertNotIn(b"Back to Management Review", consultant_detail.data)
+        self.assertIn(b"Return to Incident Reports", consultant_detail.data)
+        self.assertIn(b"Back to Client Storyline", consultant_detail.data)
+
+        self.login(1)
+        support_detail = self.client.get(
+            "/manager-review/incidents/41?"
+            "storyline_client_id=1&storyline_filter=Incident&storyline_page=2"
+        )
+        self.assertEqual(support_detail.status_code, 200)
+        self.assertNotIn(b"Back to Management Review", support_detail.data)
+        self.assertIn(b"Return to Incident Reports", support_detail.data)
+        self.assertIn(b"Back to Client Storyline", support_detail.data)
+
+        self.login(2)
+        management_detail = self.client.get("/manager-review/incidents/41")
+        self.assertIn(b"Management Notes", management_detail.data)
+        self.assertIn(b"Linked Actions", management_detail.data)
+        self.assertIn(b"Create Action", management_detail.data)
+
+    def test_behaviour_consultant_can_review_and_note_but_not_create_actions(self):
+        self.login(7)
+        detail = self.client.get("/manager-review/incidents/41")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Review required", detail.data)
+        self.assertIn(b"Add Management Note", detail.data)
+        self.assertIn(b"Linked Actions", detail.data)
+        self.assertNotIn(b"Create Action", detail.data)
+
+        self.assertEqual(
+            self.client.post(
+                "/manager-review/incidents/41/management-note",
+                data={"note_text": "Consultant note"}
+            ).status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.post("/manager-review/incidents/41/review").status_code,
+            302
+        )
+        self.assertEqual(
+            self.client.get("/manager-review/incidents/41/action/new").status_code,
+            403
+        )
 
     def test_all_management_roles_can_add_and_view_incident_notes(self):
         for user_id, label in (

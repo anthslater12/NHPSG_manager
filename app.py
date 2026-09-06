@@ -20998,6 +20998,9 @@ def incident_review_detail(incident_id):
             review["user_id"] == actor["user_id"]
             for review in reviews
         ),
+        can_access_management_review=(
+            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+        ),
         management_user=management_user,
         can_manage_actions=can_manage_actions,
         management_notes=management_notes,
