@@ -1,15 +1,18 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "_documentation_context_banner.html" %}
-<div class="card"><h2>Record Behaviour</h2>
+<div class="card"><h2>{% if edit_mode %}Continue Behaviour Record{% else %}Record Behaviour{% endif %}</h2>
 {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
-<form method="post">
-<input type="hidden" name="submission_token" value="{{ submission_token }}">
-<input type="hidden" name="record_format" value="ABC">
+<form method="post"{% if form_action %} action="{{ form_action }}"{% endif %}>
+{% if edit_mode %}<input type="hidden" name="expected_version" value="{{ expected_version }}">{% else %}<input type="hidden" name="submission_token" value="{{ submission_token }}">{% endif %}
+<input type="hidden" name="record_format" value="{{ record_format }}">
+{% if lifecycle_action %}<input type="hidden" name="resume_lifecycle_action" value="{{ lifecycle_action }}">{% endif %}
+{% if shift_context and not edit_mode %}<p>Save this record as <strong>In Progress</strong> while the event develops, or record/submit it when the documentation is complete.</p>{% endif %}
 {% if duplicate_warning %}<div class="warning-message" role="alert"><h3>Possible duplicate Behaviour episode</h3><p>A Behaviour episode was already recorded for this shift at {{ duplicate_warning.local_time }} by {{ duplicate_warning.recorder_name }}.</p><p>Please confirm that this is a different episode before continuing.</p><p><a class="button secondary" href="{{ url_for('shift_dashboard', shift_id=request.view_args.get('shift_id')) }}">Go back</a> <button type="submit" name="confirm_distinct_episode" value="1">Yes, record a different episode</button></p></div>{% endif %}
 {% if shift_context %}<p>Client: {{ clients|selectattr('client_id', 'equalto', selected_client_id)|map(attribute='client_name')|first }}</p>{% else %}<label>Client</label><select name="client_id" required><option value="">Select client</option>{% for client in clients %}<option value="{{ client.client_id }}" {% if client.client_id == selected_client_id %}selected{% endif %}>{{ client.client_name }}</option>{% endfor %}</select>{% endif %}
 <label>Occurrence date and time (Vancouver)</label><input type="datetime-local" name="occurrence_local" value="{{ values.get('occurrence_local', now_local) }}" required>
 
+{% if record_format == 'ABC' %}
 <h3>Before the Behaviour (A)</h3><p>What happened before the behaviour?</p><div class="checkbox-group">{% for field in abc_antecedent_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ abc_field_labels[field] }}</span></label>{% endfor %}</div>
 <label>Other details</label><textarea name="antecedent_other_details">{{ values.get('antecedent_other_details', '') }}</textarea>
 
@@ -19,10 +22,14 @@
 <h3>Staff Response (C)</h3><p>How did staff respond immediately?</p><div class="checkbox-group">{% for field in abc_response_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ abc_field_labels[field] }}</span></label>{% endfor %}</div>
 <label>Other details</label><textarea name="response_other_details">{{ values.get('response_other_details', '') }}</textarea>
 
-<h3>Outcome</h3><label>Duration until calm (minutes)</label><input type="number" name="duration_until_calm_minutes" min="0" step="1" value="{{ values.get('duration_until_calm_minutes', '') }}" required>
+<h3>Outcome</h3><label>Duration until calm (minutes)</label><input type="number" name="duration_until_calm_minutes" min="0" step="1" value="{{ values.get('duration_until_calm_minutes', '') }}">
 <label>How did the client calm down?</label><textarea name="calming_description">{{ values.get('calming_description', '') }}</textarea>
 <label>Additional notes</label><textarea name="additional_notes">{{ values.get('additional_notes', '') }}</textarea>
-{% if not duplicate_warning %}<button type="submit">Save once</button>{% endif %}</form>
+{% else %}
+<h3>Behaviour Categories</h3><div class="checkbox-group">{% for field in category_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ category_labels[field] }}</span></label>{% endfor %}</div>
+<label>Notes</label><textarea name="notes">{{ values.get('notes', '') }}</textarea>
+{% endif %}
+{% if not duplicate_warning %}{% if edit_mode %}<button type="submit" name="action" value="save">Save In Progress</button> <button type="submit" name="action" value="complete">Save &amp; Complete</button><p>Save &amp; Complete finalizes this record and stops normal worker editing.</p>{% elif shift_context %}<button type="submit" name="lifecycle_action" value="in_progress">Save In Progress</button> <button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% else %}<button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% endif %}{% endif %}</form>
 <details class="behaviour-support-information">
 <summary>Behaviour Support Information</summary>
 <div class="behaviour-support-content">

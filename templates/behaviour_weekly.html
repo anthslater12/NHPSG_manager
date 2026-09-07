@@ -51,6 +51,9 @@
                     {% if item.notes %}<section class="behaviour-review-section"><h5>Notes</h5><div class="behaviour-review-nested">{{ item.notes }}</div></section>{% endif %}
                 </div>
             {% endif %}
+            {% if item.can_continue %}
+                <p><a class="button" href="{{ url_for('behaviour_occurrence_edit', shift_id=item.shift_id, occurrence_id=item.behaviour_occurrence_id) }}">Edit / Continue</a></p>
+            {% endif %}
             {% if item.status == 'Voided' %}
                 <p class="behaviour-review-void-info">Voided by {{ item.voided_by_name }} at {{ item.voided_at_utc }}</p>
             {% elif can_void %}

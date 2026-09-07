@@ -17,6 +17,10 @@
 
     <p><a href="{{ url_for('manager_review_hub') }}">&larr; Back to Management Review</a></p>
 
+    {% if occurrence.status == 'In Progress' %}
+        <p class="warning-message" role="status">This Behaviour record is In Progress and has not been finalized.</p>
+    {% endif %}
+
     <table class="management-detail-table">
         <tr><th>Client</th><td>{{ occurrence.client_name }}</td></tr>
         <tr><th>Shift</th><td>{% if occurrence.shift_id %}{% if occurrence.shift_date %}{{ occurrence.shift_date }} {{ occurrence.shift_type }}{% else %}Shift #{{ occurrence.shift_id }}{% endif %}{% else %}Not linked to a shift{% endif %}</td></tr>
@@ -60,6 +64,8 @@
 
     {% if current_user_reviewed %}
         <p>You have reviewed this behaviour record.</p>
+    {% elif occurrence.status == 'In Progress' %}
+        <p>Review is unavailable until this Behaviour record is finalized.</p>
     {% else %}
         <p>Review required</p>
         <form method="post" action="{{ url_for(
