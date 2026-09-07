@@ -16,6 +16,8 @@ COMPLETION_COLUMNS = (
     "completed_at_utc", "completed_by_user_id",
 )
 
+CONCURRENCY_COLUMNS = ("version_number",)
+
 LIFECYCLE_STATUSES = (
     "In Progress", "Completed", "Recorded", "Voided",
 )
@@ -61,13 +63,26 @@ def _create_table(conn):
         "completed_at_utc TEXT CHECK (completed_at_utc IS NULL OR "
         + timestamp_check.format("completed_at_utc")[6:] + ")",
         "completed_by_user_id INTEGER REFERENCES users(user_id)",
+        "version_number INTEGER NOT NULL DEFAULT 1 CHECK (version_number >= 1)",
         "shift_id INTEGER", "record_format TEXT NOT NULL DEFAULT 'V1' CHECK (record_format IN ('V1', 'ABC'))",
         *(f"{name} INTEGER NOT NULL DEFAULT 0 CHECK ({name} IN (0, 1))" for name in ABC_BOOLEAN_COLUMNS),
         "antecedent_other_details TEXT", "behaviour_other_details TEXT",
         "response_other_details TEXT", "duration_until_calm_minutes INTEGER",
         "calming_description TEXT", "additional_notes TEXT",
-        "CHECK (record_format = 'ABC' OR aggression_towards_others + injury_to_others + self_harm + injury_to_self + property_damage >= 1)",
-        "CHECK (record_format = 'V1' OR (duration_until_calm_minutes IS NOT NULL AND duration_until_calm_minutes >= 0))",
+        "CHECK (status = 'In Progress' OR record_format = 'ABC' OR aggression_towards_others + injury_to_others + self_harm + injury_to_self + property_damage >= 1)",
+        "CHECK (status = 'In Progress' OR record_format = 'V1' OR (duration_until_calm_minutes IS NOT NULL AND duration_until_calm_minutes >= 0))",
+        "CHECK (status <> 'In Progress' OR ("
+        "(record_format = 'V1' AND (aggression_towards_others + injury_to_others + self_harm + injury_to_self + property_damage >= 1 OR length(trim(COALESCE(notes, ''))) > 0)) "
+        "OR (record_format = 'ABC' AND ("
+        + " + ".join(ABC_BOOLEAN_COLUMNS)
+        + " + CASE WHEN length(trim(COALESCE(antecedent_other_details, ''))) > 0 THEN 1 ELSE 0 END"
+        + " + CASE WHEN length(trim(COALESCE(behaviour_other_details, ''))) > 0 THEN 1 ELSE 0 END"
+        + " + CASE WHEN length(trim(COALESCE(response_other_details, ''))) > 0 THEN 1 ELSE 0 END"
+        + " + CASE WHEN duration_until_calm_minutes IS NOT NULL THEN 1 ELSE 0 END"
+        + " + CASE WHEN length(trim(COALESCE(calming_description, ''))) > 0 THEN 1 ELSE 0 END"
+        + " + CASE WHEN length(trim(COALESCE(additional_notes, ''))) > 0 THEN 1 ELSE 0 END"
+        + " > 0))"
+        "))",
         "CHECK ("
         "((status IN ('In Progress', 'Recorded') "
         "AND completed_at_utc IS NULL "
@@ -102,7 +117,7 @@ def _table_sql(conn):
 def _needs_lifecycle_upgrade(conn, column_names):
     table_sql = _table_sql(conn)
     return (
-        any(name not in column_names for name in COMPLETION_COLUMNS)
+        any(name not in column_names for name in COMPLETION_COLUMNS + CONCURRENCY_COLUMNS)
         or not all(
             f"'{status}'" in table_sql
             for status in LIFECYCLE_STATUSES
@@ -111,6 +126,10 @@ def _needs_lifecycle_upgrade(conn, column_names):
         or "status = 'Completed'" not in table_sql
         or "completed_at_utc IS NOT NULL" not in table_sql
         or "completed_by_user_id IS NOT NULL" not in table_sql
+        or "version_number INTEGER NOT NULL DEFAULT 1" not in table_sql
+        or "status = 'In Progress' OR record_format = 'ABC'" not in table_sql
+        or "status = 'In Progress' OR record_format = 'V1'" not in table_sql
+        or "status <> 'In Progress' OR" not in table_sql
     )
 
 

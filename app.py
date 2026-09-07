@@ -257,6 +257,11 @@ ABC_RESPONSE_FIELDS = (
     "response_gave_preferred_activity", "response_blocked_behaviour",
     "response_redirected_activity", "response_other",
 )
+ABC_BOOLEAN_FIELDS = ABC_ANTECEDENT_FIELDS + ABC_BEHAVIOUR_FIELDS + ABC_RESPONSE_FIELDS
+ABC_TEXT_FIELDS = (
+    "antecedent_other_details", "behaviour_other_details",
+    "response_other_details", "calming_description", "additional_notes",
+)
 ABC_FIELD_LABELS = {
     "antecedent_transition_activities": "Asked to transition between activities",
     "antecedent_denied_access": "Denied access to item/activity",
@@ -1492,6 +1497,61 @@ def validate_abc_submission(form):
     }
 
 
+def validate_abc_in_progress_submission(form):
+    """Validate the identity of a partial ABC record without finalizing it."""
+    if form.get("record_format") != "ABC":
+        raise ValueError("Behaviour form input is invalid.")
+
+    selected_values = {}
+    section_details = {}
+    for fields, other_field, details_field, section_name in (
+        (ABC_ANTECEDENT_FIELDS, "antecedent_other",
+         "antecedent_other_details", "Before the Behaviour (A)"),
+        (ABC_BEHAVIOUR_FIELDS, "behaviour_other",
+         "behaviour_other_details", "Behaviour Observed (B)"),
+        (ABC_RESPONSE_FIELDS, "response_other",
+         "response_other_details", "Staff Response (C)"),
+    ):
+        selected = {}
+        for field in fields:
+            values = form.getlist(field)
+            if len(values) > 1 or (values and values[0] != "1"):
+                raise ValueError("Behaviour form input is invalid.")
+            selected[field] = int(bool(values))
+        details = form.get(details_field, "").strip()
+        if selected[other_field] and not details:
+            raise ValueError(f"Other details are required for {section_name}.")
+        if not selected[other_field] and details:
+            raise ValueError(
+                f"Other details are only allowed when Other is selected for {section_name}."
+            )
+        selected_values.update(selected)
+        section_details[details_field] = details or None
+
+    duration_value = form.get("duration_until_calm_minutes", "").strip()
+    if duration_value and not re.fullmatch(r"(?:0|[1-9][0-9]*)", duration_value):
+        raise ValueError("Duration until calm must be a whole number of zero or greater.")
+
+    result = {
+        **selected_values,
+        **section_details,
+        "duration_until_calm_minutes": int(duration_value)
+        if duration_value else None,
+        "calming_description": form.get("calming_description", "").strip() or None,
+        "additional_notes": form.get("additional_notes", "").strip() or None,
+    }
+    if not any(selected_values.values()) and not any(
+        result[field] is not None
+        for field in (
+            "antecedent_other_details", "behaviour_other_details",
+            "response_other_details", "duration_until_calm_minutes",
+            "calming_description", "additional_notes"
+        )
+    ):
+        raise ValueError("Add Behaviour information before saving In Progress.")
+    return result
+
+
 def get_active_authenticated_user(conn, user_id):
     """Return the current active database user or reject the request."""
     user = conn.execute("""
@@ -2529,10 +2589,12 @@ def _behaviour_week_abc_sections(row):
             other_details = None
         sections.append({"heading": heading, "items": items, "other_details": other_details})
     duration = row.get("duration_until_calm_minutes")
-    outcome = [{
-        "label": "Duration until calm:",
-        "value": f"{duration} {'minute' if duration == 1 else 'minutes'}"
-    }]
+    outcome = []
+    if duration is not None:
+        outcome.append({
+            "label": "Duration until calm:",
+            "value": f"{duration} {'minute' if duration == 1 else 'minutes'}"
+        })
     for label, field in (("How the client calmed down:", "calming_description"),
                          ("Additional notes:", "additional_notes")):
         value = str(row.get(field) or "").strip()
@@ -2542,7 +2604,7 @@ def _behaviour_week_abc_sections(row):
     return sections
 
 
-def _behaviour_week_occurrences(conn, monday):
+def _behaviour_week_occurrences(conn, monday, viewer_user_id=None):
     start_utc, end_utc = get_behaviour_operational_week_range(monday)
     rows = conn.execute("""
         SELECT bo.*, c.client_name, u.full_name AS recorder_name,
@@ -2573,7 +2635,28 @@ def _behaviour_week_occurrences(conn, monday):
         )
         if not item["summary"]:
             item["summary"] = "Behaviour occurrence recorded"
-        item["status_label"] = "Voided" if item["status"] == "Voided" else "Active"
+        item["status_label"] = (
+            item["status"] if item["status"] in ("In Progress", "Completed")
+            else "Voided" if item["status"] == "Voided" else "Active"
+        )
+        item["can_continue"] = False
+        if (
+            viewer_user_id is not None
+            and item["status"] == "In Progress"
+            and item["recorded_by_user_id"] == viewer_user_id
+            and item.get("shift_id")
+        ):
+            try:
+                context = get_worker_documentation_shift_context(
+                    conn, item["shift_id"], viewer_user_id
+                )
+                item["can_continue"] = bool(
+                    context
+                    and context["documentation_access"] == DOCUMENTATION_ACCESS_ACTIVE
+                    and context.get("shift_status") == "Open"
+                )
+            except PermissionError:
+                item["can_continue"] = False
         item["shift_type"] = None
         if item.get("shift_id"):
             shift_table = conn.execute(
@@ -2589,8 +2672,8 @@ def _behaviour_week_occurrences(conn, monday):
     return occurrences
 
 
-def _behaviour_week_context(conn, monday):
-    occurrences = _behaviour_week_occurrences(conn, monday)
+def _behaviour_week_context(conn, monday, viewer_user_id=None):
+    occurrences = _behaviour_week_occurrences(conn, monday, viewer_user_id)
     days = []
     for offset in range(7):
         operational_day = monday + timedelta(days=offset)
@@ -2632,7 +2715,9 @@ def _behaviour_recent_occurrences(conn, client_id):
 def _render_behaviour_record(
     conn, selected_client_id=None, error=None, values=None, shift_context=False,
     submission_token=None, duplicate_warning=None,
-    documentation_context=None, documentation_context_alternatives=None
+    documentation_context=None, documentation_context_alternatives=None,
+    form_action=None, edit_mode=False, expected_version=None,
+    lifecycle_action=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -2650,8 +2735,12 @@ def _render_behaviour_record(
         abc_behaviour_fields=ABC_BEHAVIOUR_FIELDS,
         abc_response_fields=ABC_RESPONSE_FIELDS,
         abc_field_labels=ABC_FIELD_LABELS,
+        record_format=values.get("record_format", "ABC"),
         now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"),
         values=values, shift_context=shift_context,
+        form_action=form_action, edit_mode=edit_mode,
+        expected_version=expected_version,
+        lifecycle_action=lifecycle_action,
         documentation_context=documentation_context,
         documentation_context_alternatives=(
             documentation_context_alternatives or []
@@ -4450,7 +4539,7 @@ def behaviour_weekly(monday):
             datetime.now(VANCOUVER_TIMEZONE)
         )
         return render_template("behaviour_weekly.html", monday=week_start,
-            days=_behaviour_week_context(conn, week_start),
+            days=_behaviour_week_context(conn, week_start, user["user_id"]),
             previous_monday=week_start - timedelta(days=7),
             next_monday=week_start + timedelta(days=7),
             current_monday=current_monday,
@@ -4518,7 +4607,8 @@ def behaviour_record(shift_id=None):
     try:
         approved_fields = {
             "client_id", "occurrence_local", "repeated_hour_choice", "notes",
-            "submission_token", *BEHAVIOUR_CATEGORY_FIELDS
+            "submission_token", "lifecycle_action", "resume_lifecycle_action",
+            *BEHAVIOUR_CATEGORY_FIELDS
         }
         if shift is not None:
             approved_fields.add("confirm_distinct_episode")
@@ -4532,13 +4622,28 @@ def behaviour_record(shift_id=None):
         if is_abc:
             approved_fields = {
                 "client_id", "occurrence_local", "repeated_hour_choice",
-                "submission_token", *abc_fields
+                "submission_token", "lifecycle_action", "resume_lifecycle_action",
+                *abc_fields
             }
             if shift is not None:
                 approved_fields.add("confirm_distinct_episode")
         submitted_fields = set(request.form.keys())
         if not submitted_fields.issubset(approved_fields):
             raise ValueError("Behaviour form input is invalid.")
+        lifecycle_values = request.form.getlist("lifecycle_action")
+        resume_values = request.form.getlist("resume_lifecycle_action")
+        if len(lifecycle_values) > 1 or len(resume_values) > 1:
+            raise ValueError("Behaviour lifecycle input is invalid.")
+        if lifecycle_values and resume_values:
+            raise ValueError("Behaviour lifecycle input is invalid.")
+        lifecycle_action = (
+            lifecycle_values[0] if lifecycle_values
+            else resume_values[0] if resume_values else "recorded"
+        )
+        if lifecycle_action not in ("in_progress", "recorded"):
+            raise ValueError("Behaviour lifecycle input is invalid.")
+        if lifecycle_action == "in_progress" and shift is None:
+            raise ValueError("In Progress Behaviour requires an active shift.")
         required_fields = ["occurrence_local", "submission_token"]
         if not is_abc:
             required_fields.insert(1, "notes")
@@ -4559,7 +4664,14 @@ def behaviour_record(shift_id=None):
         else:
             client_id = int(submitted_client or "")
         validate_active_behaviour_client(conn, client_id)
-        abc_values = validate_abc_submission(request.form) if is_abc else None
+        notes = request.form.get("notes", "").strip() or None
+        if notes and len(notes) > BEHAVIOUR_NOTES_MAX_LENGTH:
+            raise ValueError("Behaviour notes cannot exceed 2,000 characters.")
+        abc_values = (
+            validate_abc_in_progress_submission(request.form)
+            if is_abc and lifecycle_action == "in_progress"
+            else validate_abc_submission(request.form) if is_abc else None
+        )
         flags = {}
         for field in BEHAVIOUR_CATEGORY_FIELDS:
             values_for_field = request.form.getlist(field)
@@ -4569,7 +4681,12 @@ def behaviour_record(shift_id=None):
                 flags[field] = 1
             else:
                 raise ValueError("Behaviour category input is invalid.")
-        flags = validate_behaviour_category_flags(flags) if not is_abc else {field: 0 for field in BEHAVIOUR_CATEGORY_FIELDS}
+        if not is_abc and lifecycle_action == "recorded":
+            flags = validate_behaviour_category_flags(flags)
+        elif not is_abc and not any(flags.values()) and not notes:
+            raise ValueError("Add Behaviour information before saving In Progress.")
+        elif is_abc:
+            flags = {field: 0 for field in BEHAVIOUR_CATEGORY_FIELDS}
         local_input = request.form.get("occurrence_local", "")
         ambiguity_choice = ambiguity_values[0] if ambiguity_values else ""
         if is_vancouver_occurrence_input_ambiguous(local_input):
@@ -4580,9 +4697,6 @@ def behaviour_record(shift_id=None):
         occurrence_utc = convert_vancouver_occurrence_input_to_utc(
             local_input, ambiguity_choice or None
         )
-        notes = request.form.get("notes", "").strip() or None
-        if notes and len(notes) > BEHAVIOUR_NOTES_MAX_LENGTH:
-            raise ValueError("Behaviour notes cannot exceed 2,000 characters.")
         token = request.form.get("submission_token", "")
         if not BEHAVIOUR_TOKEN_PATTERN.fullmatch(token):
             raise ValueError("Behaviour submission token is invalid.")
@@ -4629,7 +4743,7 @@ def behaviour_record(shift_id=None):
                     documentation_context=documentation_context,
                     documentation_context_alternatives=(
                         documentation_context_alternatives
-                    )
+                    ), lifecycle_action=lifecycle_action
                 )
                 conn.close()
                 return response
@@ -4640,7 +4754,8 @@ def behaviour_record(shift_id=None):
                 columns += ["antecedent_other_details", "behaviour_other_details",
                             "response_other_details", "duration_until_calm_minutes",
                             "calming_description", "additional_notes",
-                            "recorded_by_user_id", "recorded_at_utc", "submission_token"]
+                            "recorded_by_user_id", "recorded_at_utc", "submission_token",
+                            "status"]
                 values_to_store = [client_id, shift_id, occurrence_utc, "ABC"]
                 values_to_store += [flags[field] for field in BEHAVIOUR_CATEGORY_FIELDS]
                 values_to_store += [abc_values[field] for field in ABC_ANTECEDENT_FIELDS]
@@ -4650,7 +4765,8 @@ def behaviour_record(shift_id=None):
                     "antecedent_other_details", "behaviour_other_details",
                     "response_other_details", "duration_until_calm_minutes",
                     "calming_description", "additional_notes")]
-                values_to_store += [user["user_id"], recorded_utc, token]
+                values_to_store += [user["user_id"], recorded_utc, token,
+                                    "In Progress" if lifecycle_action == "in_progress" else "Recorded"]
                 cur = conn.execute(
                     f"INSERT INTO behaviour_occurrences ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
                     values_to_store
@@ -4660,10 +4776,11 @@ def behaviour_record(shift_id=None):
                     INSERT INTO behaviour_occurrences
                     (client_id, shift_id, occurred_at_utc, aggression_towards_others,
                      injury_to_others, self_harm, injury_to_self, property_damage,
-                     notes, recorded_by_user_id, recorded_at_utc, submission_token)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     notes, recorded_by_user_id, recorded_at_utc, submission_token, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (client_id, shift_id, occurrence_utc, *(flags[field] for field in BEHAVIOUR_CATEGORY_FIELDS),
-                      notes, user["user_id"], recorded_utc, token))
+                      notes, user["user_id"], recorded_utc, token,
+                      "In Progress" if lifecycle_action == "in_progress" else "Recorded"))
             occurrence_id = cur.lastrowid
             category_text = ", ".join(BEHAVIOUR_CATEGORY_LABELS[field] for field in BEHAVIOUR_CATEGORY_FIELDS if flags[field])
             activity_details = (
@@ -4712,7 +4829,7 @@ def behaviour_record(shift_id=None):
             documentation_context=documentation_context,
             documentation_context_alternatives=(
                 documentation_context_alternatives
-            )
+            ), lifecycle_action=locals().get("lifecycle_action")
         )
         conn.close()
         return response, 400
@@ -4721,6 +4838,192 @@ def behaviour_record(shift_id=None):
             conn.rollback()
         conn.close()
         raise
+
+
+def _behaviour_edit_form_values(occurrence):
+    values = {
+        "record_format": occurrence["record_format"],
+        "occurrence_local": behaviour_utc_to_vancouver(
+            occurrence["occurred_at_utc"]
+        ).strftime("%Y-%m-%dT%H:%M"),
+        "expected_version": str(occurrence["version_number"]),
+    }
+    for field in BEHAVIOUR_CATEGORY_FIELDS + ABC_ANTECEDENT_FIELDS + ABC_BEHAVIOUR_FIELDS + ABC_RESPONSE_FIELDS:
+        if occurrence[field]:
+            values[field] = "1"
+    for field in ABC_TEXT_FIELDS:
+        if occurrence[field] is not None:
+            values[field] = occurrence[field]
+    if occurrence["notes"] is not None:
+        values["notes"] = occurrence["notes"]
+    if occurrence["duration_until_calm_minutes"] is not None:
+        values["duration_until_calm_minutes"] = str(
+            occurrence["duration_until_calm_minutes"]
+        )
+    return values
+
+
+@app.route(
+    "/shift/<int:shift_id>/behaviour/<int:occurrence_id>/edit",
+    methods=["GET", "POST"]
+)
+def behaviour_occurrence_edit(shift_id, occurrence_id):
+    """Allow only the active creator to continue an In Progress occurrence."""
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor, documentation_context, occurrence = (
+            get_behaviour_in_progress_edit_context(
+                conn, shift_id, occurrence_id, session["user_id"]
+            )
+        )
+        if request.method == "GET":
+            values = _behaviour_edit_form_values(occurrence)
+            response = _render_behaviour_record(
+                conn, occurrence["client_id"], values=values,
+                shift_context=True,
+                submission_token=None,
+                documentation_context=documentation_context,
+                form_action=url_for(
+                    "behaviour_occurrence_edit",
+                    shift_id=shift_id, occurrence_id=occurrence_id
+                ),
+                edit_mode=True,
+                expected_version=occurrence["version_number"]
+            )
+            return response
+
+        approved_fields = {
+            "expected_version", "occurrence_local", "repeated_hour_choice",
+            "record_format", "notes", *BEHAVIOUR_CATEGORY_FIELDS,
+            *ABC_ANTECEDENT_FIELDS, *ABC_BEHAVIOUR_FIELDS, *ABC_RESPONSE_FIELDS,
+            *ABC_TEXT_FIELDS, "duration_until_calm_minutes"
+        }
+        if not set(request.form).issubset(approved_fields):
+            raise ValueError("Behaviour edit input is invalid.")
+        for field_name in ("expected_version", "occurrence_local", "record_format"):
+            if len(request.form.getlist(field_name)) != 1:
+                raise ValueError("Behaviour edit input is invalid.")
+        expected_version_value = request.form["expected_version"]
+        if not re.fullmatch(r"[1-9][0-9]*", expected_version_value):
+            raise ValueError("Behaviour edit version is invalid.")
+        expected_version = int(expected_version_value)
+        if request.form["record_format"] != occurrence["record_format"]:
+            raise ValueError("Behaviour record format cannot be changed.")
+
+        ambiguity_values = request.form.getlist("repeated_hour_choice")
+        if len(ambiguity_values) > 1:
+            raise ValueError("Behaviour edit input is invalid.")
+        local_input = request.form["occurrence_local"]
+        ambiguity_choice = ambiguity_values[0] if ambiguity_values else ""
+        if is_vancouver_occurrence_input_ambiguous(local_input):
+            if ambiguity_choice not in ("first", "second"):
+                raise ValueError(
+                    "Repeated Vancouver times require a first or second choice."
+                )
+        elif ambiguity_choice:
+            raise ValueError(
+                "Ambiguity choice is only allowed for a repeated Vancouver time."
+            )
+        occurrence_utc = convert_vancouver_occurrence_input_to_utc(
+            local_input, ambiguity_choice or None
+        )
+        notes = request.form.get("notes", "").strip() or None
+        if notes and len(notes) > BEHAVIOUR_NOTES_MAX_LENGTH:
+            raise ValueError("Behaviour notes cannot exceed 2,000 characters.")
+
+        if occurrence["record_format"] == "ABC":
+            flags = {field: 0 for field in BEHAVIOUR_CATEGORY_FIELDS}
+            abc_values = validate_abc_in_progress_submission(request.form)
+        else:
+            abc_values = None
+            flags = {}
+            for field in BEHAVIOUR_CATEGORY_FIELDS:
+                values = request.form.getlist(field)
+                if len(values) > 1 or (values and values[0] != "1"):
+                    raise ValueError("Behaviour category input is invalid.")
+                flags[field] = int(bool(values))
+            if not any(flags.values()) and not notes:
+                raise ValueError("Add Behaviour information before saving In Progress.")
+
+        mutable_values = {"occurred_at_utc": occurrence_utc}
+        if occurrence["record_format"] == "ABC":
+            mutable_values.update({
+                field: abc_values[field]
+                for field in ABC_BOOLEAN_FIELDS + ABC_TEXT_FIELDS
+            })
+            mutable_values["duration_until_calm_minutes"] = (
+                abc_values["duration_until_calm_minutes"]
+            )
+        else:
+            mutable_values.update(flags)
+            mutable_values["notes"] = notes
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, documentation_context, current = (
+                get_behaviour_in_progress_edit_context(
+                    conn, shift_id, occurrence_id, session["user_id"]
+                )
+            )
+            if current["version_number"] != expected_version:
+                raise BehaviourConcurrencyConflictError(
+                    "This Behaviour record was changed elsewhere. Reload before saving."
+                )
+            changes = {
+                field: {"old": current[field], "new": value}
+                for field, value in mutable_values.items()
+                if current[field] != value
+            }
+            if not changes:
+                conn.rollback()
+                return "No Behaviour changes were submitted.", 400
+            assignments = ", ".join(
+                f"{field} = ?" for field in changes
+            )
+            parameters = [change["new"] for change in changes.values()]
+            parameters += [occurrence_id, shift_id, actor["user_id"], expected_version]
+            updated = conn.execute(
+                "UPDATE behaviour_occurrences SET " + assignments + ", "
+                "version_number = version_number + 1 "
+                "WHERE behaviour_occurrence_id = ? AND shift_id = ? "
+                "AND recorded_by_user_id = ? AND status = 'In Progress' "
+                "AND version_number = ?",
+                parameters
+            )
+            if updated.rowcount != 1:
+                raise BehaviourConcurrencyConflictError(
+                    "This Behaviour record was changed elsewhere. Reload before saving."
+                )
+            change_text = "\n".join(
+                f"{field}: {change['old']!r} -> {change['new']!r}"
+                for field, change in changes.items()
+            )
+            log_activity(
+                conn, "BEHAVIOUR", "behaviour_occurrence_updated",
+                "Behaviour occurrence updated", user_id=actor["user_id"],
+                client_id=current["client_id"], shift_id=shift_id,
+                related_table="behaviour_occurrences", related_id=occurrence_id,
+                details="Changed fields:\n" + change_text, success=1,
+                storyline_visible=True, event_datetime=occurrence_utc
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        flash("Behaviour occurrence updated.")
+        return redirect(url_for("shift_dashboard", shift_id=shift_id))
+    except BehaviourConcurrencyConflictError as error:
+        return str(error), 409
+    except PermissionError:
+        return "Access denied", 403
+    except ValueError as error:
+        return str(error), 400
+    finally:
+        conn.close()
 
 
 @app.route("/behaviour/occurrences/<int:occurrence_id>/void", methods=["POST"])
@@ -4750,6 +5053,10 @@ def behaviour_occurrence_void(occurrence_id):
             """, (occurrence_id,)).fetchone()
             if occurrence is None:
                 raise LookupError("Behaviour occurrence not found.")
+            if occurrence["status"] == "In Progress":
+                raise RuntimeError(
+                    "In Progress Behaviour occurrences cannot be voided until finalized."
+                )
             if occurrence["status"] != "Recorded":
                 raise RuntimeError("Behaviour occurrence has already been voided.")
 
@@ -4894,6 +5201,10 @@ class UserLifecycleConflictError(RuntimeError):
     pass
 
 
+class BehaviourConcurrencyConflictError(RuntimeError):
+    pass
+
+
 def _shift_is_cancelled(shift):
     return shift is not None and shift["status"] == SHIFT_CANCELLED_STATUS
 
@@ -5017,6 +5328,36 @@ def get_worker_documentation_shift_context(
     if len(matches) != 1:
         return None
     return matches[0]
+
+
+def get_behaviour_in_progress_edit_context(conn, shift_id, occurrence_id, user_id):
+    """Return the active creator context for one editable Behaviour record."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError("Only the recording Support Worker may edit this Behaviour.")
+
+    documentation_context = get_worker_documentation_shift_context(
+        conn, shift_id, actor["user_id"]
+    )
+    if documentation_context is None or (
+        documentation_context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
+        or documentation_context.get("shift_status") != "Open"
+    ):
+        raise PermissionError("Behaviour editing requires the worker's open active shift.")
+
+    occurrence = conn.execute("""
+        SELECT bo.*, c.client_name
+        FROM behaviour_occurrences bo
+        JOIN clients c ON c.client_id = bo.client_id
+        WHERE bo.behaviour_occurrence_id = ?
+          AND bo.shift_id = ?
+          AND bo.recorded_by_user_id = ?
+    """, (occurrence_id, shift_id, actor["user_id"])).fetchone()
+    if occurrence is None or occurrence["status"] != "In Progress":
+        raise PermissionError("Only the recording Support Worker may edit an In Progress Behaviour.")
+    if occurrence["client_id"] != documentation_context["client_id"]:
+        raise PermissionError("Behaviour client and shift context do not match.")
+    return actor, documentation_context, occurrence
 
 
 def can_worker_document_shift(conn, shift_id, user_id, now_utc=None):
@@ -21678,13 +22019,16 @@ def review_behaviour_post(occurrence_id):
             session["user_id"]
         )
         occurrence = conn.execute("""
-            SELECT behaviour_occurrence_id, client_id
+            SELECT behaviour_occurrence_id, client_id, status
             FROM behaviour_occurrences
             WHERE behaviour_occurrence_id = ?
         """, (occurrence_id,)).fetchone()
         if occurrence is None:
             conn.rollback()
             return "Behaviour occurrence not found", 404
+        if occurrence["status"] == "In Progress":
+            conn.rollback()
+            return "In Progress Behaviour cannot be marked as Reviewed.", 409
         create_acknowledgement(
             conn,
             source_table="behaviour_occurrences",
