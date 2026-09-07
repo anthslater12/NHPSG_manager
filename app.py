@@ -196,6 +196,17 @@ BEHAVIOUR_REVIEW_AUTHORITY_ROLES = frozenset((
     *BEHAVIOUR_VOID_AUTHORITY_ROLES,
     "Behaviour Consultant",
 ))
+BEHAVIOUR_OCCURRENCE_STATUSES = frozenset((
+    "In Progress",
+    "Completed",
+    "Recorded",
+    "Voided",
+))
+BEHAVIOUR_OCCURRENCE_EDITABLE_STATUSES = frozenset(("In Progress",))
+BEHAVIOUR_OCCURRENCE_FINALIZED_STATUSES = frozenset((
+    "Completed",
+    "Recorded",
+))
 FOOD_FLUID_MANAGEMENT_ROLES = BEHAVIOUR_VOID_AUTHORITY_ROLES
 ACTION_STATUSES = frozenset((
     "Open",
@@ -356,6 +367,16 @@ def get_db():
 #####################################################################
 # BEHAVIOUR MODULE V1: SCHEMA-LEVEL BUSINESS RULE HELPERS
 #####################################################################
+
+def is_behaviour_occurrence_editable(status):
+    """Return whether a Behaviour status is eligible for future editing."""
+    return status in BEHAVIOUR_OCCURRENCE_EDITABLE_STATUSES
+
+
+def is_behaviour_occurrence_finalized(status):
+    """Return whether a Behaviour status represents a finalized record."""
+    return status in BEHAVIOUR_OCCURRENCE_FINALIZED_STATUSES
+
 
 def behaviour_utc_to_vancouver(stored_utc):
     """Return a stored UTC instant as an aware Vancouver datetime."""

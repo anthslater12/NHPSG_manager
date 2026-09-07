@@ -102,6 +102,7 @@ class BehaviourCheckpointOneTests(unittest.TestCase):
             "injury_to_self", "property_damage", "notes",
             "recorded_by_user_id", "recorded_at_utc", "submission_token",
             "status", "voided_by_user_id", "voided_at_utc", "void_reason",
+            "completed_at_utc", "completed_by_user_id",
             "shift_id", "record_format", *behaviour_migration.ABC_BOOLEAN_COLUMNS,
             *behaviour_migration.ABC_TEXT_COLUMNS, "duration_until_calm_minutes",
         })
@@ -116,6 +117,7 @@ class BehaviourCheckpointOneTests(unittest.TestCase):
             ("client_id", "clients", "client_id"),
             ("recorded_by_user_id", "users", "user_id"),
             ("voided_by_user_id", "users", "user_id"),
+            ("completed_by_user_id", "users", "user_id"),
         })
 
     def test_category_and_at_least_one_constraints(self):

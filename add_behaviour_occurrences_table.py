@@ -12,6 +12,14 @@ LEGACY_COLUMNS = (
     "voided_at_utc", "void_reason",
 )
 
+COMPLETION_COLUMNS = (
+    "completed_at_utc", "completed_by_user_id",
+)
+
+LIFECYCLE_STATUSES = (
+    "In Progress", "Completed", "Recorded", "Voided",
+)
+
 ABC_BOOLEAN_COLUMNS = (
     "antecedent_transition_activities", "antecedent_denied_access",
     "antecedent_delayed_access", "antecedent_given_instruction",
@@ -47,9 +55,12 @@ def _create_table(conn):
         )),
         "notes TEXT", "recorded_by_user_id INTEGER NOT NULL REFERENCES users(user_id)",
         "recorded_at_utc TEXT NOT NULL " + timestamp_check.format("recorded_at_utc"), "submission_token TEXT NOT NULL UNIQUE",
-        "status TEXT NOT NULL DEFAULT 'Recorded' CHECK (status IN ('Recorded', 'Voided'))",
+        "status TEXT NOT NULL DEFAULT 'Recorded' CHECK (status IN ('In Progress', 'Completed', 'Recorded', 'Voided'))",
         "voided_by_user_id INTEGER REFERENCES users(user_id)",
         "voided_at_utc TEXT", "void_reason TEXT",
+        "completed_at_utc TEXT CHECK (completed_at_utc IS NULL OR "
+        + timestamp_check.format("completed_at_utc")[6:] + ")",
+        "completed_by_user_id INTEGER REFERENCES users(user_id)",
         "shift_id INTEGER", "record_format TEXT NOT NULL DEFAULT 'V1' CHECK (record_format IN ('V1', 'ABC'))",
         *(f"{name} INTEGER NOT NULL DEFAULT 0 CHECK ({name} IN (0, 1))" for name in ABC_BOOLEAN_COLUMNS),
         "antecedent_other_details TEXT", "behaviour_other_details TEXT",
@@ -57,9 +68,81 @@ def _create_table(conn):
         "calming_description TEXT", "additional_notes TEXT",
         "CHECK (record_format = 'ABC' OR aggression_towards_others + injury_to_others + self_harm + injury_to_self + property_damage >= 1)",
         "CHECK (record_format = 'V1' OR (duration_until_calm_minutes IS NOT NULL AND duration_until_calm_minutes >= 0))",
-        "CHECK ((status = 'Recorded' AND voided_by_user_id IS NULL AND voided_at_utc IS NULL AND void_reason IS NULL) OR (status = 'Voided' AND voided_by_user_id IS NOT NULL AND voided_at_utc IS NOT NULL AND length(trim(void_reason)) > 0))",
+        "CHECK ("
+        "((status IN ('In Progress', 'Recorded') "
+        "AND completed_at_utc IS NULL "
+        "AND completed_by_user_id IS NULL "
+        "AND voided_by_user_id IS NULL "
+        "AND voided_at_utc IS NULL "
+        "AND void_reason IS NULL) "
+        "OR (status = 'Completed' "
+        "AND completed_at_utc IS NOT NULL "
+        "AND completed_by_user_id IS NOT NULL "
+        "AND voided_by_user_id IS NULL "
+        "AND voided_at_utc IS NULL "
+        "AND void_reason IS NULL) "
+        "OR (status = 'Voided' "
+        "AND completed_at_utc IS NULL "
+        "AND completed_by_user_id IS NULL "
+        "AND voided_by_user_id IS NOT NULL "
+        "AND voided_at_utc IS NOT NULL "
+        "AND length(trim(void_reason)) > 0))"
+        ")",
     ]
     conn.execute("CREATE TABLE behaviour_occurrences (" + ",\n".join(columns) + ")")
+
+
+def _table_sql(conn):
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='behaviour_occurrences'"
+    ).fetchone()
+    return row[0] if row is not None else ""
+
+
+def _needs_lifecycle_upgrade(conn, column_names):
+    table_sql = _table_sql(conn)
+    return (
+        any(name not in column_names for name in COMPLETION_COLUMNS)
+        or not all(
+            f"'{status}'" in table_sql
+            for status in LIFECYCLE_STATUSES
+        )
+        or "completed_at_utc IS NULL OR" not in table_sql
+        or "status = 'Completed'" not in table_sql
+        or "completed_at_utc IS NOT NULL" not in table_sql
+        or "completed_by_user_id IS NOT NULL" not in table_sql
+    )
+
+
+def _rebuild_for_lifecycle(conn, existing_column_names):
+    """Rebuild only the Behaviour table to replace its SQLite status CHECK."""
+    legacy_table = "behaviour_occurrences_lifecycle_legacy"
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (legacy_table,)
+    ).fetchone() is not None:
+        raise RuntimeError(
+            "An unfinished Behaviour lifecycle migration was found."
+        )
+
+    conn.execute(
+        "ALTER TABLE behaviour_occurrences RENAME TO " + legacy_table
+    )
+    _create_table(conn)
+
+    new_column_names = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(behaviour_occurrences)")
+    }
+    copy_columns = [
+        name for name in existing_column_names if name in new_column_names
+    ]
+    column_list = ", ".join(copy_columns)
+    conn.execute(
+        "INSERT INTO behaviour_occurrences (" + column_list + ") "
+        "SELECT " + column_list + " FROM " + legacy_table
+    )
+    conn.execute("DROP TABLE " + legacy_table)
 
 
 def migrate(conn):
@@ -78,6 +161,15 @@ def migrate(conn):
                 conn.execute(f"INSERT INTO behaviour_occurrences ({copy_columns}) SELECT {copy_columns} FROM behaviour_occurrences_v1_legacy")
                 conn.execute("DROP TABLE behaviour_occurrences_v1_legacy")
             else:
+                if _needs_lifecycle_upgrade(conn, names):
+                    _rebuild_for_lifecycle(conn, names)
+                    names = {
+                        row[1]
+                        for row in conn.execute(
+                            "PRAGMA table_info(behaviour_occurrences)"
+                        )
+                    }
+
                 missing = [name for name in ALL_NEW_COLUMNS if name not in names]
                 for name in missing:
                     if name in ABC_BOOLEAN_COLUMNS:
