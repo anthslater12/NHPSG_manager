@@ -30,6 +30,7 @@
 <label>Notes</label><textarea name="notes">{{ values.get('notes', '') }}</textarea>
 {% endif %}
 {% if not duplicate_warning %}{% if edit_mode %}<button type="submit">Save In Progress</button>{% elif shift_context %}<button type="submit" name="lifecycle_action" value="in_progress">Save In Progress</button> <button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% else %}<button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% endif %}{% endif %}</form>
+{% if edit_mode %}<form method="post" action="{{ completion_action }}"><input type="hidden" name="expected_version" value="{{ expected_version }}"><p>Completing this record finalizes it and stops worker editing.</p><button type="submit">Complete Behaviour Record</button></form>{% endif %}
 <details class="behaviour-support-information">
 <summary>Behaviour Support Information</summary>
 <div class="behaviour-support-content">

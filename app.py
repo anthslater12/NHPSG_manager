@@ -15,6 +15,7 @@ from flask import (
 from collections.abc import Mapping
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.datastructures import MultiDict
 from datetime import datetime, date, time as datetime_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 import os
@@ -1497,6 +1498,39 @@ def validate_abc_submission(form):
     }
 
 
+def validate_behaviour_occurrence_completion(occurrence):
+    """Apply the existing finalized-record rules to stored occurrence data."""
+    if occurrence["record_format"] == "ABC":
+        values = {
+            "record_format": "ABC",
+            **{
+                field: "1" for field in ABC_BOOLEAN_FIELDS
+                if occurrence[field]
+            },
+            **{
+                field: occurrence[field] or ""
+                for field in ABC_TEXT_FIELDS
+            },
+            "duration_until_calm_minutes": (
+                "" if occurrence["duration_until_calm_minutes"] is None
+                else str(occurrence["duration_until_calm_minutes"])
+            ),
+        }
+        return validate_abc_submission(MultiDict(values))
+
+    flags = {
+        field: occurrence[field]
+        for field in BEHAVIOUR_CATEGORY_FIELDS
+    }
+    validate_behaviour_category_flags(flags)
+    notes = occurrence["notes"]
+    if not isinstance(notes, str) or not notes.strip():
+        raise ValueError("Behaviour notes are required.")
+    if len(notes) > BEHAVIOUR_NOTES_MAX_LENGTH:
+        raise ValueError("Behaviour notes cannot exceed 2,000 characters.")
+    return flags
+
+
 def validate_abc_in_progress_submission(form):
     """Validate the identity of a partial ABC record without finalizing it."""
     if form.get("record_format") != "ABC":
@@ -2717,7 +2751,7 @@ def _render_behaviour_record(
     submission_token=None, duplicate_warning=None,
     documentation_context=None, documentation_context_alternatives=None,
     form_action=None, edit_mode=False, expected_version=None,
-    lifecycle_action=None
+    lifecycle_action=None, completion_action=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -2741,6 +2775,7 @@ def _render_behaviour_record(
         form_action=form_action, edit_mode=edit_mode,
         expected_version=expected_version,
         lifecycle_action=lifecycle_action,
+        completion_action=completion_action,
         documentation_context=documentation_context,
         documentation_context_alternatives=(
             documentation_context_alternatives or []
@@ -4891,7 +4926,11 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                     shift_id=shift_id, occurrence_id=occurrence_id
                 ),
                 edit_mode=True,
-                expected_version=occurrence["version_number"]
+                expected_version=occurrence["version_number"],
+                completion_action=url_for(
+                    "behaviour_occurrence_complete",
+                    shift_id=shift_id, occurrence_id=occurrence_id
+                )
             )
             return response
 
@@ -5026,6 +5065,93 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
         conn.close()
 
 
+@app.route(
+    "/shift/<int:shift_id>/behaviour/<int:occurrence_id>/complete",
+    methods=["POST"]
+)
+def behaviour_occurrence_complete(shift_id, occurrence_id):
+    """Finalize one in-progress Behaviour occurrence by its original creator."""
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, documentation_context, occurrence = (
+                get_behaviour_in_progress_edit_context(
+                    conn, shift_id, occurrence_id, session["user_id"]
+                )
+            )
+            if (
+                set(request.form) != {"expected_version"}
+                or len(request.form.getlist("expected_version")) != 1
+            ):
+                raise ValueError("Behaviour completion input is invalid.")
+            expected_version_value = request.form["expected_version"]
+            if not re.fullmatch(r"[1-9][0-9]*", expected_version_value):
+                raise ValueError("Behaviour completion version is invalid.")
+            expected_version = int(expected_version_value)
+            if occurrence["version_number"] != expected_version:
+                raise BehaviourConcurrencyConflictError(
+                    "This Behaviour record was changed elsewhere. Reload before completing."
+                )
+
+            validate_behaviour_occurrence_completion(occurrence)
+            completed_at_utc = serialize_behaviour_utc(
+                datetime.now(timezone.utc).replace(microsecond=0)
+            )
+            resulting_version = expected_version + 1
+            updated = conn.execute("""
+                UPDATE behaviour_occurrences
+                SET status = 'Completed', completed_at_utc = ?,
+                    completed_by_user_id = ?, version_number = ?
+                WHERE behaviour_occurrence_id = ?
+                  AND shift_id = ?
+                  AND recorded_by_user_id = ?
+                  AND status = 'In Progress'
+                  AND version_number = ?
+            """, (
+                completed_at_utc, actor["user_id"], resulting_version,
+                occurrence_id, shift_id, actor["user_id"], expected_version
+            ))
+            if updated.rowcount != 1:
+                raise BehaviourConcurrencyConflictError(
+                    "This Behaviour record was changed elsewhere. Reload before completing."
+                )
+            log_activity(
+                conn, "BEHAVIOUR", "behaviour_occurrence_completed",
+                "Behaviour occurrence completed", user_id=actor["user_id"],
+                client_id=occurrence["client_id"], shift_id=shift_id,
+                related_table="behaviour_occurrences", related_id=occurrence_id,
+                details=(
+                    f"Occurrence ID: {occurrence_id}\n"
+                    f"Client ID: {occurrence['client_id']}\n"
+                    f"Shift ID: {shift_id}\n"
+                    f"Completion timestamp UTC: {completed_at_utc}\n"
+                    "Status: In Progress -> Completed\n"
+                    f"Resulting version: {resulting_version}"
+                ),
+                success=1, storyline_visible=True,
+                event_datetime=completed_at_utc
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        flash("Behaviour occurrence completed.")
+        return redirect(url_for("shift_dashboard", shift_id=shift_id))
+    except BehaviourConcurrencyConflictError as error:
+        return str(error), 409
+    except PermissionError:
+        return "Access denied", 403
+    except ValueError as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
+
 @app.route("/behaviour/occurrences/<int:occurrence_id>/void", methods=["POST"])
 def behaviour_occurrence_void(occurrence_id):
     """Void one incorrect Behaviour occurrence without changing its original data."""
@@ -5056,6 +5182,10 @@ def behaviour_occurrence_void(occurrence_id):
             if occurrence["status"] == "In Progress":
                 raise RuntimeError(
                     "In Progress Behaviour occurrences cannot be voided until finalized."
+                )
+            if occurrence["status"] == "Completed":
+                raise RuntimeError(
+                    "Completed Behaviour occurrences cannot be voided."
                 )
             if occurrence["status"] != "Recorded":
                 raise RuntimeError("Behaviour occurrence has already been voided.")
