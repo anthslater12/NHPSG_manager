@@ -169,6 +169,9 @@ def migrate(conn):
     conn.execute("PRAGMA foreign_keys = ON")
     existing = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='behaviour_occurrences'").fetchone()
     with conn:
+        # SQLite DDL is otherwise autocommitted; keep the rebuild atomic.
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
         if existing is None:
             _create_table(conn)
         else:

@@ -338,6 +338,33 @@ class BehaviourLifecycleMigrationTests(unittest.TestCase):
         """).fetchall()
         self.assertEqual(triggers, [])
 
+    def test_failed_lifecycle_rebuild_rolls_back_without_stranding_legacy_table(self):
+        self.insert_phase_one_schema()
+        original_create_table = migration._create_table
+
+        def fail_create_table(conn):
+            raise RuntimeError("forced lifecycle rebuild failure")
+
+        migration._create_table = fail_create_table
+        try:
+            with self.assertRaises(RuntimeError):
+                migration.migrate(self.conn)
+        finally:
+            migration._create_table = original_create_table
+
+        table_names = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        self.assertIn("behaviour_occurrences", table_names)
+        self.assertNotIn("behaviour_occurrences_lifecycle_legacy", table_names)
+        row = self.conn.execute(
+            "SELECT status, submission_token FROM behaviour_occurrences"
+        ).fetchone()
+        self.assertEqual(tuple(row), ("Recorded", "phase-one-recorded"))
+
 
 if __name__ == "__main__":
     unittest.main()
