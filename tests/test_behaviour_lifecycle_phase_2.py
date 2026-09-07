@@ -213,6 +213,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
         )
         update.pop("lifecycle_action")
         update.pop("submission_token")
+        update["action"] = "save"
         updated = self.client.post(edit_url, data=update)
         self.assertEqual(updated.status_code, 302)
         occurrence = self.row()
@@ -289,6 +290,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
         invalid.pop("antecedent_transition_activities", None)
         invalid.pop("lifecycle_action")
         invalid.pop("submission_token")
+        invalid["action"] = "save"
         self.assertEqual(self.client.post(edit_url, data=invalid).status_code, 400)
         self.assertEqual(self.activity_types(), ["behaviour_occurrence_created"])
 
@@ -300,6 +302,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
         )
         noop.pop("lifecycle_action")
         noop.pop("submission_token")
+        noop["action"] = "save"
         self.assertEqual(self.client.post(edit_url, data=noop).status_code, 400)
         self.assertEqual(self.activity_types(), ["behaviour_occurrence_created"])
 
@@ -308,6 +311,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
         )
         update.pop("lifecycle_action")
         update.pop("submission_token")
+        update["action"] = "save"
         self.assertEqual(self.client.post(edit_url, data=update).status_code, 302)
         latest = self.row()
         stale = self.in_progress_payload(
@@ -315,6 +319,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
         )
         stale.pop("lifecycle_action")
         stale.pop("submission_token")
+        stale["action"] = "save"
         self.assertEqual(self.client.post(edit_url, data=stale).status_code, 409)
         self.assertEqual(self.row()["additional_notes"], latest["additional_notes"])
         self.assertEqual(self.row()["version_number"], 2)
@@ -329,6 +334,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
             completed_at_utc="2026-08-03T15:00:00Z",
         )
         crafted.pop("lifecycle_action")
+        crafted["action"] = "save"
         self.assertEqual(self.client.post(edit_url, data=crafted).status_code, 400)
         self.assertEqual(self.row()["status"], "In Progress")
         self.assertEqual(self.row()["version_number"], 2)

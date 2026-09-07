@@ -15,6 +15,7 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
         )
         update.pop("submission_token")
         update.pop("lifecycle_action", None)
+        update["action"] = "save"
         response = self.client.post(
             f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit",
             data=update
@@ -28,10 +29,39 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
             occurrence["occurred_at_utc"]
         ).strftime("%Y-%m-%dT%H:%M")
 
+    def edit_payload(self, occurrence, action="complete", expected_version=None):
+        import app
+        payload = {
+            "action": action,
+            "expected_version": str(
+                occurrence["version_number"]
+                if expected_version is None else expected_version
+            ),
+            "record_format": occurrence["record_format"],
+            "occurrence_local": self.local_time(occurrence),
+        }
+        if occurrence["record_format"] == "ABC":
+            for field in app.ABC_BOOLEAN_FIELDS:
+                if occurrence[field]:
+                    payload[field] = "1"
+            for field in app.ABC_TEXT_FIELDS:
+                if occurrence[field] is not None:
+                    payload[field] = occurrence[field]
+            if occurrence["duration_until_calm_minutes"] is not None:
+                payload["duration_until_calm_minutes"] = str(
+                    occurrence["duration_until_calm_minutes"]
+                )
+        else:
+            for field in app.BEHAVIOUR_CATEGORY_FIELDS:
+                if occurrence[field]:
+                    payload[field] = "1"
+            payload["notes"] = occurrence["notes"] or ""
+        return payload
+
     def complete(self, occurrence):
         return self.client.post(
-            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/complete",
-            data={"expected_version": str(occurrence["version_number"])}
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit",
+            data=self.edit_payload(occurrence)
         )
 
     def test_creator_completes_complete_abc_and_worker_edit_locks(self):
@@ -79,12 +109,12 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
 
     def test_completion_authority_is_creator_only_and_database_backed(self):
         self.create_in_progress()
-        complete_url = "/shift/10/behaviour/1/complete"
+        complete_url = "/shift/10/behaviour/1/edit"
         for user_id in (2, 3, 4, 5, 6, 7, 8):
             with self.subTest(user_id=user_id):
                 self.login(user_id)
                 response = self.client.post(
-                    complete_url, data={"expected_version": "1"}
+                    complete_url, data={"action": "complete"}
                 )
                 self.assertEqual(response.status_code, 403)
         self.assertEqual(self.row()["status"], "In Progress")
@@ -97,7 +127,7 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
         conn.close()
         self.login(1)
         self.assertEqual(
-            self.client.post(complete_url, data={"expected_version": "1"}).status_code,
+            self.client.post(complete_url, data={"action": "complete"}).status_code,
             403
         )
         self.assertEqual(self.row()["status"], "In Progress")
@@ -178,8 +208,8 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
         occurrence = self.complete_abc_record()
         self.login(1)
         stale = self.client.post(
-            "/shift/10/behaviour/1/complete",
-            data={"expected_version": "1"}
+            "/shift/10/behaviour/1/edit",
+            data=self.edit_payload(occurrence, expected_version=1)
         )
         self.assertEqual(stale.status_code, 409)
         unchanged = self.row()
@@ -235,8 +265,8 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
         )
         self.assertEqual(
             self.client.post(
-                "/shift/10/behaviour/1/complete",
-                data={"expected_version": "3"}
+                "/shift/10/behaviour/1/edit",
+                data=self.edit_payload(completed)
             ).status_code,
             403
         )

@@ -2751,7 +2751,7 @@ def _render_behaviour_record(
     submission_token=None, duplicate_warning=None,
     documentation_context=None, documentation_context_alternatives=None,
     form_action=None, edit_mode=False, expected_version=None,
-    lifecycle_action=None, completion_action=None
+    lifecycle_action=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -2775,7 +2775,6 @@ def _render_behaviour_record(
         form_action=form_action, edit_mode=edit_mode,
         expected_version=expected_version,
         lifecycle_action=lifecycle_action,
-        completion_action=completion_action,
         documentation_context=documentation_context,
         documentation_context_alternatives=(
             documentation_context_alternatives or []
@@ -4926,22 +4925,22 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                     shift_id=shift_id, occurrence_id=occurrence_id
                 ),
                 edit_mode=True,
-                expected_version=occurrence["version_number"],
-                completion_action=url_for(
-                    "behaviour_occurrence_complete",
-                    shift_id=shift_id, occurrence_id=occurrence_id
-                )
+                expected_version=occurrence["version_number"]
             )
             return response
 
         approved_fields = {
-            "expected_version", "occurrence_local", "repeated_hour_choice",
+            "action", "expected_version", "occurrence_local", "repeated_hour_choice",
             "record_format", "notes", *BEHAVIOUR_CATEGORY_FIELDS,
             *ABC_ANTECEDENT_FIELDS, *ABC_BEHAVIOUR_FIELDS, *ABC_RESPONSE_FIELDS,
             *ABC_TEXT_FIELDS, "duration_until_calm_minutes"
         }
         if not set(request.form).issubset(approved_fields):
             raise ValueError("Behaviour edit input is invalid.")
+        action_values = request.form.getlist("action")
+        if len(action_values) != 1 or action_values[0] not in ("save", "complete"):
+            raise ValueError("Behaviour edit action is invalid.")
+        action = action_values[0]
         for field_name in ("expected_version", "occurrence_local", "record_format"):
             if len(request.form.getlist(field_name)) != 1:
                 raise ValueError("Behaviour edit input is invalid.")
@@ -5011,22 +5010,39 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 raise BehaviourConcurrencyConflictError(
                     "This Behaviour record was changed elsewhere. Reload before saving."
                 )
+            candidate = dict(current)
+            candidate.update(mutable_values)
+            if action == "complete":
+                # Completion validates the submitted final values before any write.
+                validate_behaviour_occurrence_completion(candidate)
             changes = {
                 field: {"old": current[field], "new": value}
                 for field, value in mutable_values.items()
                 if current[field] != value
             }
-            if not changes:
+            if action == "save" and not changes:
                 conn.rollback()
                 return "No Behaviour changes were submitted.", 400
-            assignments = ", ".join(
-                f"{field} = ?" for field in changes
-            )
+
+            completed_at_utc = None
+            resulting_version = expected_version + 1
+            assignments = list(f"{field} = ?" for field in changes)
             parameters = [change["new"] for change in changes.values()]
+            if action == "complete":
+                completed_at_utc = serialize_behaviour_utc(
+                    datetime.now(timezone.utc).replace(microsecond=0)
+                )
+                assignments += [
+                    "status = 'Completed'",
+                    "completed_at_utc = ?",
+                    "completed_by_user_id = ?",
+                ]
+                parameters += [completed_at_utc, actor["user_id"]]
+            assignments.append("version_number = ?")
+            parameters.append(resulting_version)
             parameters += [occurrence_id, shift_id, actor["user_id"], expected_version]
             updated = conn.execute(
-                "UPDATE behaviour_occurrences SET " + assignments + ", "
-                "version_number = version_number + 1 "
+                "UPDATE behaviour_occurrences SET " + ", ".join(assignments) + " "
                 "WHERE behaviour_occurrence_id = ? AND shift_id = ? "
                 "AND recorded_by_user_id = ? AND status = 'In Progress' "
                 "AND version_number = ?",
@@ -5039,108 +5055,46 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
             change_text = "\n".join(
                 f"{field}: {change['old']!r} -> {change['new']!r}"
                 for field, change in changes.items()
-            )
-            log_activity(
-                conn, "BEHAVIOUR", "behaviour_occurrence_updated",
-                "Behaviour occurrence updated", user_id=actor["user_id"],
-                client_id=current["client_id"], shift_id=shift_id,
-                related_table="behaviour_occurrences", related_id=occurrence_id,
-                details="Changed fields:\n" + change_text, success=1,
-                storyline_visible=True, event_datetime=occurrence_utc
-            )
+            ) or "None"
+            if action == "complete":
+                log_activity(
+                    conn, "BEHAVIOUR", "behaviour_occurrence_completed",
+                    "Behaviour occurrence completed", user_id=actor["user_id"],
+                    client_id=current["client_id"], shift_id=shift_id,
+                    related_table="behaviour_occurrences", related_id=occurrence_id,
+                    details=(
+                        f"Occurrence ID: {occurrence_id}\n"
+                        f"Client ID: {current['client_id']}\n"
+                        f"Shift ID: {shift_id}\n"
+                        "Changed fields:\n" + change_text + "\n"
+                        f"Status: {current['status']} -> Completed\n"
+                        f"Previous status: {current['status']}\n"
+                        "New status: Completed\n"
+                        f"Completion timestamp UTC: {completed_at_utc}\n"
+                        f"Completion actor user ID: {actor['user_id']}\n"
+                        f"Resulting version: {resulting_version}"
+                    ),
+                    success=1, storyline_visible=True,
+                    event_datetime=completed_at_utc
+                )
+            else:
+                log_activity(
+                    conn, "BEHAVIOUR", "behaviour_occurrence_updated",
+                    "Behaviour occurrence updated", user_id=actor["user_id"],
+                    client_id=current["client_id"], shift_id=shift_id,
+                    related_table="behaviour_occurrences", related_id=occurrence_id,
+                    details="Changed fields:\n" + change_text, success=1,
+                    storyline_visible=True, event_datetime=occurrence_utc
+                )
             conn.commit()
         except Exception:
             if conn.in_transaction:
                 conn.rollback()
             raise
-        flash("Behaviour occurrence updated.")
-        return redirect(url_for("shift_dashboard", shift_id=shift_id))
-    except BehaviourConcurrencyConflictError as error:
-        return str(error), 409
-    except PermissionError:
-        return "Access denied", 403
-    except ValueError as error:
-        return str(error), 400
-    finally:
-        conn.close()
-
-
-@app.route(
-    "/shift/<int:shift_id>/behaviour/<int:occurrence_id>/complete",
-    methods=["POST"]
-)
-def behaviour_occurrence_complete(shift_id, occurrence_id):
-    """Finalize one in-progress Behaviour occurrence by its original creator."""
-    if "user_id" not in session:
-        return redirect(url_for("login"))
-
-    conn = get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            actor, documentation_context, occurrence = (
-                get_behaviour_in_progress_edit_context(
-                    conn, shift_id, occurrence_id, session["user_id"]
-                )
-            )
-            if (
-                set(request.form) != {"expected_version"}
-                or len(request.form.getlist("expected_version")) != 1
-            ):
-                raise ValueError("Behaviour completion input is invalid.")
-            expected_version_value = request.form["expected_version"]
-            if not re.fullmatch(r"[1-9][0-9]*", expected_version_value):
-                raise ValueError("Behaviour completion version is invalid.")
-            expected_version = int(expected_version_value)
-            if occurrence["version_number"] != expected_version:
-                raise BehaviourConcurrencyConflictError(
-                    "This Behaviour record was changed elsewhere. Reload before completing."
-                )
-
-            validate_behaviour_occurrence_completion(occurrence)
-            completed_at_utc = serialize_behaviour_utc(
-                datetime.now(timezone.utc).replace(microsecond=0)
-            )
-            resulting_version = expected_version + 1
-            updated = conn.execute("""
-                UPDATE behaviour_occurrences
-                SET status = 'Completed', completed_at_utc = ?,
-                    completed_by_user_id = ?, version_number = ?
-                WHERE behaviour_occurrence_id = ?
-                  AND shift_id = ?
-                  AND recorded_by_user_id = ?
-                  AND status = 'In Progress'
-                  AND version_number = ?
-            """, (
-                completed_at_utc, actor["user_id"], resulting_version,
-                occurrence_id, shift_id, actor["user_id"], expected_version
-            ))
-            if updated.rowcount != 1:
-                raise BehaviourConcurrencyConflictError(
-                    "This Behaviour record was changed elsewhere. Reload before completing."
-                )
-            log_activity(
-                conn, "BEHAVIOUR", "behaviour_occurrence_completed",
-                "Behaviour occurrence completed", user_id=actor["user_id"],
-                client_id=occurrence["client_id"], shift_id=shift_id,
-                related_table="behaviour_occurrences", related_id=occurrence_id,
-                details=(
-                    f"Occurrence ID: {occurrence_id}\n"
-                    f"Client ID: {occurrence['client_id']}\n"
-                    f"Shift ID: {shift_id}\n"
-                    f"Completion timestamp UTC: {completed_at_utc}\n"
-                    "Status: In Progress -> Completed\n"
-                    f"Resulting version: {resulting_version}"
-                ),
-                success=1, storyline_visible=True,
-                event_datetime=completed_at_utc
-            )
-            conn.commit()
-        except Exception:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
-        flash("Behaviour occurrence completed.")
+        flash(
+            "Behaviour occurrence completed."
+            if action == "complete" else "Behaviour occurrence updated."
+        )
         return redirect(url_for("shift_dashboard", shift_id=shift_id))
     except BehaviourConcurrencyConflictError as error:
         return str(error), 409
