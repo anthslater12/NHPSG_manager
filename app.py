@@ -307,6 +307,28 @@ SHIFT_ACTIVITY_CATEGORY_FIELDS = (
     "ls_selected",
 )
 SHIFT_ACTIVITY_ASCII_WHITESPACE = " \t\n\r\v\f"
+SHIFT_ACTIVITY_STATUSES = frozenset((
+    "In Progress",
+    "Completed",
+    "Recorded",
+))
+SHIFT_ACTIVITY_EDITABLE_STATUSES = frozenset(("In Progress",))
+SHIFT_ACTIVITY_FINALIZED_STATUSES = frozenset((
+    "Completed",
+    "Recorded",
+))
+
+
+def is_shift_activity_editable(status):
+    """Return whether an Activity status represents an editable record."""
+    return status in SHIFT_ACTIVITY_EDITABLE_STATUSES
+
+
+def is_shift_activity_finalized(status):
+    """Return whether an Activity status represents a finalized record."""
+    return status in SHIFT_ACTIVITY_FINALIZED_STATUSES
+
+
 SCHEDULE_SHIFT_TYPES = ("Day", "Afternoon", "Overnight")
 SCHEDULE_VIEW_ROLES = {"Admin", "Director", "Program Manager", "Support Worker"}
 SCHEDULE_MANAGEMENT_ROLES = {"Admin", "Director", "Program Manager"}
