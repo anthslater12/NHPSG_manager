@@ -22,8 +22,16 @@ class ClientStorylineTests(unittest.TestCase):
         conn.executescript("""
             CREATE TABLE users (user_id INTEGER PRIMARY KEY, full_name TEXT, role TEXT, active INTEGER);
             CREATE TABLE clients (client_id INTEGER PRIMARY KEY, client_name TEXT, active INTEGER);
-            CREATE TABLE shifts (shift_id INTEGER PRIMARY KEY, client_id INTEGER, status TEXT);
-            CREATE TABLE shift_staff (shift_staff_id INTEGER PRIMARY KEY, shift_id INTEGER, user_id INTEGER, active INTEGER);
+            CREATE TABLE shifts (
+                shift_id INTEGER PRIMARY KEY, client_id INTEGER, status TEXT,
+                shift_date TEXT, shift_type TEXT, scheduled_end_time TEXT
+            );
+            CREATE TABLE shift_staff (
+                shift_staff_id INTEGER PRIMARY KEY, shift_id INTEGER,
+                user_id INTEGER, active INTEGER,
+                actual_start_time TEXT, actual_end_at_utc TEXT,
+                sign_on_at TEXT, sign_off_at TEXT
+            );
             CREATE TABLE activity_log (
                 activity_id INTEGER PRIMARY KEY AUTOINCREMENT, activity_datetime TEXT,
                 activity_class TEXT, activity_type TEXT, user_id INTEGER, client_id INTEGER,
@@ -120,8 +128,10 @@ class ClientStorylineTests(unittest.TestCase):
                 (9, 'Consultant', 'Behaviour Consultant', 1),
                 (10, 'Inactive Consultant', 'Behaviour Consultant', 0);
             INSERT INTO clients VALUES (1, 'Client One', 1), (2, 'Client Two', 1);
-            INSERT INTO shifts VALUES (10, 1, 'Open'), (20, 2, 'Open');
-            INSERT INTO shift_staff VALUES (100, 10, 1, 1), (200, 20, 3, 1), (300, 10, 3, 0);
+            INSERT INTO shifts (shift_id, client_id, status)
+            VALUES (10, 1, 'Open'), (20, 2, 'Open');
+            INSERT INTO shift_staff (shift_staff_id, shift_id, user_id, active)
+            VALUES (100, 10, 1, 1), (200, 20, 3, 1), (300, 10, 3, 0);
         """)
         conn.commit()
         behaviour_migration.migrate(conn)
@@ -950,6 +960,151 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"And smiled", page)
         self.assertIn(b"&lt;test&gt;", page)
         self.assertIn(b"storyline-divider", page)
+
+    def test_behaviour_storyline_rehydrates_current_abc_record_without_duplicates(self):
+        occurrence_id = 60
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            UPDATE shift_staff
+            SET actual_start_time = '08:00',
+                sign_on_at = '2026-08-02T15:00:00Z'
+            WHERE shift_id = 10 AND user_id = 1
+        """)
+        conn.execute("""
+            INSERT INTO behaviour_occurrences
+            (behaviour_occurrence_id, client_id, shift_id, occurred_at_utc,
+             record_format, antecedent_transition_activities,
+             behaviour_physical_aggression, recorded_by_user_id,
+             recorded_at_utc, submission_token, status)
+            VALUES (?, 1, 10, '2026-08-02T17:00:00Z', 'ABC', 1, 1, 1,
+                    '2026-08-02T17:01:00Z', ?, 'In Progress')
+        """, (occurrence_id, "storyline-abc-60"))
+        conn.execute("""
+            INSERT INTO activity_log
+            (activity_datetime, activity_type, user_id, client_id, shift_id,
+             related_table, related_id, summary, details, success,
+             storyline_visible, event_datetime)
+            VALUES ('2026-08-02 10:01:00', 'behaviour_occurrence_created',
+                    1, 1, 10, 'behaviour_occurrences', ?,
+                    'Behaviour occurrence recorded', ?, 1, 1,
+                    '2026-08-02T17:00:00Z')
+        """, (
+            occurrence_id,
+            app.format_abc_behaviour_storyline_details({
+                "antecedent_transition_activities": 1,
+                "behaviour_physical_aggression": 1,
+                "duration_until_calm_minutes": None,
+            })
+        ))
+        conn.commit()
+        conn.close()
+
+        self.login(2, "Program Manager")
+        partial = self.client.get("/client/1/storyline?filter=Behaviour")
+        self.assertEqual(partial.status_code, 200)
+        self.assertIn(b"In Progress", partial.data)
+        self.assertIn(b"Asked to transition between activities", partial.data)
+        self.assertNotIn(b"Duration until calm: None minutes", partial.data)
+
+        self.login(1, "Support Worker")
+        with self.client.session_transaction() as session:
+            session[app.DOCUMENTATION_CONTEXT_SESSION_KEY] = 10
+        edit_url = f"/shift/10/behaviour/{occurrence_id}/edit"
+        save = self.client.post(edit_url, data={
+            "action": "save",
+            "expected_version": "1",
+            "record_format": "ABC",
+            "occurrence_local": "2026-08-02T10:00",
+            "antecedent_transition_activities": "1",
+            "behaviour_physical_aggression": "1",
+            "response_blocked_behaviour": "1",
+            "additional_notes": "Saved current details",
+        })
+        self.assertEqual(save.status_code, 302)
+
+        self.login(2, "Program Manager")
+        saved = self.client.get("/client/1/storyline?filter=Behaviour")
+        self.assertIn(b"Blocked behaviour", saved.data)
+        self.assertIn(b"Saved current details", saved.data)
+        self.assertEqual(saved.data.count(b"Behaviour occurrence recorded"), 1)
+
+        self.login(1, "Support Worker")
+        with self.client.session_transaction() as session:
+            session[app.DOCUMENTATION_CONTEXT_SESSION_KEY] = 10
+        complete = self.client.post(edit_url, data={
+            "action": "complete",
+            "expected_version": "2",
+            "record_format": "ABC",
+            "occurrence_local": "2026-08-02T10:00",
+            "antecedent_transition_activities": "1",
+            "behaviour_physical_aggression": "1",
+            "response_blocked_behaviour": "1",
+            "duration_until_calm_minutes": "12",
+            "calming_description": "Moved to a quiet area",
+            "additional_notes": "Final current details",
+        })
+        self.assertEqual(complete.status_code, 302)
+
+        self.login(2, "Program Manager")
+        final = self.client.get("/client/1/storyline?filter=Behaviour")
+        self.assertIn(b"Completed", final.data)
+        self.assertIn(b"Duration until calm: 12 minutes", final.data)
+        self.assertIn(b"Moved to a quiet area", final.data)
+        self.assertIn(b"Final current details", final.data)
+        self.assertEqual(final.data.count(b"Behaviour occurrence recorded"), 1)
+        self.assertNotIn(b"Behaviour occurrence updated", final.data)
+        self.assertNotIn(b"<strong>Behaviour occurrence completed</strong>", final.data)
+        self.assertNotIn(b"None minutes", final.data)
+
+        conn = sqlite3.connect(self.path)
+        activity_types = [row[0] for row in conn.execute(
+            "SELECT activity_type FROM activity_log "
+            "WHERE related_table = 'behaviour_occurrences' "
+            "AND related_id = ? ORDER BY activity_id",
+            (occurrence_id,)
+        )]
+        event_time = conn.execute(
+            "SELECT event_datetime FROM activity_log "
+            "WHERE activity_type = 'behaviour_occurrence_created' "
+            "AND related_id = ?",
+            (occurrence_id,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(
+            activity_types,
+            [
+                "behaviour_occurrence_created",
+                "behaviour_occurrence_updated",
+                "behaviour_occurrence_completed",
+            ]
+        )
+        self.assertEqual(event_time, "2026-08-02T17:00:00Z")
+
+    def test_legacy_recorded_and_voided_behaviour_storyline_cards_remain_compatible(self):
+        self.add_behaviour_occurrence(61, status="Recorded")
+        self.add_behaviour_occurrence(62, status="Voided")
+        self.add_event(
+            "behaviour_occurrence_created", "Recorded Behaviour",
+            details="Categories:\nAggression towards others\n\nNotes:\nBehaviour notes",
+            related_table="behaviour_occurrences", related_id=61
+        )
+        self.add_event(
+            "behaviour_occurrence_created", "Voided Behaviour",
+            details="Categories:\nAggression towards others\n\nNotes:\nBehaviour notes",
+            related_table="behaviour_occurrences", related_id=62
+        )
+        self.add_event(
+            "behaviour_occurrence_voided", "Behaviour occurrence voided",
+            details="Status: Voided\nVoid reason: Test void",
+            related_table="behaviour_occurrences", related_id=62
+        )
+
+        self.login(2, "Program Manager")
+        page = self.client.get("/client/1/storyline?filter=Behaviour")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.data.count(b"Aggression towards others"), 2)
+        self.assertIn(b"Behaviour occurrence voided", page.data)
+        self.assertIn(b"Status: Voided", page.data)
 
     def test_incident_details_render_from_activity_log_only_and_escape_values(self):
         self.login()

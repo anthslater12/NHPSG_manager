@@ -28,7 +28,7 @@
             <h3>{{ group.heading }}</h3>
             {% for event in group.events %}
                 <div id="storyline-event-{{ event.activity_id }}" class="storyline-event" style="padding: 0.25rem 0 {% if event.activity_type == 'shift_activity_created' %}0{% else %}0.15rem{% endif %};">
-                    <div><span class="status-active">{{ event.label }}</span></div>
+                    <div><span class="status-active">{{ event.label }}</span>{% if event.storyline_status %} <span class="status-active">{{ event.storyline_status }}</span>{% endif %}</div>
                     <strong>{{ event.summary }}</strong>
                     <div>{{ event.event_time }}{% if event.full_name %} · {{ event.full_name }}{% endif %}</div>
                     {% if event.storyline_detail_lines %}
