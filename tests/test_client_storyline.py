@@ -1106,6 +1106,45 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"Behaviour occurrence voided", page.data)
         self.assertIn(b"Status: Voided", page.data)
 
+    def test_support_worker_storyline_rehydrates_current_behaviour_record(self):
+        occurrence_id = 63
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            INSERT INTO behaviour_occurrences
+            (behaviour_occurrence_id, client_id, shift_id, occurred_at_utc,
+             record_format, antecedent_transition_activities,
+             behaviour_physical_aggression, duration_until_calm_minutes,
+             calming_description, additional_notes, recorded_by_user_id,
+             recorded_at_utc, submission_token, status)
+            VALUES (?, 1, 10, '2026-08-02T17:00:00Z', 'ABC', 1, 1, 12,
+                    'Redirected', 'Quickly calmed down', 1,
+                    '2026-08-02T17:01:00Z', ?, 'In Progress')
+        """, (occurrence_id, "support-worker-storyline-63"))
+        conn.commit()
+        conn.close()
+        old_snapshot = app.format_abc_behaviour_storyline_details({
+            "antecedent_transition_activities": 1,
+            "behaviour_physical_aggression": 1,
+            "duration_until_calm_minutes": 10,
+            "calming_description": "Old calming description",
+            "additional_notes": "Old additional notes",
+        })
+        self.add_event(
+            "behaviour_occurrence_created", "Behaviour occurrence recorded",
+            details=old_snapshot, event_datetime="2026-08-02T17:00:00Z",
+            related_table="behaviour_occurrences", related_id=occurrence_id
+        )
+
+        self.login(1, "Support Worker")
+        page = self.client.get("/client/1/storyline?filter=Behaviour")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"12 minutes", page.data)
+        self.assertIn(b"Redirected", page.data)
+        self.assertIn(b"Quickly calmed down", page.data)
+        self.assertNotIn(b"10 minutes", page.data)
+        self.assertNotIn(b"Old calming description", page.data)
+        self.assertNotIn(b"Old additional notes", page.data)
+
     def test_incident_details_render_from_activity_log_only_and_escape_values(self):
         self.login()
         details = (

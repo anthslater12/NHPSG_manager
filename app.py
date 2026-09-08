@@ -19308,7 +19308,7 @@ def client_storyline(client_id):
             and event["related_id"] is not None
         )
     }
-    if storyline_management and behaviour_occurrence_ids:
+    if behaviour_occurrence_ids:
         placeholders = ", ".join("?" for _ in behaviour_occurrence_ids)
         current_rows = conn.execute(
             "SELECT * FROM behaviour_occurrences "
