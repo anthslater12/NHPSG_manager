@@ -1877,6 +1877,11 @@ STORYLINE_FILTERS = {
     "Shift": {"start_shift_completed", "end_shift_completed"},
 }
 
+STORYLINE_SUPPRESSED_AUDIT_TYPES = frozenset({
+    "behaviour_occurrence_updated",
+    "behaviour_occurrence_completed",
+})
+
 STORYLINE_LABELS = {
     "sleep_fell_asleep": "Sleep",
     "sleep_woke_up": "Sleep",
@@ -2032,7 +2037,9 @@ def format_behaviour_storyline_details(category_text, notes=None):
     return details
 
 
-def format_abc_behaviour_storyline_details(values):
+def format_abc_behaviour_storyline_details(
+    values, include_unrecorded_duration=True
+):
     """Build the worker-safe Activity Log narrative for an ABC record."""
     sections = []
     for heading, fields, other_field, details_field in (
@@ -2048,9 +2055,11 @@ def format_abc_behaviour_storyline_details(values):
         if values.get(other_field) and str(values.get(details_field) or "").strip():
             lines.append("Other: " + str(values[details_field]).strip())
         sections.append("\n".join(lines))
-    duration = values["duration_until_calm_minutes"]
-    unit = "minute" if duration == 1 else "minutes"
-    outcome = ["Outcome:", f"Duration until calm: {duration} {unit}"]
+    duration = values.get("duration_until_calm_minutes")
+    outcome = ["Outcome:"]
+    if duration is not None or include_unrecorded_duration:
+        unit = "minute" if duration == 1 else "minutes"
+        outcome.append(f"Duration until calm: {duration} {unit}")
     calming = str(values.get("calming_description") or "").strip()
     notes = str(values.get("additional_notes") or "").strip()
     if calming:
@@ -2059,6 +2068,18 @@ def format_abc_behaviour_storyline_details(values):
         outcome.extend(("Additional notes:", notes))
     sections.append("\n".join(outcome))
     return "\n\n".join(sections)
+
+
+def format_current_behaviour_storyline_details(occurrence):
+    """Render the primary Storyline card from current occurrence data."""
+    if occurrence["record_format"] == "ABC":
+        return format_abc_behaviour_storyline_details(
+            occurrence, include_unrecorded_duration=False
+        )
+    return format_behaviour_storyline_details(
+        ", ".join(_behaviour_categories_for_row(occurrence)),
+        occurrence["notes"]
+    )
 
 
 def parse_abc_behaviour_storyline_details(details):
@@ -19222,6 +19243,15 @@ def client_storyline(client_id):
         elif selected_filter == "Housekeeping":
             where[-1] = f"(al.activity_type IN ({placeholders}) OR al.activity_type LIKE ?)"
             parameters.append("housekeeping_task_%")
+    if STORYLINE_SUPPRESSED_AUDIT_TYPES:
+        suppressed_placeholders = ", ".join(
+            "?" for _ in STORYLINE_SUPPRESSED_AUDIT_TYPES
+        )
+        where.append(
+            f"(al.activity_type NOT IN ({suppressed_placeholders}) "
+            "OR al.activity_type IS NULL)"
+        )
+        parameters.extend(sorted(STORYLINE_SUPPRESSED_AUDIT_TYPES))
 
     where_sql = " AND ".join(where)
     total = conn.execute(
@@ -19268,6 +19298,28 @@ def client_storyline(client_id):
         storyline_actor["role"] == "Behaviour Consultant"
     )
     storyline_management = management_storyline or behaviour_consultant_storyline
+    current_behaviour_occurrences = {}
+    behaviour_occurrence_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] == "behaviour_occurrence_created"
+            and event["related_table"] == "behaviour_occurrences"
+            and event["related_id"] is not None
+        )
+    }
+    if storyline_management and behaviour_occurrence_ids:
+        placeholders = ", ".join("?" for _ in behaviour_occurrence_ids)
+        current_rows = conn.execute(
+            "SELECT * FROM behaviour_occurrences "
+            "WHERE client_id = ? AND behaviour_occurrence_id IN ("
+            + placeholders + ")",
+            (client_id, *sorted(behaviour_occurrence_ids))
+        ).fetchall()
+        current_behaviour_occurrences = {
+            row["behaviour_occurrence_id"]: dict(row)
+            for row in current_rows
+        }
     candidates = [
         (
             event["activity_type"], event["related_table"],
@@ -19318,6 +19370,7 @@ def client_storyline(client_id):
         event["label"] = _storyline_label(event["activity_type"])
         event["storyline_details"] = None
         event["storyline_behaviour_lines"] = None
+        event["storyline_status"] = None
         if event["activity_type"] in {
             "food_fluid_entry_created", "food_fluid_entry_voided"
         } and event["details"]:
@@ -19344,6 +19397,20 @@ def client_storyline(client_id):
             )
         elif event["activity_type"] == "behaviour_occurrence_voided" and event["details"]:
             event["storyline_details"] = event["details"]
+        current_occurrence = current_behaviour_occurrences.get(
+            event["related_id"]
+        ) if event["activity_type"] == "behaviour_occurrence_created" else None
+        if current_occurrence is not None:
+            event["storyline_details"] = format_current_behaviour_storyline_details(
+                current_occurrence
+            )
+            event["storyline_behaviour_lines"] = (
+                parse_abc_behaviour_storyline_details(event["storyline_details"])
+                if current_occurrence["record_format"] == "ABC" else None
+            )
+            event["event_datetime"] = current_occurrence["occurred_at_utc"]
+            if current_occurrence["status"] in ("In Progress", "Completed"):
+                event["storyline_status"] = current_occurrence["status"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []
