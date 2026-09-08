@@ -5091,10 +5091,14 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
             if conn.in_transaction:
                 conn.rollback()
             raise
-        flash(
-            "Behaviour occurrence completed."
-            if action == "complete" else "Behaviour occurrence updated."
-        )
+        if action == "save":
+            flash("Behaviour progress saved.")
+            return redirect(url_for(
+                "behaviour_occurrence_edit",
+                shift_id=shift_id,
+                occurrence_id=occurrence_id
+            ))
+        flash("Behaviour occurrence completed.")
         return redirect(url_for("shift_dashboard", shift_id=shift_id))
     except BehaviourConcurrencyConflictError as error:
         return str(error), 409
@@ -5442,6 +5446,53 @@ def get_behaviour_in_progress_edit_context(conn, shift_id, occurrence_id, user_i
     if occurrence["client_id"] != documentation_context["client_id"]:
         raise PermissionError("Behaviour client and shift context do not match.")
     return actor, documentation_context, occurrence
+
+
+def get_behaviour_in_progress_resume_records(conn, shift_id, user_id):
+    """Return only the current worker's editable Behaviour drafts."""
+    documentation_context = get_worker_documentation_shift_context(
+        conn, shift_id, user_id
+    )
+    if documentation_context is None or (
+        documentation_context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
+        or documentation_context.get("shift_status") != "Open"
+    ):
+        return []
+
+    rows = conn.execute("""
+        SELECT bo.*, c.client_name
+        FROM behaviour_occurrences bo
+        JOIN clients c ON c.client_id = bo.client_id
+        WHERE bo.shift_id = ?
+          AND bo.client_id = ?
+          AND bo.recorded_by_user_id = ?
+          AND bo.status = 'In Progress'
+        ORDER BY bo.occurred_at_utc DESC, bo.behaviour_occurrence_id DESC
+    """, (
+        shift_id,
+        documentation_context["client_id"],
+        user_id,
+    )).fetchall()
+
+    records = []
+    for row in rows:
+        record = dict(row)
+        record["local_time"] = behaviour_utc_to_vancouver(
+            record["occurred_at_utc"]
+        ).strftime("%Y-%m-%d %H:%M")
+        record["categories"] = _behaviour_categories_for_row(row)
+        if record["record_format"] == "ABC":
+            record["summary"] = ", ".join(
+                ABC_FIELD_LABELS[field]
+                for field in ABC_BEHAVIOUR_FIELDS
+                if record.get(field)
+            )
+        else:
+            record["summary"] = ", ".join(record["categories"])
+        if not record["summary"]:
+            record["summary"] = "Behaviour occurrence in progress"
+        records.append(record)
+    return records
 
 
 def can_worker_document_shift(conn, shift_id, user_id, now_utc=None):
@@ -18526,6 +18577,7 @@ def shift_dashboard(shift_id):
 
     documentation_context = None
     documentation_context_alternatives = []
+    behaviour_in_progress_records = []
     if session.get("role") in SHIFT_AUTO_SIGN_ON_ROLES:
         selected_id = _session_documentation_shift_id()
         context_state = get_worker_documentation_context_state(
@@ -18548,6 +18600,14 @@ def shift_dashboard(shift_id):
                 for context in context_state["available"]
                 if context["shift_id"] != shift_id
             ]
+
+    if session.get("role") in SHIFT_AUTO_SIGN_ON_ROLES:
+        try:
+            behaviour_in_progress_records = get_behaviour_in_progress_resume_records(
+                conn, shift_id, session["user_id"]
+            )
+        except PermissionError:
+            pass
 
     if documentation_context is not None:
         food_fluid_authorized = True
@@ -18591,7 +18651,8 @@ def shift_dashboard(shift_id):
         documentation_context=documentation_context,
         documentation_context_alternatives=(
             documentation_context_alternatives
-        )
+        ),
+        behaviour_in_progress_records=behaviour_in_progress_records
     )
     
 
