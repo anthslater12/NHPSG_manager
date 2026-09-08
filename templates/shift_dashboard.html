@@ -124,6 +124,30 @@
 </div>
 {% endif %}
 
+{% if behaviour_in_progress_records %}
+<div class="card">
+    <h3>Behaviour In Progress</h3>
+    <table>
+        <tr><th>Occurred</th><th>Format</th><th>Summary</th><th>Status</th><th></th></tr>
+        {% for occurrence in behaviour_in_progress_records %}
+        <tr>
+            <td>{{ occurrence.local_time }}</td>
+            <td>{{ occurrence.record_format }}</td>
+            <td>{{ occurrence.summary }}</td>
+            <td>{{ occurrence.status }}</td>
+            <td>
+                <a href="{{ url_for(
+                    'behaviour_occurrence_edit',
+                    shift_id=shift.shift_id,
+                    occurrence_id=occurrence.behaviour_occurrence_id
+                ) }}">Continue Behaviour</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
 <div class="card">
     <h3>Staff Notes for this Shift</h3>
 
