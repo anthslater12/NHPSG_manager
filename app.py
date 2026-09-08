@@ -317,6 +317,8 @@ SHIFT_ACTIVITY_FINALIZED_STATUSES = frozenset((
     "Completed",
     "Recorded",
 ))
+SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD = "lifecycle_action"
+SHIFT_ACTIVITY_LIFECYCLE_ACTIONS = frozenset(("in_progress", "recorded"))
 
 
 def is_shift_activity_editable(status):
@@ -5988,6 +5990,7 @@ def get_shift_activity_entries(conn, shift_id):
             sa.ls_selected,
             sa.activity_description,
             sa.created_at,
+            sa.status,
             u.full_name AS recorded_by_name
         FROM shift_activities sa
         JOIN users u ON u.user_id = sa.recorded_by_user_id
@@ -6020,6 +6023,7 @@ def format_food_fluid_void_storyline_details(outcome, void_reason):
 
 def parse_shift_activity_form(form):
     allowed_fields = {
+        SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD,
         "start_time",
         "end_time",
         "activity_description",
@@ -6028,22 +6032,29 @@ def parse_shift_activity_form(form):
     if not set(form).issubset(allowed_fields):
         raise ValueError("Activity form input is invalid.")
 
-    for field_name in (
-        "start_time",
-        "end_time",
-        "activity_description",
+    lifecycle_actions = form.getlist(SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD)
+    if (
+        len(lifecycle_actions) != 1
+        or lifecycle_actions[0] not in SHIFT_ACTIVITY_LIFECYCLE_ACTIONS
     ):
-        if len(form.getlist(field_name)) != 1:
+        raise ValueError("Activity lifecycle action is invalid.")
+    lifecycle_action = lifecycle_actions[0]
+
+    def single_value(field_name, required=False):
+        submitted = form.getlist(field_name)
+        if len(submitted) > 1 or (required and not submitted):
             raise ValueError("Activity form input is invalid.")
+        return submitted[0] if submitted else ""
 
     values = {
-        "start_time": form["start_time"].strip(
+        "lifecycle_action": lifecycle_action,
+        "start_time": single_value("start_time", required=True).strip(
             SHIFT_ACTIVITY_ASCII_WHITESPACE
         ),
-        "end_time": form["end_time"].strip(
+        "end_time": single_value("end_time").strip(
             SHIFT_ACTIVITY_ASCII_WHITESPACE
         ),
-        "activity_description": form["activity_description"].strip(
+        "activity_description": single_value("activity_description").strip(
             SHIFT_ACTIVITY_ASCII_WHITESPACE
         ),
     }
@@ -6059,6 +6070,10 @@ def parse_shift_activity_form(form):
 
     parsed_times = {}
     for field_name in ("start_time", "end_time"):
+        if not values[field_name]:
+            if field_name == "end_time" and lifecycle_action == "in_progress":
+                continue
+            raise ValueError("Activity times must use HH:MM.")
         try:
             parsed = datetime.strptime(values[field_name], "%H:%M")
         except ValueError as error:
@@ -6069,12 +6084,23 @@ def parse_shift_activity_form(form):
             raise ValueError("Activity times must use HH:MM.")
         parsed_times[field_name] = parsed
 
-    if parsed_times["end_time"] <= parsed_times["start_time"]:
+    if (
+        "end_time" in parsed_times
+        and parsed_times["end_time"] <= parsed_times["start_time"]
+    ):
         raise ValueError("Activity end time must be later than start time.")
-    if not any(values[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS):
+    has_category = any(values[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS)
+    if lifecycle_action == "recorded" and not has_category:
         raise ValueError("At least one Activity category is required.")
-    if not values["activity_description"]:
+    if lifecycle_action == "recorded" and not values["activity_description"]:
         raise ValueError("Activity description is required.")
+    if lifecycle_action == "in_progress" and not (
+        has_category or values["activity_description"]
+    ):
+        raise ValueError("An Activity draft must contain meaningful data.")
+
+    if lifecycle_action == "in_progress" and not values["end_time"]:
+        values["end_time"] = None
 
     return values
 
@@ -21197,6 +21223,11 @@ def shift_activities(shift_id):
                 )
             values = request.form.to_dict()
             parsed = parse_shift_activity_form(request.form)
+            lifecycle_status = (
+                "In Progress"
+                if parsed["lifecycle_action"] == "in_progress"
+                else "Recorded"
+            )
 
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -21218,9 +21249,13 @@ def shift_activities(shift_id):
                         a_selected,
                         t_selected,
                         ls_selected,
-                        activity_description
+                        activity_description,
+                        status,
+                        completed_at_utc,
+                        completed_by_user_id,
+                        version_number
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1)
                 """, (
                     context["shift_id"],
                     context["recorded_by_user_id"],
@@ -21230,6 +21265,7 @@ def shift_activities(shift_id):
                     parsed["t_selected"],
                     parsed["ls_selected"],
                     parsed["activity_description"],
+                    lifecycle_status,
                 ))
                 activity_id = cursor.lastrowid
                 selected_categories = ", ".join(
@@ -21237,18 +21273,33 @@ def shift_activities(shift_id):
                     for field in SHIFT_ACTIVITY_CATEGORY_FIELDS
                     if parsed[field]
                 )
+                audit_details = selected_categories
+                if lifecycle_status == "In Progress":
+                    audit_lines = ["Status: In Progress"]
+                    if selected_categories:
+                        audit_lines.append(
+                            f"Categories: {selected_categories}"
+                        )
+                    if parsed["activity_description"]:
+                        audit_lines.append(
+                            f"Description: {parsed['activity_description']}"
+                        )
+                    audit_details = "\n".join(audit_lines)
                 log_activity(
                     conn,
                     activity_class="ACTIVITY",
                     activity_type="shift_activity_created",
-                    summary=parsed["activity_description"],
+                    summary=(
+                        parsed["activity_description"]
+                        or "Activity saved in progress"
+                    ),
                     user_id=context["recorded_by_user_id"],
                     client_id=context["client_id"],
                     shift_id=context["shift_id"],
                     related_table="shift_activities",
                     related_id=activity_id,
                     storyline_visible=True,
-                    details=selected_categories,
+                    details=audit_details,
                     success=1,
                     event_datetime=serialize_behaviour_utc(
                         datetime.combine(

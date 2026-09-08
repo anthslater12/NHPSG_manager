@@ -192,6 +192,7 @@ class ShiftActivitiesTests(unittest.TestCase):
 
     def valid_form(self, **overrides):
         values = {
+            "lifecycle_action": "recorded",
             "start_time": "09:00",
             "end_time": "10:00",
             "a_selected": "1",
@@ -243,6 +244,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
         for index, categories in enumerate(forms):
             data = {
+                "lifecycle_action": "recorded",
                 "start_time": f"{index + 8:02d}:00",
                 "end_time": f"{index + 8:02d}:30",
                 "activity_description": f"Activity {index}",
@@ -266,6 +268,140 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
         self.assertTrue(all(e["recorded_by_user_id"] == 1 for e in entries))
         self.assertTrue(all(e["created_at"] for e in entries))
+
+    def test_activity_form_has_explicit_recorded_and_in_progress_actions(self):
+        self.login(1)
+        response = self.client.get("/shift/10/activity")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Save In Progress", response.data)
+        self.assertIn(b"Record Activity", response.data)
+        self.assertIn(b'name="lifecycle_action"', response.data)
+
+    def test_lifecycle_action_is_required_single_and_known(self):
+        self.login(1)
+        valid = self.valid_form()
+        invalid_forms = (
+            {key: value for key, value in valid.items()
+             if key != "lifecycle_action"},
+            {**valid, "lifecycle_action": "unknown"},
+            {**valid, "lifecycle_action": ["recorded", "in_progress"]},
+        )
+        for data in invalid_forms:
+            with self.subTest(data=data):
+                self.assertEqual(
+                    self.client.post("/shift/10/activity", data=data).status_code,
+                    400,
+                )
+        self.assertEqual(
+            self.rows("SELECT COUNT(*) AS count FROM shift_activities")[0]["count"],
+            0,
+        )
+
+    def test_in_progress_creation_persists_partial_data_and_one_creation_audit(self):
+        self.login(1)
+        category_only = self.client.post("/shift/10/activity", data={
+            "lifecycle_action": "in_progress",
+            "start_time": "09:00",
+            "end_time": "",
+            "a_selected": "1",
+            "activity_description": "",
+        })
+        description_only = self.client.post("/shift/10/activity", data={
+            "lifecycle_action": "in_progress",
+            "start_time": "10:00",
+            "activity_description": "Partial activity notes",
+        })
+        self.assertEqual(category_only.status_code, 302)
+        self.assertEqual(description_only.status_code, 302)
+
+        rows = self.rows("""
+            SELECT shift_id, recorded_by_user_id, start_time, end_time,
+                   a_selected, t_selected, ls_selected, activity_description,
+                   status, completed_at_utc, completed_by_user_id, version_number
+            FROM shift_activities
+            ORDER BY shift_activity_id
+        """)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            [(row["status"], row["end_time"], row["activity_description"])
+             for row in rows],
+            [("In Progress", None, ""),
+             ("In Progress", None, "Partial activity notes")],
+        )
+        self.assertTrue(all(row["shift_id"] == 10 for row in rows))
+        self.assertTrue(all(row["recorded_by_user_id"] == 1 for row in rows))
+        self.assertTrue(all(row["completed_at_utc"] is None for row in rows))
+        self.assertTrue(all(row["completed_by_user_id"] is None for row in rows))
+        self.assertTrue(all(row["version_number"] == 1 for row in rows))
+
+        audits = self.rows("""
+            SELECT activity_type, summary, details, related_id
+            FROM activity_log
+            ORDER BY activity_id
+        """)
+        self.assertEqual(len(audits), 2)
+        self.assertTrue(all(
+            audit["activity_type"] == "shift_activity_created"
+            for audit in audits
+        ))
+        self.assertEqual(audits[0]["summary"], "Activity saved in progress")
+        self.assertIn("Status: In Progress", audits[0]["details"])
+        self.assertIn("Categories: A", audits[0]["details"])
+        self.assertIn("Partial activity notes", audits[1]["details"])
+        self.assertTrue(all(audit["related_id"] for audit in audits))
+
+    def test_in_progress_validation_allows_missing_end_but_rejects_bad_end_or_meaningless_data(self):
+        self.login(1)
+        invalid_forms = (
+            {
+                "lifecycle_action": "in_progress",
+                "start_time": "",
+                "a_selected": "1",
+            },
+            {
+                "lifecycle_action": "in_progress",
+                "start_time": "09:00",
+                "end_time": "9:00",
+                "a_selected": "1",
+            },
+            {
+                "lifecycle_action": "in_progress",
+                "start_time": "09:00",
+                "end_time": "",
+            },
+        )
+        for data in invalid_forms:
+            with self.subTest(data=data):
+                self.assertEqual(
+                    self.client.post("/shift/10/activity", data=data).status_code,
+                    400,
+                )
+        self.assertEqual(
+            self.client.post("/shift/10/activity", data={
+                "lifecycle_action": "in_progress",
+                "start_time": "09:00",
+                "a_selected": "1",
+            }).status_code,
+            302,
+        )
+
+    def test_worker_activity_list_displays_lifecycle_status(self):
+        self.login(1)
+        self.assertEqual(
+            self.client.post("/shift/10/activity", data={
+                "lifecycle_action": "in_progress",
+                "start_time": "09:00",
+                "a_selected": "1",
+            }).status_code,
+            302,
+        )
+        self.assertEqual(
+            self.post_activity(start_time="10:00", end_time="11:00").status_code,
+            302,
+        )
+        response = self.client.get("/shift/10/activity")
+        self.assertIn(b"In Progress", response.data)
+        self.assertIn(b"Recorded", response.data)
 
     def test_validation_rejects_no_category_blank_description_and_bad_times(self):
         self.login(1)
@@ -339,6 +475,26 @@ class ShiftActivitiesTests(unittest.TestCase):
                 self.assertEqual(
                     self.post_activity(shift_id=shift_id).status_code,
                     403
+                )
+        self.assertEqual(self.rows("SELECT * FROM shift_activities"), [])
+
+    def test_in_progress_creation_uses_same_database_backed_authorization(self):
+        cases = (
+            (3, "Support Worker", 10),
+            (4, "Support Worker", 10),
+            (5, "Support Worker", 10),
+            (6, "Admin", 10),
+            (1, "Support Worker", 40),
+        )
+        for user_id, role, shift_id in cases:
+            with self.subTest(user_id=user_id, shift_id=shift_id):
+                self.login(user_id, role)
+                self.assertEqual(
+                    self.post_activity(
+                        shift_id=shift_id,
+                        lifecycle_action="in_progress",
+                    ).status_code,
+                    403,
                 )
         self.assertEqual(self.rows("SELECT * FROM shift_activities"), [])
 

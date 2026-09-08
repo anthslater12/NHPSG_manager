@@ -43,8 +43,7 @@
                         type="time"
                         id="end_time"
                         name="end_time"
-                        value="{{ values.get('end_time', '') }}"
-                        required
+                        value="{{ values.get('end_time') or '' }}"
                     >
                 </div>
             </div>
@@ -91,10 +90,18 @@
                 id="activity_description"
                 name="activity_description"
                 rows="5"
-                required
-            >{{ values.get('activity_description', '') }}</textarea>
+            >{{ values.get('activity_description') or '' }}</textarea>
 
-            <button type="submit">Save Activity</button>
+            <button
+                type="submit"
+                name="lifecycle_action"
+                value="in_progress"
+            >Save In Progress</button>
+            <button
+                type="submit"
+                name="lifecycle_action"
+                value="recorded"
+            >Record Activity</button>
         </form>
     {% else %}
         <p>This shift is read-only. Activities cannot be added.</p>
@@ -113,6 +120,7 @@
                 <th>T</th>
                 <th>LS</th>
                 <th>Description</th>
+                <th>Status</th>
                 <th>Staff</th>
                 <th>Created</th>
             </tr>
@@ -125,6 +133,7 @@
                     <td>{% if entry.t_selected %}Yes{% else %}No{% endif %}</td>
                     <td>{% if entry.ls_selected %}Yes{% else %}No{% endif %}</td>
                     <td>{{ entry.activity_description }}</td>
+                    <td>{{ entry.status }}</td>
                     <td>{{ entry.recorded_by_name }}</td>
                     <td>{{ entry.created_at }}</td>
                 </tr>

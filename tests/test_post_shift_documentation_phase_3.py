@@ -308,6 +308,7 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
                 "bm_unusual": "No",
             })
             self.client.post("/shift/10/activity", data={
+                "lifecycle_action": "recorded",
                 "start_time": "11:30",
                 "end_time": "12:30",
                 "activity_description": "Active walk",
@@ -474,6 +475,7 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
                 "bm_unusual": "No",
             })
             self.client.post("/shift/11/activity", data={
+                "lifecycle_action": "recorded",
                 "start_time": "11:00",
                 "end_time": "12:00",
                 "activity_description": "Walk",
