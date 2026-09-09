@@ -5849,6 +5849,29 @@ def get_shift_activity_context(conn, shift_id, user_id):
     return context
 
 
+def _activity_documentation_context_schema_available(conn):
+    """Return whether the database can provide an authoritative worker context."""
+    required_columns = {
+        "shifts": {"scheduled_end_time"},
+        "shift_staff": {
+            "actual_start_time",
+            "actual_end_at_utc",
+            "sign_on_at",
+            "sign_off_at",
+        },
+    }
+    for table_name, required in required_columns.items():
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(" + table_name + ")"
+            ).fetchall()
+        }
+        if not required.issubset(columns):
+            return False
+    return True
+
+
 def get_shift_activity_in_progress_edit_context(
     conn, shift_id, activity_id, user_id
 ):
@@ -5859,21 +5882,17 @@ def get_shift_activity_in_progress_edit_context(
             "Only the recording Support Worker may edit an In Progress Activity."
         )
 
-    context, _ = get_worker_documentation_module_context(
-        conn,
-        shift_id,
-        actor["user_id"],
-        active_context_loader=get_shift_activity_context,
+    if not _activity_documentation_context_schema_available(conn):
+        raise PermissionError(
+            "Activity editing requires the worker's open active shift."
+        )
+
+    context = get_worker_documentation_shift_context(
+        conn, shift_id, actor["user_id"]
     )
-    assignment_active = context.get(
-        "assignment_active", context.get("has_active_assignment")
-    )
-    if (
-        context.get("documentation_access", DOCUMENTATION_ACCESS_ACTIVE)
-        != DOCUMENTATION_ACCESS_ACTIVE
+    if context is None or (
+        context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
         or context.get("shift_status") != "Open"
-        or context.get("client_active") != 1
-        or assignment_active != 1
     ):
         raise PermissionError(
             "Activity editing requires the worker's open active shift."
@@ -5911,21 +5930,15 @@ def get_shift_activity_in_progress_resume_records(conn, shift_id, user_id):
             "Only an active Support Worker may resume Activities."
         )
 
-    context, _ = get_worker_documentation_module_context(
-        conn,
-        shift_id,
-        actor["user_id"],
-        active_context_loader=get_shift_activity_context,
+    if not _activity_documentation_context_schema_available(conn):
+        return []
+
+    context = get_worker_documentation_shift_context(
+        conn, shift_id, actor["user_id"]
     )
-    assignment_active = context.get(
-        "assignment_active", context.get("has_active_assignment")
-    )
-    if (
-        context.get("documentation_access", DOCUMENTATION_ACCESS_ACTIVE)
-        != DOCUMENTATION_ACCESS_ACTIVE
+    if context is None or (
+        context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
         or context.get("shift_status") != "Open"
-        or context.get("client_active") != 1
-        or assignment_active != 1
     ):
         return []
 
