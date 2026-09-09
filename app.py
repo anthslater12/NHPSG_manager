@@ -1912,6 +1912,8 @@ STORYLINE_FILTERS = {
 STORYLINE_SUPPRESSED_AUDIT_TYPES = frozenset({
     "behaviour_occurrence_updated",
     "behaviour_occurrence_completed",
+    "shift_activity_updated",
+    "shift_activity_completed",
 })
 
 STORYLINE_LABELS = {
@@ -2112,6 +2114,38 @@ def format_current_behaviour_storyline_details(occurrence):
         ", ".join(_behaviour_categories_for_row(occurrence)),
         occurrence["notes"]
     )
+
+
+def format_current_shift_activity_storyline_details(activity):
+    """Render one Activity card from its current authoritative row."""
+    lines = [f"Start: {activity['start_time']}"]
+    if activity.get("end_time"):
+        lines.append(f"End: {activity['end_time']}")
+    categories = ", ".join(
+        field.removesuffix("_selected").upper()
+        for field in SHIFT_ACTIVITY_CATEGORY_FIELDS
+        if activity.get(field)
+    )
+    lines.append(f"Categories: {categories or 'None selected'}")
+    description = str(activity.get("activity_description") or "").strip()
+    if description:
+        lines.append(f"Description: {description}")
+    if activity.get("status") in ("In Progress", "Completed"):
+        lines.append(f"Status: {activity['status']}")
+    return "\n".join(lines)
+
+
+def shift_activity_start_to_utc(shift_date, start_time):
+    """Convert an Activity's Vancouver shift date/start time to canonical UTC."""
+    try:
+        local_start = datetime.combine(
+            date.fromisoformat(shift_date),
+            datetime.strptime(start_time, "%H:%M").time(),
+            VANCOUVER_TIMEZONE,
+        )
+        return serialize_behaviour_utc(local_start)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def parse_abc_behaviour_storyline_details(details):
@@ -19579,6 +19613,7 @@ def client_storyline(client_id):
     )
     storyline_management = management_storyline or behaviour_consultant_storyline
     current_behaviour_occurrences = {}
+    current_shift_activities = {}
     behaviour_occurrence_ids = {
         event["related_id"]
         for event in events
@@ -19599,6 +19634,36 @@ def client_storyline(client_id):
         current_behaviour_occurrences = {
             row["behaviour_occurrence_id"]: dict(row)
             for row in current_rows
+        }
+    shift_activity_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] == "shift_activity_created"
+            and event["related_table"] == "shift_activities"
+            and event["related_id"] is not None
+        )
+    }
+    if shift_activity_ids:
+        placeholders = ", ".join("?" for _ in shift_activity_ids)
+        shift_activity_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'shift_activities'"
+        ).fetchone()
+        if shift_activity_table is not None:
+            current_activity_rows = conn.execute(
+                "SELECT sa.*, s.shift_date, s.client_id AS activity_client_id "
+                "FROM shift_activities sa "
+                "JOIN shifts s ON s.shift_id = sa.shift_id "
+                "WHERE s.client_id = ? AND sa.shift_activity_id IN ("
+                + placeholders + ")",
+                (client_id, *sorted(shift_activity_ids)),
+            ).fetchall()
+        else:
+            current_activity_rows = []
+        current_shift_activities = {
+            row["shift_activity_id"]: dict(row)
+            for row in current_activity_rows
         }
     candidates = [
         (
@@ -19691,6 +19756,29 @@ def client_storyline(client_id):
             event["event_datetime"] = current_occurrence["occurred_at_utc"]
             if current_occurrence["status"] in ("In Progress", "Completed"):
                 event["storyline_status"] = current_occurrence["status"]
+        current_activity = (
+            current_shift_activities.get(event["related_id"])
+            if event["activity_type"] == "shift_activity_created"
+            else None
+        )
+        if current_activity is not None:
+            current_description = str(
+                current_activity.get("activity_description") or ""
+            ).strip()
+            current_event_datetime = shift_activity_start_to_utc(
+                current_activity["shift_date"],
+                current_activity["start_time"],
+            )
+            if current_event_datetime is not None:
+                event["storyline_details"] = (
+                    format_current_shift_activity_storyline_details(
+                        current_activity
+                    )
+                )
+                event["summary"] = current_description or "Activity"
+                event["event_datetime"] = current_event_datetime
+                if current_activity["status"] in ("In Progress", "Completed"):
+                    event["storyline_status"] = current_activity["status"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []

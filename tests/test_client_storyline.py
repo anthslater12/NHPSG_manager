@@ -62,7 +62,10 @@ class ClientStorylineTests(unittest.TestCase):
                 shift_id INTEGER
             );
             CREATE TABLE shift_activities (
-                shift_activity_id INTEGER PRIMARY KEY, shift_id INTEGER
+                shift_activity_id INTEGER PRIMARY KEY, shift_id INTEGER,
+                recorded_by_user_id INTEGER, start_time TEXT, end_time TEXT,
+                a_selected INTEGER, t_selected INTEGER, ls_selected INTEGER,
+                activity_description TEXT, created_at TEXT, status TEXT
             );
             CREATE TABLE shift_notes (
                 note_id INTEGER PRIMARY KEY, client_id INTEGER
@@ -190,6 +193,29 @@ class ClientStorylineTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def add_shift_activity(
+        self, activity_id, start_time="10:00", end_time=None,
+        a_selected=1, t_selected=0, ls_selected=0,
+        description="Current Activity", status="Recorded", shift_id=10
+    ):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE shifts SET shift_date = '2026-08-02' WHERE shift_id = ?",
+            (shift_id,)
+        )
+        conn.execute("""
+            INSERT INTO shift_activities
+            (shift_activity_id, shift_id, recorded_by_user_id, start_time,
+             end_time, a_selected, t_selected, ls_selected,
+             activity_description, created_at, status)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, '2026-08-02 09:00:00', ?)
+        """, (
+            activity_id, shift_id, start_time, end_time, a_selected,
+            t_selected, ls_selected, description, status
+        ))
+        conn.commit()
+        conn.close()
+
     def event_utc(self, day, hour, minute):
         local = datetime(
             day.year,
@@ -278,7 +304,10 @@ class ClientStorylineTests(unittest.TestCase):
             "INSERT INTO food_fluid_entries VALUES (?, ?, ?)",
             [(11, 1, 10), (111, 2, 20)]
         )
-        conn.execute("INSERT INTO shift_activities VALUES (12, 10)")
+        conn.execute(
+            "INSERT INTO shift_activities (shift_activity_id, shift_id) "
+            "VALUES (12, 10)"
+        )
         conn.execute("INSERT INTO shift_notes VALUES (13, 1)")
         conn.execute("INSERT INTO shift_care_task_entries VALUES (14, 10)")
         conn.execute("INSERT INTO shift_care_task_entries VALUES (16, 10)")
@@ -1322,6 +1351,31 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertTrue(all(position >= 0 for position in positions))
         self.assertEqual(positions, sorted(positions, reverse=False))
 
+    def test_authoritative_activity_start_time_controls_storyline_order(self):
+        self.add_shift_activity(
+            50, start_time="09:00", description="Authoritative ordering Activity"
+        )
+        self.add_event(
+            "shift_activity_created", "Authoritative ordering Activity",
+            when="2026-08-02 18:00:00",
+            event_datetime=self.event_utc(datetime(2026, 8, 2), 18, 0),
+            details="A",
+            related_table="shift_activities", related_id=50,
+        )
+        self.add_event(
+            "sleep_woke_up", "Other visible event",
+            when="2026-08-02 12:00:00",
+            event_datetime=self.event_utc(datetime(2026, 8, 2), 12, 0),
+        )
+        self.login()
+
+        page = self.client.get("/client/1/storyline").data
+
+        self.assertLess(
+            page.find(b"Other visible event"),
+            page.find(b"Authoritative ordering Activity"),
+        )
+
     def test_storyline_same_event_time_uses_activity_id_tie_breaker_and_malformed_falls_back(self):
         self.login()
         self.add_event(
@@ -1400,6 +1454,142 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertNotIn(b"Private detail", page)
         self.assertNotIn(b"Failed Activity", page)
         self.assertEqual(page.count(b"storyline-details"), 3)
+
+    def test_activity_storyline_rehydrates_current_row_after_edit_and_completion(self):
+        self.add_shift_activity(
+            51, start_time="10:00", description="Current partial",
+            status="In Progress"
+        )
+        self.add_event(
+            "shift_activity_created", "Activity record",
+            when="2026-08-02 08:00:00",
+            details="Start: 09:00\nDescription: stale creation snapshot",
+            related_table="shift_activities", related_id=51
+        )
+        self.login()
+
+        partial = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Start: 10:00", partial)
+        self.assertIn(b"Description: Current partial", partial)
+        self.assertIn(b"In Progress", partial)
+        self.assertNotIn(b"09:00", partial)
+        self.assertNotIn(b"stale creation snapshot", partial)
+        self.assertEqual(partial.count(b'class="storyline-event"'), 1)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            UPDATE shift_activities
+            SET start_time = '11:00', end_time = '12:00',
+                a_selected = 0, t_selected = 1, ls_selected = 1,
+                activity_description = 'Current completed details',
+                status = 'Completed'
+            WHERE shift_activity_id = 51
+        """)
+        conn.commit()
+        conn.close()
+
+        completed = self.client.get("/client/1/storyline").data
+        self.assertIn(b"11:00", completed)
+        self.assertIn(b"End: 12:00", completed)
+        self.assertIn(b"Categories: T, LS", completed)
+        self.assertIn(b"Description: Current completed details", completed)
+        self.assertIn(b"Completed", completed)
+        self.assertNotIn(b"10:00", completed)
+        self.assertNotIn(b"Current partial", completed)
+        self.assertEqual(completed.count(b'class="storyline-event"'), 1)
+
+    def test_activity_storyline_rehydrates_authoritative_summary_after_edit(self):
+        self.add_shift_activity(
+            53, description="New authoritative description"
+        )
+        self.add_event(
+            "shift_activity_created", "Old Activity description",
+            details="Description: Old Activity description",
+            related_table="shift_activities", related_id=53
+        )
+        self.login()
+
+        page = self.client.get("/client/1/storyline").data
+
+        self.assertIn(b"New authoritative description", page)
+        self.assertNotIn(b"Old Activity description", page)
+
+    def test_activity_storyline_rehydration_applies_to_authorized_roles(self):
+        self.add_shift_activity(
+            52, start_time="13:00", description="Authoritative Activity"
+        )
+        self.add_event(
+            "shift_activity_created", "Activity snapshot",
+            details="Description: stale snapshot",
+            related_table="shift_activities", related_id=52
+        )
+
+        for user_id, role in (
+            (1, "Support Worker"),
+            (5, "Admin"),
+            (2, "Program Manager"),
+            (6, "Director"),
+            (9, "Behaviour Consultant"),
+        ):
+            with self.subTest(role=role):
+                self.login(user_id, role)
+                page = self.client.get("/client/1/storyline")
+                self.assertEqual(page.status_code, 200)
+                self.assertIn(b"Start: 13:00", page.data)
+                self.assertIn(b"Description: Authoritative Activity", page.data)
+                self.assertNotIn(b"stale snapshot", page.data)
+
+    def test_activity_storyline_keeps_snapshot_for_unlinked_or_missing_rows(self):
+        self.login()
+        self.add_event(
+            "shift_activity_created", "Legacy Activity",
+            details="A, T, LS\nLegacy snapshot details",
+            related_table=None, related_id=None
+        )
+        self.add_event(
+            "shift_activity_created", "Missing Activity",
+            details="A\nMissing source snapshot",
+            related_table="shift_activities", related_id=999
+        )
+
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Legacy snapshot details", page)
+        self.assertIn(b"Missing source snapshot", page)
+
+    def test_activity_update_completion_audits_are_suppressed_before_pagination(self):
+        self.login()
+        for index in range(25):
+            self.add_event(
+                "shift_activity_created", f"Primary Activity {index}",
+                when=f"2026-08-02 10:{index:02d}:00"
+            )
+        self.add_event(
+            "shift_activity_updated", "Update audit row",
+            related_table="shift_activities", related_id=61
+        )
+        self.add_event(
+            "shift_activity_completed", "Completion audit row",
+            related_table="shift_activities", related_id=61
+        )
+
+        page = self.client.get("/client/1/storyline").data
+        self.assertEqual(page.count(b'class="storyline-event"'), 25)
+        self.assertNotIn(b"Update audit row", page)
+        self.assertNotIn(b"Completion audit row", page)
+        self.assertNotIn(b"Older Events", page)
+
+        conn = sqlite3.connect(self.path)
+        audit_types = conn.execute("""
+            SELECT activity_type FROM activity_log
+            WHERE activity_type IN ('shift_activity_updated',
+                                    'shift_activity_completed')
+            ORDER BY activity_id
+        """).fetchall()
+        conn.close()
+        self.assertEqual(
+            audit_types,
+            [("shift_activity_updated",), ("shift_activity_completed",)]
+        )
 
     def test_storyline_events_have_compact_wrappers_and_dividers(self):
         self.login()
