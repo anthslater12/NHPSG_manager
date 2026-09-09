@@ -25,6 +25,7 @@
                 <th>Description</th>
                 <th>Staff</th>
                 <th>Created</th>
+                <th>Status</th>
                 <th>Reviewed</th>
                 <th>View</th>
             </tr>
@@ -42,6 +43,7 @@
                     <td>{{ entry.activity_description }}</td>
                     <td>{{ entry.recorded_by_name }}</td>
                     <td>{{ entry.created_at }}</td>
+                    <td>{{ entry.status }}</td>
                     <td>
                         {% if reviews_by_activity.get(entry.shift_activity_id) %}
                             {% for review in reviews_by_activity[entry.shift_activity_id] %}
@@ -50,7 +52,8 @@
                             {% endfor %}
                         {% endif %}
 
-                        {% if entry.shift_activity_id not in reviewed_by_current_user %}
+                        {% if entry.shift_activity_id in reviewable_activity_ids
+                              and entry.shift_activity_id not in reviewed_by_current_user %}
                             <form
                                 method="post"
                                 action="{{ url_for(
@@ -67,6 +70,8 @@
                                     {% endif %}
                                 </button>
                             </form>
+                        {% elif entry.status == 'In Progress' %}
+                            <span>Not ready for review</span>
                         {% endif %}
                     </td>
                     <td>

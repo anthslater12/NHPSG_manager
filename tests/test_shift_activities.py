@@ -1146,6 +1146,112 @@ class ShiftActivitiesTests(unittest.TestCase):
             for audit in review_audits
         ))
 
+    def test_in_progress_activity_is_visible_but_not_reviewable(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(6, "Admin")
+
+        detail = self.client.get(
+            f"/manager-review/activities/{activity_id}"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"<th>Status</th>", detail.data)
+        self.assertIn(b"In Progress", detail.data)
+        self.assertIn(
+            b"cannot be reviewed until finalized",
+            detail.data,
+        )
+        self.assertNotIn(b"Mark as Reviewed", detail.data)
+
+        review_list = self.client.get("/manager-review/activities")
+        self.assertEqual(review_list.status_code, 200)
+        self.assertIn(b"Not ready for review", review_list.data)
+        self.assertNotIn(
+            f"/manager-review/activities/{activity_id}/review".encode(),
+            review_list.data,
+        )
+
+        response = self.client.post(
+            f"/manager-review/activities/{activity_id}/review"
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            self.rows("""
+                SELECT *
+                FROM acknowledgements
+                WHERE source_table = 'shift_activities'
+                  AND source_id = ?
+                  AND acknowledgement_type = 'Review'
+            """, (activity_id,)),
+            [],
+        )
+        self.assertEqual(
+            self.rows("""
+                SELECT *
+                FROM activity_log
+                WHERE activity_type = 'record_acknowledged'
+                  AND related_table = 'shift_activities'
+                  AND related_id = ?
+            """, (activity_id,)),
+            [],
+        )
+
+    def test_review_rechecks_current_activity_status_inside_transaction(self):
+        activity_id = self.insert_activity()
+        self.login(6, "Admin")
+        detail = self.client.get(
+            f"/manager-review/activities/{activity_id}"
+        )
+        self.assertIn(b"Mark as Reviewed", detail.data)
+
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute(
+                "UPDATE shift_activities SET status = 'In Progress' "
+                "WHERE shift_activity_id = ?",
+                (activity_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        response = self.client.post(
+            f"/manager-review/activities/{activity_id}/review"
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            self.rows(
+                "SELECT * FROM acknowledgements "
+                "WHERE source_table = 'shift_activities' AND source_id = ?",
+                (activity_id,),
+            ),
+            [],
+        )
+
+    def test_completed_activity_remains_reviewable_for_behaviour_consultant(self):
+        activity_id = self.insert_completed_activity()
+        self.login(9, "Behaviour Consultant")
+
+        detail = self.client.get(
+            f"/manager-review/activities/{activity_id}"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"<th>Status</th>", detail.data)
+        self.assertIn(b"Completed", detail.data)
+        self.assertIn(b"Mark as Reviewed", detail.data)
+
+        review_url = f"/manager-review/activities/{activity_id}/review"
+        self.assertEqual(self.client.post(review_url).status_code, 302)
+        self.assertEqual(self.client.post(review_url).status_code, 302)
+        reviews = self.rows(
+            "SELECT user_id, acknowledgement_type FROM acknowledgements "
+            "WHERE source_table = 'shift_activities' AND source_id = ?",
+            (activity_id,),
+        )
+        self.assertEqual(
+            reviews,
+            [{"user_id": 9, "acknowledgement_type": "Review"}],
+        )
+
     def test_management_notes_display_and_persist_for_activity(self):
         activity_id = self.insert_activity(description="Meal preparation")
         conn = sqlite3.connect(self.database_path)

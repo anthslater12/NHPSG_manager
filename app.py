@@ -23135,17 +23135,22 @@ def activity_review_list():
 
     reviews_by_activity = {}
     reviewed_by_current_user = set()
+    reviewable_activity_ids = set()
     for review in reviews:
         activity_id = review["shift_activity_id"]
         reviews_by_activity.setdefault(activity_id, []).append(review)
         if review["user_id"] == actor["user_id"]:
             reviewed_by_current_user.add(review["shift_activity_id"])
+    for entry in entries:
+        if is_shift_activity_finalized(entry["status"]):
+            reviewable_activity_ids.add(entry["shift_activity_id"])
 
     return render_template(
         "activity_review_list.html",
         entries=entries,
         reviews_by_activity=reviews_by_activity,
-        reviewed_by_current_user=reviewed_by_current_user
+        reviewed_by_current_user=reviewed_by_current_user,
+        reviewable_activity_ids=reviewable_activity_ids
     )
 
 
@@ -23232,6 +23237,7 @@ def activity_review_detail(activity_id):
         ),
         management_notes=management_notes,
         linked_actions=linked_actions,
+        can_review=is_shift_activity_finalized(entry["status"]),
         can_manage_actions=(
             actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
         ),
@@ -23484,7 +23490,8 @@ def review_shift_activity(activity_id):
             SELECT
                 sa.shift_activity_id,
                 sa.shift_id,
-                s.client_id
+                s.client_id,
+                sa.status
             FROM shift_activities sa
             JOIN shifts s ON s.shift_id = sa.shift_id
             WHERE sa.shift_activity_id = ?
@@ -23492,6 +23499,10 @@ def review_shift_activity(activity_id):
         if entry is None:
             conn.rollback()
             return "Activity not found", 404
+
+        if not is_shift_activity_finalized(entry["status"]):
+            conn.rollback()
+            return "In Progress Activities cannot be marked as Reviewed.", 409
 
         create_acknowledgement(
             conn,
