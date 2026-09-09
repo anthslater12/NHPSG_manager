@@ -57,7 +57,8 @@ class ShiftActivitiesTests(unittest.TestCase):
                     shift_staff_id INTEGER PRIMARY KEY,
                     shift_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
-                    active INTEGER NOT NULL
+                    active INTEGER NOT NULL,
+                    sign_on_at TEXT
                 );
 
                 CREATE TABLE activity_log (
@@ -138,7 +139,29 @@ class ShiftActivitiesTests(unittest.TestCase):
                     client_id INTEGER,
                     user_id INTEGER,
                     shift_date TEXT,
-                    shift_type TEXT
+                    shift_type TEXT,
+                    created_at TEXT,
+                    note_text TEXT
+                );
+
+                CREATE TABLE shift_care_task_entries (
+                    entry_id INTEGER PRIMARY KEY,
+                    care_task_id INTEGER,
+                    shift_id INTEGER,
+                    completed_by_user_id INTEGER,
+                    completed_at TEXT,
+                    outcome TEXT,
+                    comment TEXT
+                );
+
+                CREATE TABLE shift_housekeeping_task_entries (
+                    entry_id INTEGER PRIMARY KEY,
+                    housekeeping_task_id INTEGER,
+                    shift_id INTEGER,
+                    completed_by_user_id INTEGER,
+                    completed_at TEXT,
+                    outcome TEXT,
+                    comment TEXT
                 );
 
                 CREATE TABLE incident_reports (
@@ -165,13 +188,17 @@ class ShiftActivitiesTests(unittest.TestCase):
                     (1, 'Client One', 1),
                     (2, 'Inactive Client', 0);
 
-                INSERT INTO shifts VALUES
+                INSERT INTO shifts
+                    (shift_id, client_id, shift_date, shift_type, status)
+                VALUES
                     (10, 1, '2026-08-03', 'Day', 'Open'),
                     (20, 1, '2026-08-04', 'Day', 'Closed'),
                     (30, 1, '2026-08-05', 'Day', 'Cancelled'),
                     (40, 2, '2026-08-06', 'Day', 'Open');
 
-                INSERT INTO shift_staff VALUES
+                INSERT INTO shift_staff
+                    (shift_staff_id, shift_id, user_id, active)
+                VALUES
                     (1, 10, 1, 1),
                     (2, 10, 2, 1),
                     (3, 10, 4, 0),
@@ -306,6 +333,140 @@ class ShiftActivitiesTests(unittest.TestCase):
         }
         values.update(overrides)
         return values
+
+    def dashboard(self, user_id=1, role="Support Worker", shift_id=10):
+        self.login(user_id, role=role)
+        patches = (
+            mock.patch.object(
+                app,
+                "get_worker_documentation_context_state",
+                return_value={"selected": None, "available": []},
+            ),
+            mock.patch.object(
+                app, "get_behaviour_in_progress_resume_records", return_value=[]
+            ),
+            mock.patch.object(
+                app,
+                "_get_authenticated_staff_notice_recipient",
+                return_value={"user_id": user_id},
+            ),
+            mock.patch.object(
+                app,
+                "_get_staff_notice_recipient_collections",
+                return_value={"dashboard": [], "outstanding_count": 0},
+            ),
+            mock.patch.object(
+                app, "reconcile_staff_notice_non_shift_requirements_in_transaction"
+            ),
+            mock.patch.object(
+                app, "get_active_food_fluid_shift_context", side_effect=PermissionError
+            ),
+            mock.patch.object(
+                app, "get_active_sleep_shift_context", side_effect=PermissionError
+            ),
+            mock.patch.object(app, "get_food_fluid_shift_entries", return_value=[]),
+            mock.patch.object(app, "get_sleep_events", return_value=[]),
+            mock.patch.object(app, "get_applicable_care_tasks", return_value=[]),
+            mock.patch.object(
+                app, "get_applicable_housekeeping_tasks", return_value=[]
+            ),
+        )
+        with (
+            patches[0], patches[1], patches[2], patches[3], patches[4],
+            patches[5], patches[6], patches[7], patches[8], patches[9],
+            patches[10]
+        ):
+            return self.client.get(f"/shift/{shift_id}")
+
+    def test_current_shift_shows_creator_activity_resume_link(self):
+        activity_id = self.insert_in_progress_activity()
+
+        page = self.dashboard().data
+
+        self.assertIn(b"Activities In Progress", page)
+        self.assertIn(b"09:00", page)
+        self.assertIn(b"A", page)
+        self.assertIn(b"Draft activity", page)
+        self.assertIn(b"In Progress", page)
+        self.assertIn(
+            f"/shift/10/activity/{activity_id}/edit".encode(),
+            page,
+        )
+        self.assertIn(b"Continue Activity", page)
+
+    def test_current_shift_resume_excludes_other_workers_activity(self):
+        own_id = self.insert_in_progress_activity(user_id=1)
+        other_id = self.insert_in_progress_activity(user_id=2)
+
+        page = self.dashboard().data
+
+        self.assertIn(f"/shift/10/activity/{own_id}/edit".encode(), page)
+        self.assertNotIn(f"/shift/10/activity/{other_id}/edit".encode(), page)
+
+    def test_current_shift_resume_excludes_recorded_and_completed_activity(self):
+        self.insert_activity(user_id=1)
+        self.insert_completed_activity(user_id=1)
+
+        page = self.dashboard().data
+
+        self.assertNotIn(b"Activities In Progress", page)
+        self.assertNotIn(b"Continue Activity", page)
+
+    def test_completed_activity_disappears_from_current_shift_resume(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+
+        response = self.client.post(
+            f"/shift/10/activity/{activity_id}/edit",
+            data=self.edit_payload(
+                activity_id,
+                action="complete",
+                end_time="10:00",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        page = self.dashboard().data
+        self.assertNotIn(b"Activities In Progress", page)
+        self.assertNotIn(b"Continue Activity", page)
+
+    def test_current_shift_resume_excludes_ineligible_workers_and_shifts(self):
+        self.insert_in_progress_activity()
+
+        self.assertNotIn(
+            b"Activities In Progress",
+            self.dashboard(user_id=3).data,
+        )
+
+        conn = sqlite3.connect(self.database_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            with self.assertRaises(PermissionError):
+                app.get_shift_activity_in_progress_resume_records(conn, 10, 5)
+        finally:
+            conn.close()
+
+        conn = sqlite3.connect(self.database_path)
+        conn.execute(
+            "UPDATE shifts SET status = 'Closed' WHERE shift_id = 10"
+        )
+        conn.commit()
+        conn.close()
+        self.assertNotIn(b"Activities In Progress", self.dashboard().data)
+
+    def test_management_roles_do_not_receive_activity_resume_controls(self):
+        self.insert_in_progress_activity()
+
+        for user_id, role in (
+            (6, "Admin"),
+            (7, "Program Manager"),
+            (8, "Director"),
+            (9, "Behaviour Consultant"),
+        ):
+            with self.subTest(user_id=user_id, role=role):
+                page = self.dashboard(user_id=user_id, role=role).data
+                self.assertNotIn(b"Activities In Progress", page)
+                self.assertNotIn(b"Continue Activity", page)
 
     def test_one_two_and_three_checkbox_combinations_append(self):
         self.login(1)

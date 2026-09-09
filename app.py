@@ -5869,6 +5869,70 @@ def get_shift_activity_in_progress_edit_context(
     return actor, context, activity
 
 
+def get_shift_activity_in_progress_resume_records(conn, shift_id, user_id):
+    """Return the active worker's editable Activity drafts for one shift."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may resume Activities."
+        )
+
+    context, _ = get_worker_documentation_module_context(
+        conn,
+        shift_id,
+        actor["user_id"],
+        active_context_loader=get_shift_activity_context,
+    )
+    assignment_active = context.get(
+        "assignment_active", context.get("has_active_assignment")
+    )
+    if (
+        context.get("documentation_access", DOCUMENTATION_ACCESS_ACTIVE)
+        != DOCUMENTATION_ACCESS_ACTIVE
+        or context.get("shift_status") != "Open"
+        or context.get("client_active") != 1
+        or assignment_active != 1
+    ):
+        return []
+
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'shift_activities'"
+    ).fetchone() is None:
+        return []
+
+    rows = conn.execute("""
+        SELECT sa.*, c.client_name
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        WHERE sa.shift_id = ?
+          AND s.client_id = ?
+          AND sa.recorded_by_user_id = ?
+          AND sa.status = 'In Progress'
+          AND s.status = 'Open'
+          AND c.active = 1
+        ORDER BY sa.created_at ASC, sa.shift_activity_id ASC
+    """, (
+        shift_id,
+        context["client_id"],
+        actor["user_id"],
+    )).fetchall()
+
+    records = []
+    for row in rows:
+        record = dict(row)
+        record["category_summary"] = ", ".join(
+            field_name.replace("_selected", "").upper()
+            for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS
+            if record.get(field_name)
+        )
+        if not record["category_summary"]:
+            record["category_summary"] = "None selected"
+        records.append(record)
+    return records
+
+
 def get_applicable_care_tasks(conn, shift):
     """Return active Care routines applicable to one exact shift."""
     return conn.execute("""
@@ -18806,6 +18870,7 @@ def shift_dashboard(shift_id):
     documentation_context = None
     documentation_context_alternatives = []
     behaviour_in_progress_records = []
+    activity_in_progress_records = []
     if session.get("role") in SHIFT_AUTO_SIGN_ON_ROLES:
         selected_id = _session_documentation_shift_id()
         context_state = get_worker_documentation_context_state(
@@ -18836,6 +18901,13 @@ def shift_dashboard(shift_id):
             )
         except PermissionError:
             pass
+
+    try:
+        activity_in_progress_records = get_shift_activity_in_progress_resume_records(
+            conn, shift_id, session["user_id"]
+        )
+    except (DocumentationContextUnavailable, PermissionError):
+        pass
 
     if documentation_context is not None:
         food_fluid_authorized = True
@@ -18880,7 +18952,8 @@ def shift_dashboard(shift_id):
         documentation_context_alternatives=(
             documentation_context_alternatives
         ),
-        behaviour_in_progress_records=behaviour_in_progress_records
+        behaviour_in_progress_records=behaviour_in_progress_records,
+        activity_in_progress_records=activity_in_progress_records
     )
     
 
