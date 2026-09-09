@@ -17145,8 +17145,22 @@ def get_active_shift_staff():
 
     return active_staff
 
+def _activity_review_status_filter(conn):
+    """Filter modern Activities to finalized statuses; legacy rows are Recorded."""
+    columns = {
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info(shift_activities)"
+        ).fetchall()
+    }
+    if "status" not in columns:
+        return ""
+    return "sa.status IN ('Completed', 'Recorded')\n          AND "
+
+
 def get_management_inbox(current_user_id):
     conn = get_db()
+    activity_review_status_filter = _activity_review_status_filter(conn)
 
     high_priority_actions = conn.execute("""
         SELECT action_id, title, due_date, priority
@@ -17183,7 +17197,7 @@ def get_management_inbox(current_user_id):
         LIMIT 5
     """, (current_user_id,)).fetchall()
 
-    activities_to_review_list = conn.execute("""
+    activities_to_review_list = conn.execute(f"""
         SELECT
             sa.shift_activity_id,
             sa.start_time,
@@ -17195,7 +17209,7 @@ def get_management_inbox(current_user_id):
         FROM shift_activities sa
         JOIN shifts s ON s.shift_id = sa.shift_id
         JOIN users u ON u.user_id = sa.recorded_by_user_id
-        WHERE NOT EXISTS (
+        WHERE {activity_review_status_filter}NOT EXISTS (
             SELECT 1
             FROM acknowledgements ack
             WHERE ack.source_table = 'shift_activities'
@@ -17645,6 +17659,7 @@ def documentation_context():
 
 def get_dashboard_stats(current_user_id):
     conn = get_db()
+    activity_review_status_filter = _activity_review_status_filter(conn)
 
     outstanding_action_count = conn.execute("""
         SELECT COUNT(*) AS count
@@ -17691,10 +17706,10 @@ def get_dashboard_stats(current_user_id):
         )
     """, (current_user_id,)).fetchone()["count"]
 
-    activities_to_review = conn.execute("""
+    activities_to_review = conn.execute(f"""
         SELECT COUNT(*) AS count
         FROM shift_activities sa
-        WHERE NOT EXISTS (
+        WHERE {activity_review_status_filter}NOT EXISTS (
             SELECT 1
             FROM acknowledgements ack
             WHERE ack.source_table = 'shift_activities'
