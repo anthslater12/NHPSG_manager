@@ -1261,6 +1261,65 @@ class ShiftActivitiesTests(unittest.TestCase):
             [],
         )
 
+    def test_awaiting_review_counts_only_unreviewed_finalized_activities(self):
+        in_progress_id = self.insert_in_progress_activity(
+            description="Still in progress"
+        )
+        completed_id = self.insert_completed_activity()
+        recorded_id = self.insert_activity(description="Recorded activity")
+
+        for user_id in (6, 7, 8):
+            with self.subTest(user_id=user_id):
+                stats = app.get_dashboard_stats(user_id)
+                inbox = app.get_management_inbox(user_id)
+                self.assertEqual(stats["activities_to_review"], 2)
+                inbox_descriptions = {
+                    row["activity_description"]
+                    for row in inbox["activities_to_review_list"]
+                }
+                self.assertEqual(
+                    inbox_descriptions,
+                    {"Completed activity", "Recorded activity"},
+                )
+                self.assertNotIn(
+                    in_progress_id,
+                    [row["shift_activity_id"]
+                     for row in inbox["activities_to_review_list"]],
+                )
+
+        self.login(6, "Admin")
+        review_url = f"/manager-review/activities/{completed_id}/review"
+        self.assertEqual(self.client.post(review_url).status_code, 302)
+        self.assertEqual(app.get_dashboard_stats(6)["activities_to_review"], 1)
+        self.assertEqual(
+            [row["shift_activity_id"] for row in app.get_management_inbox(6)[
+                "activities_to_review_list"
+            ]],
+            [recorded_id],
+        )
+
+        review_url = f"/manager-review/activities/{recorded_id}/review"
+        self.assertEqual(self.client.post(review_url).status_code, 302)
+        self.assertEqual(app.get_dashboard_stats(6)["activities_to_review"], 0)
+        self.assertEqual(
+            app.get_management_inbox(6)["activities_to_review_list"],
+            [],
+        )
+
+        review_list = self.client.get("/manager-review/activities")
+        self.assertEqual(review_list.status_code, 200)
+        self.assertIn(b"Still in progress", review_list.data)
+        self.assertIn(
+            f"/manager-review/activities/{in_progress_id}".encode(),
+            review_list.data,
+        )
+        detail = self.client.get(
+            f"/manager-review/activities/{in_progress_id}"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"In Progress", detail.data)
+        self.assertIn(b"cannot be reviewed until finalized", detail.data)
+
     def test_review_rechecks_current_activity_status_inside_transaction(self):
         activity_id = self.insert_activity()
         self.login(6, "Admin")
