@@ -319,6 +319,14 @@ SHIFT_ACTIVITY_FINALIZED_STATUSES = frozenset((
 ))
 SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD = "lifecycle_action"
 SHIFT_ACTIVITY_LIFECYCLE_ACTIONS = frozenset(("in_progress", "recorded"))
+SHIFT_ACTIVITY_EDITABLE_FIELDS = (
+    "start_time",
+    "end_time",
+    "a_selected",
+    "t_selected",
+    "ls_selected",
+    "activity_description",
+)
 
 
 def is_shift_activity_editable(status):
@@ -5338,6 +5346,10 @@ class BehaviourConcurrencyConflictError(RuntimeError):
     pass
 
 
+class ShiftActivityConcurrencyConflictError(RuntimeError):
+    pass
+
+
 def _shift_is_cancelled(shift):
     return shift is not None and shift["status"] == SHIFT_CANCELLED_STATUS
 
@@ -5803,6 +5815,60 @@ def get_shift_activity_context(conn, shift_id, user_id):
     return context
 
 
+def get_shift_activity_in_progress_edit_context(
+    conn, shift_id, activity_id, user_id
+):
+    """Return the active creator context for one editable Activity draft."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only the recording Support Worker may edit an In Progress Activity."
+        )
+
+    context, _ = get_worker_documentation_module_context(
+        conn,
+        shift_id,
+        actor["user_id"],
+        active_context_loader=get_shift_activity_context,
+    )
+    assignment_active = context.get(
+        "assignment_active", context.get("has_active_assignment")
+    )
+    if (
+        context.get("documentation_access", DOCUMENTATION_ACCESS_ACTIVE)
+        != DOCUMENTATION_ACCESS_ACTIVE
+        or context.get("shift_status") != "Open"
+        or context.get("client_active") != 1
+        or assignment_active != 1
+    ):
+        raise PermissionError(
+            "Activity editing requires the worker's open active shift."
+        )
+
+    activity = conn.execute("""
+        SELECT sa.*, s.client_id AS activity_client_id,
+               c.client_name, c.active AS client_active,
+               s.status AS current_shift_status
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        WHERE sa.shift_activity_id = ?
+          AND sa.shift_id = ?
+          AND sa.recorded_by_user_id = ?
+    """, (activity_id, shift_id, actor["user_id"])).fetchone()
+    if activity is None or activity["status"] != "In Progress":
+        raise PermissionError(
+            "Only the recording Support Worker may edit an In Progress Activity."
+        )
+    if (
+        activity["activity_client_id"] != context["client_id"]
+        or activity["current_shift_status"] != "Open"
+        or activity["client_active"] != 1
+    ):
+        raise PermissionError("Activity client and shift context do not match.")
+    return actor, context, activity
+
+
 def get_applicable_care_tasks(conn, shift):
     """Return active Care routines applicable to one exact shift."""
     return conn.execute("""
@@ -6021,6 +6087,16 @@ def format_food_fluid_void_storyline_details(outcome, void_reason):
     ))
 
 
+def _parse_shift_activity_time(value):
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError as error:
+        raise ValueError("Activity times must use HH:MM.") from error
+    if parsed.strftime("%H:%M") != value:
+        raise ValueError("Activity times must use HH:MM.")
+    return parsed
+
+
 def parse_shift_activity_form(form):
     allowed_fields = {
         SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD,
@@ -6103,6 +6179,89 @@ def parse_shift_activity_form(form):
         values["end_time"] = None
 
     return values
+
+
+def parse_shift_activity_edit_form(form):
+    """Validate the mutable fields and lifecycle action for one Activity edit."""
+    allowed_fields = {"action", "expected_version", *SHIFT_ACTIVITY_EDITABLE_FIELDS}
+    if not set(form).issubset(allowed_fields):
+        raise ValueError("Activity edit input is invalid.")
+
+    action_values = form.getlist("action")
+    if len(action_values) != 1 or action_values[0] not in ("save", "complete"):
+        raise ValueError("Activity edit action is invalid.")
+    action = action_values[0]
+
+    version_values = form.getlist("expected_version")
+    if len(version_values) != 1 or not re.fullmatch(
+        r"[1-9][0-9]*", version_values[0]
+    ):
+        raise ValueError("Activity edit version is invalid.")
+    expected_version = int(version_values[0])
+
+    def single_value(field_name, required=False):
+        submitted = form.getlist(field_name)
+        if len(submitted) > 1 or (required and not submitted):
+            raise ValueError("Activity edit input is invalid.")
+        return submitted[0] if submitted else ""
+
+    values = {
+        "start_time": single_value("start_time", required=True).strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+        "end_time": single_value("end_time").strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+        "activity_description": single_value("activity_description").strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+    }
+    for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS:
+        submitted = form.getlist(field_name)
+        if not submitted:
+            values[field_name] = 0
+        elif submitted == ["1"]:
+            values[field_name] = 1
+        else:
+            raise ValueError("Activity category input is invalid.")
+
+    parsed_start = _parse_shift_activity_time(values["start_time"])
+    parsed_end = (
+        _parse_shift_activity_time(values["end_time"])
+        if values["end_time"] else None
+    )
+    if parsed_end is not None and parsed_end <= parsed_start:
+        raise ValueError("Activity end time must be later than start time.")
+
+    has_category = any(values[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS)
+    if action == "complete":
+        if parsed_end is None:
+            raise ValueError("Activity times must use HH:MM.")
+        if not has_category:
+            raise ValueError("At least one Activity category is required.")
+        if not values["activity_description"]:
+            raise ValueError("Activity description is required.")
+    elif not (has_category or values["activity_description"]):
+        raise ValueError("An Activity draft must contain meaningful data.")
+
+    return {
+        **values,
+        "end_time": values["end_time"] or None,
+        "action": action,
+        "expected_version": expected_version,
+    }
+
+
+def validate_shift_activity_final_candidate(activity):
+    """Apply finalized Activity rules to a candidate before database writes."""
+    parsed_start = _parse_shift_activity_time(activity["start_time"])
+    parsed_end = _parse_shift_activity_time(activity["end_time"] or "")
+    if parsed_end <= parsed_start:
+        raise ValueError("Activity end time must be later than start time.")
+    if not any(activity[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS):
+        raise ValueError("At least one Activity category is required.")
+    if not activity["activity_description"]:
+        raise ValueError("Activity description is required.")
 
 
 def get_activity_management_actor(conn, user_id):
@@ -21372,7 +21531,186 @@ def shift_activities(shift_id):
         ), 400
     finally:
         conn.close()
-    
+
+
+def _shift_activity_edit_form_values(activity):
+    values = {
+        "expected_version": str(activity["version_number"]),
+        "start_time": activity["start_time"] or "",
+        "end_time": activity["end_time"] or "",
+        "activity_description": activity["activity_description"] or "",
+    }
+    for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS:
+        if activity[field_name]:
+            values[field_name] = "1"
+    return values
+
+
+@app.route(
+    "/shift/<int:shift_id>/activity/<int:activity_id>/edit",
+    methods=["GET", "POST"],
+)
+def shift_activity_edit(shift_id, activity_id):
+    """Allow only the active creator to edit one In Progress Activity."""
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    values = {}
+    try:
+        actor, context, activity = get_shift_activity_in_progress_edit_context(
+            conn, shift_id, activity_id, session["user_id"]
+        )
+        if request.method == "GET":
+            return render_template(
+                "shift_activity_edit.html",
+                shift=context,
+                activity=activity,
+                values=_shift_activity_edit_form_values(activity),
+                error=None,
+            )
+
+        values = request.form.to_dict()
+        parsed = parse_shift_activity_edit_form(request.form)
+        mutable_values = {
+            field_name: parsed[field_name]
+            for field_name in SHIFT_ACTIVITY_EDITABLE_FIELDS
+        }
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, context, current = (
+                get_shift_activity_in_progress_edit_context(
+                    conn, shift_id, activity_id, session["user_id"]
+                )
+            )
+            if current["version_number"] != parsed["expected_version"]:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before saving."
+                )
+
+            candidate = dict(current)
+            candidate.update(mutable_values)
+            if parsed["action"] == "complete":
+                validate_shift_activity_final_candidate(candidate)
+            changes = {}
+            for field_name, new_value in mutable_values.items():
+                old_value = current[field_name]
+                if field_name == "activity_description" and not old_value and not new_value:
+                    continue
+                if old_value != new_value:
+                    changes[field_name] = {
+                        "old": old_value,
+                        "new": new_value,
+                    }
+
+            if parsed["action"] == "save" and not changes:
+                conn.rollback()
+                return "No Activity changes were submitted.", 400
+
+            assignments = [
+                f"{field_name} = ?" for field_name in changes
+            ]
+            parameters = [change["new"] for change in changes.values()]
+            resulting_version = current["version_number"] + 1
+            if parsed["action"] == "complete":
+                completed_at_utc = serialize_behaviour_utc(
+                    datetime.now(timezone.utc).replace(microsecond=0)
+                )
+                assignments += [
+                    "status = 'Completed'",
+                    "completed_at_utc = ?",
+                    "completed_by_user_id = ?",
+                ]
+                parameters += [completed_at_utc, actor["user_id"]]
+            assignments.append("version_number = ?")
+            parameters.append(resulting_version)
+            parameters += [
+                activity_id,
+                shift_id,
+                actor["user_id"],
+                parsed["expected_version"],
+            ]
+            updated = conn.execute(
+                "UPDATE shift_activities SET " + ", ".join(assignments) + " "
+                "WHERE shift_activity_id = ? AND shift_id = ? "
+                "AND recorded_by_user_id = ? AND status = 'In Progress' "
+                "AND version_number = ?",
+                parameters,
+            )
+            if updated.rowcount != 1:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before saving."
+                )
+
+            change_text = "\n".join(
+                f"{field_name}: {change['old']!r} -> {change['new']!r}"
+                for field_name, change in changes.items()
+            ) or "None"
+            if parsed["action"] == "complete":
+                activity_type = "shift_activity_completed"
+                summary = "Activity completed"
+                details = (
+                    f"Activity ID: {activity_id}\n"
+                    f"Shift ID: {shift_id}\n"
+                    "Changed fields:\n"
+                    f"{change_text}\n"
+                    "Status: In Progress -> Completed\n"
+                    f"Completion timestamp UTC: {completed_at_utc}\n"
+                    f"Completion actor user ID: {actor['user_id']}\n"
+                    f"Resulting version: {resulting_version}"
+                )
+            else:
+                activity_type = "shift_activity_updated"
+                summary = "Activity updated"
+                details = (
+                    f"Activity ID: {activity_id}\n"
+                    "Changed fields:\n"
+                    f"{change_text}\n"
+                    f"Resulting version: {resulting_version}"
+                )
+            log_activity(
+                conn,
+                activity_class="ACTIVITY",
+                activity_type=activity_type,
+                summary=summary,
+                user_id=actor["user_id"],
+                client_id=current["activity_client_id"],
+                shift_id=shift_id,
+                related_table="shift_activities",
+                related_id=activity_id,
+                details=details,
+                success=1,
+                storyline_visible=True,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        if parsed["action"] == "save":
+            flash("Activity progress saved.")
+            return redirect(url_for(
+                "shift_activity_edit",
+                shift_id=shift_id,
+                activity_id=activity_id,
+            ))
+        flash("Activity completed.")
+        return redirect(url_for("shift_activities", shift_id=shift_id))
+    except ShiftActivityConcurrencyConflictError as error:
+        return str(error), 409
+    except PermissionError:
+        return "Access denied", 403
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Activity could not be saved.", 400
+    except ValueError as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
 #####################################################################
 # INCIDENT REPORTS
 #####################################################################

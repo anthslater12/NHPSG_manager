@@ -235,6 +235,78 @@ class ShiftActivitiesTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def insert_in_progress_activity(
+        self, shift_id=10, user_id=1, start_time="09:00",
+        end_time=None, a_selected=1, t_selected=0, ls_selected=0,
+        description="Draft activity", version=1
+    ):
+        conn = sqlite3.connect(self.database_path)
+        try:
+            cursor = conn.execute("""
+                INSERT INTO shift_activities (
+                    shift_id, recorded_by_user_id, start_time, end_time,
+                    a_selected, t_selected, ls_selected,
+                    activity_description, status, completed_at_utc,
+                    completed_by_user_id, version_number
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'In Progress', NULL, NULL, ?)
+            """, (
+                shift_id, user_id, start_time, end_time,
+                a_selected, t_selected, ls_selected, description, version,
+            ))
+            conn.execute("""
+                INSERT INTO activity_log (
+                    activity_class, activity_type, user_id, client_id,
+                    shift_id, related_table, related_id, summary, details,
+                    success
+                ) VALUES (
+                    'ACTIVITY', 'shift_activity_created', ?, 1, ?,
+                    'shift_activities', ?, ?, 'Status: In Progress', 1
+                )
+            """, (
+                user_id, shift_id, cursor.lastrowid,
+                description or "Activity saved in progress",
+            ))
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def insert_completed_activity(self, shift_id=10, user_id=1):
+        conn = sqlite3.connect(self.database_path)
+        try:
+            cursor = conn.execute("""
+                INSERT INTO shift_activities (
+                    shift_id, recorded_by_user_id, start_time, end_time,
+                    a_selected, t_selected, ls_selected,
+                    activity_description, status, completed_at_utc,
+                    completed_by_user_id, version_number
+                ) VALUES (?, ?, '09:00', '10:00', 1, 0, 0,
+                          'Completed activity', 'Completed',
+                          '2026-08-03T17:00:00Z', ?, 2)
+            """, (shift_id, user_id, user_id))
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def activity_row(self, activity_id):
+        return self.rows(
+            "SELECT * FROM shift_activities WHERE shift_activity_id = ?",
+            (activity_id,),
+        )[0]
+
+    def edit_payload(self, activity_id, action="save", expected_version=1, **overrides):
+        values = {
+            "action": action,
+            "expected_version": str(expected_version),
+            "start_time": "09:00",
+            "end_time": "",
+            "a_selected": "1",
+            "activity_description": "Draft activity",
+        }
+        values.update(overrides)
+        return values
+
     def test_one_two_and_three_checkbox_combinations_append(self):
         self.login(1)
         forms = (
@@ -402,6 +474,278 @@ class ShiftActivitiesTests(unittest.TestCase):
         response = self.client.get("/shift/10/activity")
         self.assertIn(b"In Progress", response.data)
         self.assertIn(b"Recorded", response.data)
+
+    def test_creator_can_get_edit_page_and_form_has_save_actions(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+        response = self.client.get(
+            f"/shift/10/activity/{activity_id}/edit"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'name="expected_version" value="1"', response.data)
+        self.assertIn(b'name="action" value="save"', response.data)
+        self.assertIn(b'name="action" value="complete"', response.data)
+        self.assertIn(b"Save &amp; Complete", response.data)
+        self.assertIn(b"Draft activity", response.data)
+
+    def test_only_active_creator_can_edit_an_in_progress_activity(self):
+        activity_id = self.insert_in_progress_activity()
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        denied = (
+            (2, "Support Worker"),
+            (3, "Support Worker"),
+            (5, "Support Worker"),
+            (6, "Admin"),
+            (7, "Program Manager"),
+            (8, "Director"),
+            (9, "Behaviour Consultant"),
+        )
+        for user_id, role in denied:
+            with self.subTest(user_id=user_id, role=role):
+                self.login(user_id, role)
+                self.assertEqual(self.client.get(edit_url).status_code, 403)
+                self.assertEqual(
+                    self.client.post(
+                        edit_url,
+                        data=self.edit_payload(activity_id),
+                    ).status_code,
+                    403,
+                )
+
+        self.login(1)
+        wrong_shift = self.client.get(
+            f"/shift/40/activity/{activity_id}/edit"
+        )
+        self.assertEqual(wrong_shift.status_code, 403)
+
+        recorded_id = self.insert_activity()
+        self.assertEqual(
+            self.client.get(
+                f"/shift/10/activity/{recorded_id}/edit"
+            ).status_code,
+            403,
+        )
+        completed_id = self.insert_completed_activity()
+        self.assertEqual(
+            self.client.get(
+                f"/shift/10/activity/{completed_id}/edit"
+            ).status_code,
+            403,
+        )
+
+    def test_edit_action_and_expected_version_are_strictly_validated(self):
+        activity_id = self.insert_in_progress_activity()
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        self.login(1)
+        for payload in (
+            dict(self.edit_payload(activity_id), action=None),
+            dict(self.edit_payload(activity_id), action="unknown"),
+            dict(self.edit_payload(activity_id), action=["save", "complete"]),
+            dict(self.edit_payload(activity_id), expected_version="0"),
+            dict(self.edit_payload(activity_id), expected_version="one"),
+            dict(self.edit_payload(activity_id), expected_version=["1", "1"]),
+        ):
+            with self.subTest(payload=payload):
+                if payload.get("action") is None:
+                    payload.pop("action")
+                self.assertEqual(
+                    self.client.post(edit_url, data=payload).status_code,
+                    400,
+                )
+        self.assertEqual(self.activity_row(activity_id)["version_number"], 1)
+        self.assertEqual(
+            self.rows("SELECT activity_type FROM activity_log"),
+            [{"activity_type": "shift_activity_created"}],
+        )
+
+    def test_save_updates_activity_keeps_in_progress_and_audits_once(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        response = self.client.post(
+            edit_url,
+            data=self.edit_payload(
+                activity_id,
+                action="save",
+                end_time="10:00",
+                t_selected="1",
+                activity_description="Updated draft",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"/shift/10/activity/{activity_id}/edit", response.location)
+        row = self.activity_row(activity_id)
+        self.assertEqual(row["status"], "In Progress")
+        self.assertEqual(row["end_time"], "10:00")
+        self.assertEqual(row["t_selected"], 1)
+        self.assertEqual(row["activity_description"], "Updated draft")
+        self.assertEqual(row["version_number"], 2)
+        self.assertIsNone(row["completed_at_utc"])
+        audits = self.rows("""
+            SELECT activity_type, details
+            FROM activity_log ORDER BY activity_id
+        """)
+        self.assertEqual([audit["activity_type"] for audit in audits], [
+            "shift_activity_created", "shift_activity_updated"
+        ])
+        self.assertIn("activity_description", audits[1]["details"])
+        self.assertIn("Resulting version: 2", audits[1]["details"])
+
+    def test_save_noop_is_rejected_without_version_or_audit_change(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+        response = self.client.post(
+            f"/shift/10/activity/{activity_id}/edit",
+            data=self.edit_payload(activity_id),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.activity_row(activity_id)["version_number"], 1)
+        self.assertEqual(
+            self.rows("SELECT activity_type FROM activity_log"),
+            [{"activity_type": "shift_activity_created"}],
+        )
+
+    def test_save_and_complete_persists_final_values_and_one_completion_audit(self):
+        activity_id = self.insert_in_progress_activity(description="Draft")
+        self.login(1)
+        response = self.client.post(
+            f"/shift/10/activity/{activity_id}/edit",
+            data=self.edit_payload(
+                activity_id,
+                action="complete",
+                end_time="11:00",
+                a_selected=None,
+                t_selected="1",
+                activity_description="Final activity",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/shift/10/activity", response.location)
+        row = self.activity_row(activity_id)
+        self.assertEqual(row["status"], "Completed")
+        self.assertEqual(row["end_time"], "11:00")
+        self.assertEqual(row["a_selected"], 0)
+        self.assertEqual(row["t_selected"], 1)
+        self.assertEqual(row["activity_description"], "Final activity")
+        self.assertEqual(row["completed_by_user_id"], 1)
+        self.assertRegex(
+            row["completed_at_utc"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        )
+        self.assertEqual(row["version_number"], 2)
+        audits = self.rows(
+            "SELECT activity_type, details FROM activity_log ORDER BY activity_id"
+        )
+        self.assertEqual([audit["activity_type"] for audit in audits], [
+            "shift_activity_created", "shift_activity_completed"
+        ])
+        self.assertIn("Status: In Progress -> Completed", audits[1]["details"])
+
+    def test_invalid_completion_does_not_partially_persist(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+        response = self.client.post(
+            f"/shift/10/activity/{activity_id}/edit",
+            data=self.edit_payload(
+                activity_id,
+                action="complete",
+                end_time="",
+                activity_description="",
+                a_selected=None,
+            ),
+        )
+        self.assertEqual(response.status_code, 400)
+        row = self.activity_row(activity_id)
+        self.assertEqual(row["status"], "In Progress")
+        self.assertEqual(row["version_number"], 1)
+        self.assertIsNone(row["completed_at_utc"])
+        self.assertEqual(
+            self.rows("SELECT activity_type FROM activity_log"),
+            [{"activity_type": "shift_activity_created"}],
+        )
+
+    def test_stale_save_and_complete_change_nothing(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        self.assertEqual(
+            self.client.post(
+                edit_url,
+                data=self.edit_payload(
+                    activity_id,
+                    action="save",
+                    activity_description="First saved draft",
+                ),
+            ).status_code,
+            302,
+        )
+        current = self.activity_row(activity_id)
+        stale_save = self.edit_payload(
+            activity_id,
+            action="save",
+            expected_version=1,
+            activity_description="Stale draft",
+        )
+        self.assertEqual(self.client.post(edit_url, data=stale_save).status_code, 409)
+        stale_complete = self.edit_payload(
+            activity_id,
+            action="complete",
+            expected_version=1,
+            end_time="10:00",
+            activity_description="Stale completion",
+        )
+        self.assertEqual(
+            self.client.post(edit_url, data=stale_complete).status_code,
+            409,
+        )
+        unchanged = self.activity_row(activity_id)
+        self.assertEqual(unchanged["activity_description"], current["activity_description"])
+        self.assertEqual(unchanged["status"], "In Progress")
+        self.assertEqual(unchanged["version_number"], 2)
+        self.assertEqual(
+            [row["activity_type"] for row in self.rows(
+                "SELECT activity_type FROM activity_log ORDER BY activity_id"
+            )],
+            ["shift_activity_created", "shift_activity_updated"],
+        )
+
+    def test_authorization_and_state_are_rechecked_when_posting(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        self.client.get(edit_url)
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute(
+                "UPDATE shift_staff SET active = 0 WHERE shift_id = 10 AND user_id = 1"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        response = self.client.post(
+            edit_url,
+            data=self.edit_payload(
+                activity_id, activity_description="Should not save"
+            ),
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.activity_row(activity_id)["version_number"], 1)
+
+    def test_continue_link_is_visible_only_for_creator(self):
+        own_id = self.insert_in_progress_activity(user_id=1)
+        other_id = self.insert_in_progress_activity(user_id=2)
+        recorded_id = self.insert_activity(user_id=1)
+        self.login(1)
+        response = self.client.get("/shift/10/activity")
+        self.assertIn(
+            f"/shift/10/activity/{own_id}/edit".encode(), response.data
+        )
+        self.assertNotIn(
+            f"/shift/10/activity/{other_id}/edit".encode(), response.data
+        )
+        self.assertNotIn(
+            f"/shift/10/activity/{recorded_id}/edit".encode(), response.data
+        )
 
     def test_validation_rejects_no_category_blank_description_and_bad_times(self):
         self.login(1)

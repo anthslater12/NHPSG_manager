@@ -123,6 +123,7 @@
                 <th>Status</th>
                 <th>Staff</th>
                 <th>Created</th>
+                <th></th>
             </tr>
 
             {% for entry in entries %}
@@ -136,6 +137,16 @@
                     <td>{{ entry.status }}</td>
                     <td>{{ entry.recorded_by_name }}</td>
                     <td>{{ entry.created_at }}</td>
+                    <td>
+                        {% if shift.editable and entry.status == 'In Progress'
+                              and entry.recorded_by_user_id == shift.recorded_by_user_id %}
+                            <a href="{{ url_for(
+                                'shift_activity_edit',
+                                shift_id=shift.shift_id,
+                                activity_id=entry.shift_activity_id
+                            ) }}">Continue</a>
+                        {% endif %}
+                    </td>
                 </tr>
             {% endfor %}
         </table>
