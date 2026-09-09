@@ -50,7 +50,8 @@ class ShiftActivitiesTests(unittest.TestCase):
                     client_id INTEGER NOT NULL,
                     shift_date TEXT NOT NULL,
                     shift_type TEXT NOT NULL,
-                    status TEXT NOT NULL
+                    status TEXT NOT NULL,
+                    scheduled_end_time TEXT
                 );
 
                 CREATE TABLE shift_staff (
@@ -58,7 +59,10 @@ class ShiftActivitiesTests(unittest.TestCase):
                     shift_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
                     active INTEGER NOT NULL,
-                    sign_on_at TEXT
+                    actual_start_time TEXT,
+                    actual_end_at_utc TEXT,
+                    sign_on_at TEXT,
+                    sign_off_at TEXT
                 );
 
                 CREATE TABLE activity_log (
@@ -197,14 +201,15 @@ class ShiftActivitiesTests(unittest.TestCase):
                     (40, 2, '2026-08-06', 'Day', 'Open');
 
                 INSERT INTO shift_staff
-                    (shift_staff_id, shift_id, user_id, active)
+                    (shift_staff_id, shift_id, user_id, active,
+                     actual_start_time, sign_on_at)
                 VALUES
-                    (1, 10, 1, 1),
-                    (2, 10, 2, 1),
-                    (3, 10, 4, 0),
-                    (4, 20, 1, 1),
-                    (5, 30, 1, 1),
-                    (6, 40, 1, 1);
+                    (1, 10, 1, 1, '09:00', '2026-08-03T16:00:00Z'),
+                    (2, 10, 2, 1, '09:00', '2026-08-03T16:00:00Z'),
+                    (3, 10, 4, 0, NULL, NULL),
+                    (4, 20, 1, 1, NULL, NULL),
+                    (5, 30, 1, 1, NULL, NULL),
+                    (6, 40, 1, 1, NULL, NULL);
             """)
             add_shift_activities_table.migrate(conn)
             conn.commit()
@@ -648,6 +653,67 @@ class ShiftActivitiesTests(unittest.TestCase):
         self.assertIn(b'name="action" value="complete"', response.data)
         self.assertIn(b"Save &amp; Complete", response.data)
         self.assertIn(b"Draft activity", response.data)
+
+    def test_authoritative_documentation_context_allows_activity_edit_and_resume(self):
+        activity_id = self.insert_in_progress_activity()
+        self.login(1)
+        with self.client.session_transaction() as session_data:
+            session_data[app.DOCUMENTATION_CONTEXT_SESSION_KEY] = 10
+
+        conn = sqlite3.connect(self.database_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            context = app.get_worker_documentation_shift_context(conn, 10, 1)
+            context_state = app.get_worker_documentation_context_state(
+                conn, 1, selected_shift_id=10
+            )
+        finally:
+            conn.close()
+        self.assertIsNotNone(context)
+        self.assertNotIn("client_active", context)
+        self.assertIsNotNone(context_state["selected"])
+        self.assertNotIn("client_active", context_state["selected"])
+
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        self.assertEqual(self.client.get(edit_url).status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                edit_url,
+                data=self.edit_payload(
+                    activity_id,
+                    activity_description="Updated from selected context",
+                ),
+            ).status_code,
+            302,
+        )
+        self.assertEqual(
+            self.activity_row(activity_id)["activity_description"],
+            "Updated from selected context",
+        )
+
+        conn = sqlite3.connect(self.database_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            resumed = app.get_shift_activity_in_progress_resume_records(
+                conn, 10, 1
+            )
+        finally:
+            conn.close()
+        self.assertEqual([row["shift_activity_id"] for row in resumed], [activity_id])
+
+        self.login(2)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        self.login(4)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute("UPDATE shifts SET status = 'Closed' WHERE shift_id = 10")
+            conn.commit()
+        finally:
+            conn.close()
+        self.login(1)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
 
     def test_only_active_creator_can_edit_an_in_progress_activity(self):
         activity_id = self.insert_in_progress_activity()
