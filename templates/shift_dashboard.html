@@ -148,6 +148,38 @@
 </div>
 {% endif %}
 
+{% if activity_in_progress_records %}
+<div class="card">
+    <h3>Activities In Progress</h3>
+    <table>
+        <tr>
+            <th>Start Time</th>
+            <th>End Time</th>
+            <th>Categories</th>
+            <th>Description</th>
+            <th>Status</th>
+            <th></th>
+        </tr>
+        {% for activity in activity_in_progress_records %}
+        <tr>
+            <td>{{ activity.start_time }}</td>
+            <td>{{ activity.end_time or "Not recorded" }}</td>
+            <td>{{ activity.category_summary }}</td>
+            <td>{{ activity.activity_description or "Not recorded" }}</td>
+            <td>{{ activity.status }}</td>
+            <td>
+                <a href="{{ url_for(
+                    'shift_activity_edit',
+                    shift_id=shift.shift_id,
+                    activity_id=activity.shift_activity_id
+                ) }}">Continue Activity</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
 <div class="card">
     <h3>Staff Notes for this Shift</h3>
 

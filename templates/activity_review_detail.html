@@ -34,6 +34,7 @@
         <tr><th>Date</th><td>{{ entry.shift_date }}</td></tr>
         <tr><th>Shift</th><td>{{ entry.shift_type }}</td></tr>
         <tr><th>Client</th><td>{{ entry.client_name }}</td></tr>
+        <tr><th>Status</th><td>{{ entry.status }}</td></tr>
         <tr><th>Start Time</th><td>{{ entry.start_time }}</td></tr>
         <tr><th>End Time</th><td>{{ entry.end_time }}</td></tr>
         <tr><th>A</th><td>{% if entry.a_selected %}Yes{% else %}No{% endif %}</td></tr>
@@ -60,24 +61,30 @@
         <p>No management reviews recorded.</p>
     {% endif %}
 
-    {% if current_user_reviewed %}
-        <p>You have reviewed this record.</p>
-    {% else %}
-        <form
-            method="post"
-            action="{{ url_for(
-                'review_shift_activity',
-                activity_id=entry.shift_activity_id,
-                storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
-                storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
-                storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
-            ) }}"
-            class="inline-form"
-        >
-            <button type="submit" class="link-button">
-                Mark as Reviewed
-            </button>
-        </form>
+    {% if can_review %}
+        {% if current_user_reviewed %}
+            <p>You have reviewed this record.</p>
+        {% else %}
+            <form
+                method="post"
+                action="{{ url_for(
+                    'review_shift_activity',
+                    activity_id=entry.shift_activity_id,
+                    storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
+                    storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
+                    storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
+                ) }}"
+                class="inline-form"
+            >
+                <button type="submit" class="link-button">
+                    Mark as Reviewed
+                </button>
+            </form>
+        {% endif %}
+    {% elif entry.status == 'In Progress' %}
+        <p class="warning-message">
+            This Activity is In Progress and cannot be reviewed until finalized.
+        </p>
     {% endif %}
 
     <h3>Management Notes</h3>

@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+{% include "_documentation_context_banner.html" %}
+
+<div class="card">
+    <h2>Continue Activity</h2>
+
+    <p>
+        <strong>{{ shift.shift_type }} Shift</strong><br>
+        {{ shift.shift_date }} &mdash; {{ shift.client_name }}<br>
+        <strong>Status:</strong> {{ activity.status }}
+    </p>
+
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <input type="hidden" name="expected_version" value="{{ values.get('expected_version', activity.version_number) }}">
+
+        <div class="form-row">
+            <div class="form-field">
+                <label for="start_time">Start Time</label>
+                <input
+                    type="time"
+                    id="start_time"
+                    name="start_time"
+                    value="{{ values.get('start_time') or '' }}"
+                    required
+                >
+            </div>
+
+            <div class="form-field">
+                <label for="end_time">End Time</label>
+                <input
+                    type="time"
+                    id="end_time"
+                    name="end_time"
+                    value="{{ values.get('end_time') or '' }}"
+                >
+            </div>
+        </div>
+
+        <fieldset>
+            <legend>Activity Categories</legend>
+
+            <label>
+                <input
+                    type="checkbox"
+                    name="a_selected"
+                    value="1"
+                    style="width:auto;"
+                    {% if values.get('a_selected') == '1' %}checked{% endif %}
+                >
+                A
+            </label>
+
+            <label>
+                <input
+                    type="checkbox"
+                    name="t_selected"
+                    value="1"
+                    style="width:auto;"
+                    {% if values.get('t_selected') == '1' %}checked{% endif %}
+                >
+                T
+            </label>
+
+            <label>
+                <input
+                    type="checkbox"
+                    name="ls_selected"
+                    value="1"
+                    style="width:auto;"
+                    {% if values.get('ls_selected') == '1' %}checked{% endif %}
+                >
+                LS
+            </label>
+        </fieldset>
+
+        <label for="activity_description">Activity Description</label>
+        <textarea
+            id="activity_description"
+            name="activity_description"
+            rows="5"
+        >{{ values.get('activity_description') or '' }}</textarea>
+
+        <button type="submit" name="action" value="save">Save</button>
+        <button type="submit" name="action" value="complete">Save &amp; Complete</button>
+    </form>
+
+    <p>Save &amp; Complete finalizes this Activity and stops normal worker editing.</p>
+
+    <p>
+        <a href="{{ url_for('shift_activities', shift_id=shift.shift_id) }}">
+            Back to Activities
+        </a>
+    </p>
+</div>
+
+{% endblock %}

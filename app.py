@@ -307,6 +307,38 @@ SHIFT_ACTIVITY_CATEGORY_FIELDS = (
     "ls_selected",
 )
 SHIFT_ACTIVITY_ASCII_WHITESPACE = " \t\n\r\v\f"
+SHIFT_ACTIVITY_STATUSES = frozenset((
+    "In Progress",
+    "Completed",
+    "Recorded",
+))
+SHIFT_ACTIVITY_EDITABLE_STATUSES = frozenset(("In Progress",))
+SHIFT_ACTIVITY_FINALIZED_STATUSES = frozenset((
+    "Completed",
+    "Recorded",
+))
+SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD = "lifecycle_action"
+SHIFT_ACTIVITY_LIFECYCLE_ACTIONS = frozenset(("in_progress", "recorded"))
+SHIFT_ACTIVITY_EDITABLE_FIELDS = (
+    "start_time",
+    "end_time",
+    "a_selected",
+    "t_selected",
+    "ls_selected",
+    "activity_description",
+)
+
+
+def is_shift_activity_editable(status):
+    """Return whether an Activity status represents an editable record."""
+    return status in SHIFT_ACTIVITY_EDITABLE_STATUSES
+
+
+def is_shift_activity_finalized(status):
+    """Return whether an Activity status represents a finalized record."""
+    return status in SHIFT_ACTIVITY_FINALIZED_STATUSES
+
+
 SCHEDULE_SHIFT_TYPES = ("Day", "Afternoon", "Overnight")
 SCHEDULE_VIEW_ROLES = {"Admin", "Director", "Program Manager", "Support Worker"}
 SCHEDULE_MANAGEMENT_ROLES = {"Admin", "Director", "Program Manager"}
@@ -1880,6 +1912,8 @@ STORYLINE_FILTERS = {
 STORYLINE_SUPPRESSED_AUDIT_TYPES = frozenset({
     "behaviour_occurrence_updated",
     "behaviour_occurrence_completed",
+    "shift_activity_updated",
+    "shift_activity_completed",
 })
 
 STORYLINE_LABELS = {
@@ -2080,6 +2114,38 @@ def format_current_behaviour_storyline_details(occurrence):
         ", ".join(_behaviour_categories_for_row(occurrence)),
         occurrence["notes"]
     )
+
+
+def format_current_shift_activity_storyline_details(activity):
+    """Render one Activity card from its current authoritative row."""
+    lines = [f"Start: {activity['start_time']}"]
+    if activity.get("end_time"):
+        lines.append(f"End: {activity['end_time']}")
+    categories = ", ".join(
+        field.removesuffix("_selected").upper()
+        for field in SHIFT_ACTIVITY_CATEGORY_FIELDS
+        if activity.get(field)
+    )
+    lines.append(f"Categories: {categories or 'None selected'}")
+    description = str(activity.get("activity_description") or "").strip()
+    if description:
+        lines.append(f"Description: {description}")
+    if activity.get("status") in ("In Progress", "Completed"):
+        lines.append(f"Status: {activity['status']}")
+    return "\n".join(lines)
+
+
+def shift_activity_start_to_utc(shift_date, start_time):
+    """Convert an Activity's Vancouver shift date/start time to canonical UTC."""
+    try:
+        local_start = datetime.combine(
+            date.fromisoformat(shift_date),
+            datetime.strptime(start_time, "%H:%M").time(),
+            VANCOUVER_TIMEZONE,
+        )
+        return serialize_behaviour_utc(local_start)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def parse_abc_behaviour_storyline_details(details):
@@ -5314,6 +5380,10 @@ class BehaviourConcurrencyConflictError(RuntimeError):
     pass
 
 
+class ShiftActivityConcurrencyConflictError(RuntimeError):
+    pass
+
+
 def _shift_is_cancelled(shift):
     return shift is not None and shift["status"] == SHIFT_CANCELLED_STATUS
 
@@ -5779,6 +5849,124 @@ def get_shift_activity_context(conn, shift_id, user_id):
     return context
 
 
+def get_shift_activity_in_progress_edit_context(
+    conn, shift_id, activity_id, user_id
+):
+    """Return the active creator context for one editable Activity draft."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only the recording Support Worker may edit an In Progress Activity."
+        )
+
+    context, _ = get_worker_documentation_module_context(
+        conn,
+        shift_id,
+        actor["user_id"],
+        active_context_loader=get_shift_activity_context,
+    )
+    assignment_active = context.get(
+        "assignment_active", context.get("has_active_assignment")
+    )
+    if (
+        context.get("documentation_access", DOCUMENTATION_ACCESS_ACTIVE)
+        != DOCUMENTATION_ACCESS_ACTIVE
+        or context.get("shift_status") != "Open"
+        or context.get("client_active") != 1
+        or assignment_active != 1
+    ):
+        raise PermissionError(
+            "Activity editing requires the worker's open active shift."
+        )
+
+    activity = conn.execute("""
+        SELECT sa.*, s.client_id AS activity_client_id,
+               c.client_name, c.active AS client_active,
+               s.status AS current_shift_status
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        WHERE sa.shift_activity_id = ?
+          AND sa.shift_id = ?
+          AND sa.recorded_by_user_id = ?
+    """, (activity_id, shift_id, actor["user_id"])).fetchone()
+    if activity is None or activity["status"] != "In Progress":
+        raise PermissionError(
+            "Only the recording Support Worker may edit an In Progress Activity."
+        )
+    if (
+        activity["activity_client_id"] != context["client_id"]
+        or activity["current_shift_status"] != "Open"
+        or activity["client_active"] != 1
+    ):
+        raise PermissionError("Activity client and shift context do not match.")
+    return actor, context, activity
+
+
+def get_shift_activity_in_progress_resume_records(conn, shift_id, user_id):
+    """Return the active worker's editable Activity drafts for one shift."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may resume Activities."
+        )
+
+    context, _ = get_worker_documentation_module_context(
+        conn,
+        shift_id,
+        actor["user_id"],
+        active_context_loader=get_shift_activity_context,
+    )
+    assignment_active = context.get(
+        "assignment_active", context.get("has_active_assignment")
+    )
+    if (
+        context.get("documentation_access", DOCUMENTATION_ACCESS_ACTIVE)
+        != DOCUMENTATION_ACCESS_ACTIVE
+        or context.get("shift_status") != "Open"
+        or context.get("client_active") != 1
+        or assignment_active != 1
+    ):
+        return []
+
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'shift_activities'"
+    ).fetchone() is None:
+        return []
+
+    rows = conn.execute("""
+        SELECT sa.*, c.client_name
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        WHERE sa.shift_id = ?
+          AND s.client_id = ?
+          AND sa.recorded_by_user_id = ?
+          AND sa.status = 'In Progress'
+          AND s.status = 'Open'
+          AND c.active = 1
+        ORDER BY sa.created_at ASC, sa.shift_activity_id ASC
+    """, (
+        shift_id,
+        context["client_id"],
+        actor["user_id"],
+    )).fetchall()
+
+    records = []
+    for row in rows:
+        record = dict(row)
+        record["category_summary"] = ", ".join(
+            field_name.replace("_selected", "").upper()
+            for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS
+            if record.get(field_name)
+        )
+        if not record["category_summary"]:
+            record["category_summary"] = "None selected"
+        records.append(record)
+    return records
+
+
 def get_applicable_care_tasks(conn, shift):
     """Return active Care routines applicable to one exact shift."""
     return conn.execute("""
@@ -5966,6 +6154,7 @@ def get_shift_activity_entries(conn, shift_id):
             sa.ls_selected,
             sa.activity_description,
             sa.created_at,
+            sa.status,
             u.full_name AS recorded_by_name
         FROM shift_activities sa
         JOIN users u ON u.user_id = sa.recorded_by_user_id
@@ -5996,8 +6185,19 @@ def format_food_fluid_void_storyline_details(outcome, void_reason):
     ))
 
 
+def _parse_shift_activity_time(value):
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError as error:
+        raise ValueError("Activity times must use HH:MM.") from error
+    if parsed.strftime("%H:%M") != value:
+        raise ValueError("Activity times must use HH:MM.")
+    return parsed
+
+
 def parse_shift_activity_form(form):
     allowed_fields = {
+        SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD,
         "start_time",
         "end_time",
         "activity_description",
@@ -6006,22 +6206,29 @@ def parse_shift_activity_form(form):
     if not set(form).issubset(allowed_fields):
         raise ValueError("Activity form input is invalid.")
 
-    for field_name in (
-        "start_time",
-        "end_time",
-        "activity_description",
+    lifecycle_actions = form.getlist(SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD)
+    if (
+        len(lifecycle_actions) != 1
+        or lifecycle_actions[0] not in SHIFT_ACTIVITY_LIFECYCLE_ACTIONS
     ):
-        if len(form.getlist(field_name)) != 1:
+        raise ValueError("Activity lifecycle action is invalid.")
+    lifecycle_action = lifecycle_actions[0]
+
+    def single_value(field_name, required=False):
+        submitted = form.getlist(field_name)
+        if len(submitted) > 1 or (required and not submitted):
             raise ValueError("Activity form input is invalid.")
+        return submitted[0] if submitted else ""
 
     values = {
-        "start_time": form["start_time"].strip(
+        "lifecycle_action": lifecycle_action,
+        "start_time": single_value("start_time", required=True).strip(
             SHIFT_ACTIVITY_ASCII_WHITESPACE
         ),
-        "end_time": form["end_time"].strip(
+        "end_time": single_value("end_time").strip(
             SHIFT_ACTIVITY_ASCII_WHITESPACE
         ),
-        "activity_description": form["activity_description"].strip(
+        "activity_description": single_value("activity_description").strip(
             SHIFT_ACTIVITY_ASCII_WHITESPACE
         ),
     }
@@ -6037,6 +6244,10 @@ def parse_shift_activity_form(form):
 
     parsed_times = {}
     for field_name in ("start_time", "end_time"):
+        if not values[field_name]:
+            if field_name == "end_time" and lifecycle_action == "in_progress":
+                continue
+            raise ValueError("Activity times must use HH:MM.")
         try:
             parsed = datetime.strptime(values[field_name], "%H:%M")
         except ValueError as error:
@@ -6047,14 +6258,108 @@ def parse_shift_activity_form(form):
             raise ValueError("Activity times must use HH:MM.")
         parsed_times[field_name] = parsed
 
-    if parsed_times["end_time"] <= parsed_times["start_time"]:
+    if (
+        "end_time" in parsed_times
+        and parsed_times["end_time"] <= parsed_times["start_time"]
+    ):
         raise ValueError("Activity end time must be later than start time.")
-    if not any(values[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS):
+    has_category = any(values[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS)
+    if lifecycle_action == "recorded" and not has_category:
         raise ValueError("At least one Activity category is required.")
-    if not values["activity_description"]:
+    if lifecycle_action == "recorded" and not values["activity_description"]:
         raise ValueError("Activity description is required.")
+    if lifecycle_action == "in_progress" and not (
+        has_category or values["activity_description"]
+    ):
+        raise ValueError("An Activity draft must contain meaningful data.")
+
+    if lifecycle_action == "in_progress" and not values["end_time"]:
+        values["end_time"] = None
 
     return values
+
+
+def parse_shift_activity_edit_form(form):
+    """Validate the mutable fields and lifecycle action for one Activity edit."""
+    allowed_fields = {"action", "expected_version", *SHIFT_ACTIVITY_EDITABLE_FIELDS}
+    if not set(form).issubset(allowed_fields):
+        raise ValueError("Activity edit input is invalid.")
+
+    action_values = form.getlist("action")
+    if len(action_values) != 1 or action_values[0] not in ("save", "complete"):
+        raise ValueError("Activity edit action is invalid.")
+    action = action_values[0]
+
+    version_values = form.getlist("expected_version")
+    if len(version_values) != 1 or not re.fullmatch(
+        r"[1-9][0-9]*", version_values[0]
+    ):
+        raise ValueError("Activity edit version is invalid.")
+    expected_version = int(version_values[0])
+
+    def single_value(field_name, required=False):
+        submitted = form.getlist(field_name)
+        if len(submitted) > 1 or (required and not submitted):
+            raise ValueError("Activity edit input is invalid.")
+        return submitted[0] if submitted else ""
+
+    values = {
+        "start_time": single_value("start_time", required=True).strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+        "end_time": single_value("end_time").strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+        "activity_description": single_value("activity_description").strip(
+            SHIFT_ACTIVITY_ASCII_WHITESPACE
+        ),
+    }
+    for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS:
+        submitted = form.getlist(field_name)
+        if not submitted:
+            values[field_name] = 0
+        elif submitted == ["1"]:
+            values[field_name] = 1
+        else:
+            raise ValueError("Activity category input is invalid.")
+
+    parsed_start = _parse_shift_activity_time(values["start_time"])
+    parsed_end = (
+        _parse_shift_activity_time(values["end_time"])
+        if values["end_time"] else None
+    )
+    if parsed_end is not None and parsed_end <= parsed_start:
+        raise ValueError("Activity end time must be later than start time.")
+
+    has_category = any(values[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS)
+    if action == "complete":
+        if parsed_end is None:
+            raise ValueError("Activity times must use HH:MM.")
+        if not has_category:
+            raise ValueError("At least one Activity category is required.")
+        if not values["activity_description"]:
+            raise ValueError("Activity description is required.")
+    elif not (has_category or values["activity_description"]):
+        raise ValueError("An Activity draft must contain meaningful data.")
+
+    return {
+        **values,
+        "end_time": values["end_time"] or None,
+        "action": action,
+        "expected_version": expected_version,
+    }
+
+
+def validate_shift_activity_final_candidate(activity):
+    """Apply finalized Activity rules to a candidate before database writes."""
+    parsed_start = _parse_shift_activity_time(activity["start_time"])
+    parsed_end = _parse_shift_activity_time(activity["end_time"] or "")
+    if parsed_end <= parsed_start:
+        raise ValueError("Activity end time must be later than start time.")
+    if not any(activity[field] for field in SHIFT_ACTIVITY_CATEGORY_FIELDS):
+        raise ValueError("At least one Activity category is required.")
+    if not activity["activity_description"]:
+        raise ValueError("Activity description is required.")
 
 
 def get_activity_management_actor(conn, user_id):
@@ -18599,6 +18904,7 @@ def shift_dashboard(shift_id):
     documentation_context = None
     documentation_context_alternatives = []
     behaviour_in_progress_records = []
+    activity_in_progress_records = []
     if session.get("role") in SHIFT_AUTO_SIGN_ON_ROLES:
         selected_id = _session_documentation_shift_id()
         context_state = get_worker_documentation_context_state(
@@ -18629,6 +18935,13 @@ def shift_dashboard(shift_id):
             )
         except PermissionError:
             pass
+
+    try:
+        activity_in_progress_records = get_shift_activity_in_progress_resume_records(
+            conn, shift_id, session["user_id"]
+        )
+    except (DocumentationContextUnavailable, PermissionError):
+        pass
 
     if documentation_context is not None:
         food_fluid_authorized = True
@@ -18673,7 +18986,8 @@ def shift_dashboard(shift_id):
         documentation_context_alternatives=(
             documentation_context_alternatives
         ),
-        behaviour_in_progress_records=behaviour_in_progress_records
+        behaviour_in_progress_records=behaviour_in_progress_records,
+        activity_in_progress_records=activity_in_progress_records
     )
     
 
@@ -19299,6 +19613,7 @@ def client_storyline(client_id):
     )
     storyline_management = management_storyline or behaviour_consultant_storyline
     current_behaviour_occurrences = {}
+    current_shift_activities = {}
     behaviour_occurrence_ids = {
         event["related_id"]
         for event in events
@@ -19319,6 +19634,36 @@ def client_storyline(client_id):
         current_behaviour_occurrences = {
             row["behaviour_occurrence_id"]: dict(row)
             for row in current_rows
+        }
+    shift_activity_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] == "shift_activity_created"
+            and event["related_table"] == "shift_activities"
+            and event["related_id"] is not None
+        )
+    }
+    if shift_activity_ids:
+        placeholders = ", ".join("?" for _ in shift_activity_ids)
+        shift_activity_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'shift_activities'"
+        ).fetchone()
+        if shift_activity_table is not None:
+            current_activity_rows = conn.execute(
+                "SELECT sa.*, s.shift_date, s.client_id AS activity_client_id "
+                "FROM shift_activities sa "
+                "JOIN shifts s ON s.shift_id = sa.shift_id "
+                "WHERE s.client_id = ? AND sa.shift_activity_id IN ("
+                + placeholders + ")",
+                (client_id, *sorted(shift_activity_ids)),
+            ).fetchall()
+        else:
+            current_activity_rows = []
+        current_shift_activities = {
+            row["shift_activity_id"]: dict(row)
+            for row in current_activity_rows
         }
     candidates = [
         (
@@ -19411,6 +19756,29 @@ def client_storyline(client_id):
             event["event_datetime"] = current_occurrence["occurred_at_utc"]
             if current_occurrence["status"] in ("In Progress", "Completed"):
                 event["storyline_status"] = current_occurrence["status"]
+        current_activity = (
+            current_shift_activities.get(event["related_id"])
+            if event["activity_type"] == "shift_activity_created"
+            else None
+        )
+        if current_activity is not None:
+            current_description = str(
+                current_activity.get("activity_description") or ""
+            ).strip()
+            current_event_datetime = shift_activity_start_to_utc(
+                current_activity["shift_date"],
+                current_activity["start_time"],
+            )
+            if current_event_datetime is not None:
+                event["storyline_details"] = (
+                    format_current_shift_activity_storyline_details(
+                        current_activity
+                    )
+                )
+                event["summary"] = current_description or "Activity"
+                event["event_datetime"] = current_event_datetime
+                if current_activity["status"] in ("In Progress", "Completed"):
+                    event["storyline_status"] = current_activity["status"]
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []
@@ -21175,6 +21543,11 @@ def shift_activities(shift_id):
                 )
             values = request.form.to_dict()
             parsed = parse_shift_activity_form(request.form)
+            lifecycle_status = (
+                "In Progress"
+                if parsed["lifecycle_action"] == "in_progress"
+                else "Recorded"
+            )
 
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -21196,9 +21569,13 @@ def shift_activities(shift_id):
                         a_selected,
                         t_selected,
                         ls_selected,
-                        activity_description
+                        activity_description,
+                        status,
+                        completed_at_utc,
+                        completed_by_user_id,
+                        version_number
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1)
                 """, (
                     context["shift_id"],
                     context["recorded_by_user_id"],
@@ -21208,6 +21585,7 @@ def shift_activities(shift_id):
                     parsed["t_selected"],
                     parsed["ls_selected"],
                     parsed["activity_description"],
+                    lifecycle_status,
                 ))
                 activity_id = cursor.lastrowid
                 selected_categories = ", ".join(
@@ -21215,18 +21593,33 @@ def shift_activities(shift_id):
                     for field in SHIFT_ACTIVITY_CATEGORY_FIELDS
                     if parsed[field]
                 )
+                audit_details = selected_categories
+                if lifecycle_status == "In Progress":
+                    audit_lines = ["Status: In Progress"]
+                    if selected_categories:
+                        audit_lines.append(
+                            f"Categories: {selected_categories}"
+                        )
+                    if parsed["activity_description"]:
+                        audit_lines.append(
+                            f"Description: {parsed['activity_description']}"
+                        )
+                    audit_details = "\n".join(audit_lines)
                 log_activity(
                     conn,
                     activity_class="ACTIVITY",
                     activity_type="shift_activity_created",
-                    summary=parsed["activity_description"],
+                    summary=(
+                        parsed["activity_description"]
+                        or "Activity saved in progress"
+                    ),
                     user_id=context["recorded_by_user_id"],
                     client_id=context["client_id"],
                     shift_id=context["shift_id"],
                     related_table="shift_activities",
                     related_id=activity_id,
                     storyline_visible=True,
-                    details=selected_categories,
+                    details=audit_details,
                     success=1,
                     event_datetime=serialize_behaviour_utc(
                         datetime.combine(
@@ -21299,7 +21692,186 @@ def shift_activities(shift_id):
         ), 400
     finally:
         conn.close()
-    
+
+
+def _shift_activity_edit_form_values(activity):
+    values = {
+        "expected_version": str(activity["version_number"]),
+        "start_time": activity["start_time"] or "",
+        "end_time": activity["end_time"] or "",
+        "activity_description": activity["activity_description"] or "",
+    }
+    for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS:
+        if activity[field_name]:
+            values[field_name] = "1"
+    return values
+
+
+@app.route(
+    "/shift/<int:shift_id>/activity/<int:activity_id>/edit",
+    methods=["GET", "POST"],
+)
+def shift_activity_edit(shift_id, activity_id):
+    """Allow only the active creator to edit one In Progress Activity."""
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    values = {}
+    try:
+        actor, context, activity = get_shift_activity_in_progress_edit_context(
+            conn, shift_id, activity_id, session["user_id"]
+        )
+        if request.method == "GET":
+            return render_template(
+                "shift_activity_edit.html",
+                shift=context,
+                activity=activity,
+                values=_shift_activity_edit_form_values(activity),
+                error=None,
+            )
+
+        values = request.form.to_dict()
+        parsed = parse_shift_activity_edit_form(request.form)
+        mutable_values = {
+            field_name: parsed[field_name]
+            for field_name in SHIFT_ACTIVITY_EDITABLE_FIELDS
+        }
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, context, current = (
+                get_shift_activity_in_progress_edit_context(
+                    conn, shift_id, activity_id, session["user_id"]
+                )
+            )
+            if current["version_number"] != parsed["expected_version"]:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before saving."
+                )
+
+            candidate = dict(current)
+            candidate.update(mutable_values)
+            if parsed["action"] == "complete":
+                validate_shift_activity_final_candidate(candidate)
+            changes = {}
+            for field_name, new_value in mutable_values.items():
+                old_value = current[field_name]
+                if field_name == "activity_description" and not old_value and not new_value:
+                    continue
+                if old_value != new_value:
+                    changes[field_name] = {
+                        "old": old_value,
+                        "new": new_value,
+                    }
+
+            if parsed["action"] == "save" and not changes:
+                conn.rollback()
+                return "No Activity changes were submitted.", 400
+
+            assignments = [
+                f"{field_name} = ?" for field_name in changes
+            ]
+            parameters = [change["new"] for change in changes.values()]
+            resulting_version = current["version_number"] + 1
+            if parsed["action"] == "complete":
+                completed_at_utc = serialize_behaviour_utc(
+                    datetime.now(timezone.utc).replace(microsecond=0)
+                )
+                assignments += [
+                    "status = 'Completed'",
+                    "completed_at_utc = ?",
+                    "completed_by_user_id = ?",
+                ]
+                parameters += [completed_at_utc, actor["user_id"]]
+            assignments.append("version_number = ?")
+            parameters.append(resulting_version)
+            parameters += [
+                activity_id,
+                shift_id,
+                actor["user_id"],
+                parsed["expected_version"],
+            ]
+            updated = conn.execute(
+                "UPDATE shift_activities SET " + ", ".join(assignments) + " "
+                "WHERE shift_activity_id = ? AND shift_id = ? "
+                "AND recorded_by_user_id = ? AND status = 'In Progress' "
+                "AND version_number = ?",
+                parameters,
+            )
+            if updated.rowcount != 1:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before saving."
+                )
+
+            change_text = "\n".join(
+                f"{field_name}: {change['old']!r} -> {change['new']!r}"
+                for field_name, change in changes.items()
+            ) or "None"
+            if parsed["action"] == "complete":
+                activity_type = "shift_activity_completed"
+                summary = "Activity completed"
+                details = (
+                    f"Activity ID: {activity_id}\n"
+                    f"Shift ID: {shift_id}\n"
+                    "Changed fields:\n"
+                    f"{change_text}\n"
+                    "Status: In Progress -> Completed\n"
+                    f"Completion timestamp UTC: {completed_at_utc}\n"
+                    f"Completion actor user ID: {actor['user_id']}\n"
+                    f"Resulting version: {resulting_version}"
+                )
+            else:
+                activity_type = "shift_activity_updated"
+                summary = "Activity updated"
+                details = (
+                    f"Activity ID: {activity_id}\n"
+                    "Changed fields:\n"
+                    f"{change_text}\n"
+                    f"Resulting version: {resulting_version}"
+                )
+            log_activity(
+                conn,
+                activity_class="ACTIVITY",
+                activity_type=activity_type,
+                summary=summary,
+                user_id=actor["user_id"],
+                client_id=current["activity_client_id"],
+                shift_id=shift_id,
+                related_table="shift_activities",
+                related_id=activity_id,
+                details=details,
+                success=1,
+                storyline_visible=True,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        if parsed["action"] == "save":
+            flash("Activity progress saved.")
+            return redirect(url_for(
+                "shift_activity_edit",
+                shift_id=shift_id,
+                activity_id=activity_id,
+            ))
+        flash("Activity completed.")
+        return redirect(url_for("shift_activities", shift_id=shift_id))
+    except ShiftActivityConcurrencyConflictError as error:
+        return str(error), 409
+    except PermissionError:
+        return "Access denied", 403
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Activity could not be saved.", 400
+    except ValueError as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
 #####################################################################
 # INCIDENT REPORTS
 #####################################################################
@@ -22651,17 +23223,22 @@ def activity_review_list():
 
     reviews_by_activity = {}
     reviewed_by_current_user = set()
+    reviewable_activity_ids = set()
     for review in reviews:
         activity_id = review["shift_activity_id"]
         reviews_by_activity.setdefault(activity_id, []).append(review)
         if review["user_id"] == actor["user_id"]:
             reviewed_by_current_user.add(review["shift_activity_id"])
+    for entry in entries:
+        if is_shift_activity_finalized(entry["status"]):
+            reviewable_activity_ids.add(entry["shift_activity_id"])
 
     return render_template(
         "activity_review_list.html",
         entries=entries,
         reviews_by_activity=reviews_by_activity,
-        reviewed_by_current_user=reviewed_by_current_user
+        reviewed_by_current_user=reviewed_by_current_user,
+        reviewable_activity_ids=reviewable_activity_ids
     )
 
 
@@ -22748,6 +23325,7 @@ def activity_review_detail(activity_id):
         ),
         management_notes=management_notes,
         linked_actions=linked_actions,
+        can_review=is_shift_activity_finalized(entry["status"]),
         can_manage_actions=(
             actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
         ),
@@ -23000,7 +23578,8 @@ def review_shift_activity(activity_id):
             SELECT
                 sa.shift_activity_id,
                 sa.shift_id,
-                s.client_id
+                s.client_id,
+                sa.status
             FROM shift_activities sa
             JOIN shifts s ON s.shift_id = sa.shift_id
             WHERE sa.shift_activity_id = ?
@@ -23008,6 +23587,10 @@ def review_shift_activity(activity_id):
         if entry is None:
             conn.rollback()
             return "Activity not found", 404
+
+        if not is_shift_activity_finalized(entry["status"]):
+            conn.rollback()
+            return "In Progress Activities cannot be marked as Reviewed.", 409
 
         create_acknowledgement(
             conn,
