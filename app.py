@@ -17,6 +17,7 @@ import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.datastructures import MultiDict
 from datetime import datetime, date, time as datetime_time, timedelta, timezone
+from statistics import median
 from zoneinfo import ZoneInfo
 import os
 import time
@@ -208,6 +209,17 @@ BEHAVIOUR_OCCURRENCE_FINALIZED_STATUSES = frozenset((
     "Completed",
     "Recorded",
 ))
+BEHAVIOUR_REPORT_GROUPINGS = ("Daily", "Weekly", "Monthly", "Annual")
+BEHAVIOUR_REPORT_SHIFTS = ("Day", "Afternoon", "Overnight")
+BEHAVIOUR_REPORT_UNASSIGNED_LABEL = "Unassigned"
+BEHAVIOUR_REPORT_NO_SHIFT_LABEL = "Unassigned / No Shift"
+BEHAVIOUR_REPORT_INVALID_SHIFT_LABEL = "Unassigned / Invalid Shift Link"
+BEHAVIOUR_REPORT_SHIFT_COLORS = {
+    "Day": "#2f6f9f",
+    "Afternoon": "#c47f1b",
+    "Overnight": "#4c1d95",
+    "Unassigned": "#6b7280",
+}
 FOOD_FLUID_MANAGEMENT_ROLES = BEHAVIOUR_VOID_AUTHORITY_ROLES
 ACTION_STATUSES = frozenset((
     "Open",
@@ -2833,6 +2845,477 @@ def _behaviour_recent_occurrences(conn, client_id):
     return result
 
 
+def _behaviour_report_active_client(conn):
+    """Return the sole active client used by the current report surface."""
+    clients = conn.execute("""
+        SELECT client_id, client_name
+        FROM clients
+        WHERE active = 1
+        ORDER BY client_id
+    """).fetchall()
+    if len(clients) != 1:
+        raise LookupError("Behaviour reports require exactly one active client.")
+    return dict(clients[0])
+
+
+def _behaviour_report_controls(args, today=None):
+    """Parse and validate report date and grouping controls."""
+    if today is None:
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+
+    default_from = today.replace(day=1)
+    from_value = args.get("from_date") or default_from.isoformat()
+    to_value = args.get("to_date") or today.isoformat()
+    group_by = args.get("group_by") or "Daily"
+
+    try:
+        from_date = date.fromisoformat(from_value)
+        to_date = date.fromisoformat(to_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Report dates must be valid ISO dates.") from error
+
+    if from_date > to_date:
+        raise ValueError("From Date cannot be after To Date.")
+    if group_by not in BEHAVIOUR_REPORT_GROUPINGS:
+        raise ValueError("Report grouping is invalid.")
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "from_value": from_date.isoformat(),
+        "to_value": to_date.isoformat(),
+        "group_by": group_by,
+    }
+
+
+def _behaviour_report_utc_bounds(from_date, to_date):
+    """Convert inclusive Vancouver calendar dates to canonical UTC bounds."""
+    start_local = datetime.combine(
+        from_date, datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    end_local = datetime.combine(
+        to_date + timedelta(days=1), datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    return serialize_behaviour_utc(start_local), serialize_behaviour_utc(end_local)
+
+
+def _behaviour_report_occurrence_summary(row):
+    """Return a structured, format-specific summary for one occurrence."""
+    if row["record_format"] == "ABC":
+        summary = ", ".join(
+            ABC_FIELD_LABELS[field]
+            for field in ABC_BEHAVIOUR_FIELDS
+            if row[field]
+        )
+    else:
+        summary = ", ".join(_behaviour_categories_for_row(row))
+    return summary or "No structured behaviour selected"
+
+
+def _behaviour_report_occurrences(
+    conn, client_id, from_date, to_date
+):
+    """Return all Behaviour rows for one client and inclusive local date range."""
+    start_utc, end_utc = _behaviour_report_utc_bounds(from_date, to_date)
+    rows = conn.execute("""
+        SELECT bo.*, c.client_name, u.full_name AS recorder_name,
+               s.shift_type AS linked_shift_type
+        FROM behaviour_occurrences bo
+        JOIN clients c ON c.client_id = bo.client_id
+        JOIN users u ON u.user_id = bo.recorded_by_user_id
+        LEFT JOIN shifts s
+          ON s.shift_id = bo.shift_id
+         AND s.client_id = bo.client_id
+        WHERE bo.client_id = ?
+          AND bo.occurred_at_utc >= ?
+          AND bo.occurred_at_utc < ?
+        ORDER BY bo.occurred_at_utc, bo.behaviour_occurrence_id
+    """, (client_id, start_utc, end_utc)).fetchall()
+
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        item["local_date"] = local.date().isoformat()
+        item["local_time"] = local.strftime("%H:%M")
+        item["summary"] = _behaviour_report_occurrence_summary(row)
+        item["shift_classification"] = _behaviour_report_shift_classification(item)
+        occurrences.append(item)
+    return occurrences
+
+
+def _behaviour_report_shift_classification(occurrence):
+    """Return the actual linked shift category for report presentation."""
+    if occurrence.get("linked_shift_type") in BEHAVIOUR_REPORT_SHIFTS:
+        return occurrence["linked_shift_type"]
+    if occurrence.get("shift_id") is None:
+        return BEHAVIOUR_REPORT_NO_SHIFT_LABEL
+    return BEHAVIOUR_REPORT_INVALID_SHIFT_LABEL
+
+
+def _behaviour_reportable_occurrences(occurrences):
+    """Return only finalized Behaviour rows eligible for report statistics."""
+    return [
+        item for item in occurrences
+        if item["status"] in BEHAVIOUR_OCCURRENCE_FINALIZED_STATUSES
+    ]
+
+
+def _behaviour_report_summary(occurrences):
+    """Calculate checkpoint-one headline and actual-shift metrics."""
+    reportable = _behaviour_reportable_occurrences(occurrences)
+    durations = [
+        item["duration_until_calm_minutes"]
+        for item in reportable
+        if (
+            item["record_format"] == "ABC"
+            and item["duration_until_calm_minutes"] is not None
+            and item["duration_until_calm_minutes"] >= 0
+        )
+    ]
+    shifts = {shift: 0 for shift in BEHAVIOUR_REPORT_SHIFTS}
+    shifts[BEHAVIOUR_REPORT_UNASSIGNED_LABEL] = 0
+    for item in reportable:
+        shift = item["shift_classification"]
+        if shift not in BEHAVIOUR_REPORT_SHIFTS:
+            shift = BEHAVIOUR_REPORT_UNASSIGNED_LABEL
+        shifts[shift] += 1
+
+    return {
+        "total_finalized": len(reportable),
+        "abc_count": sum(item["record_format"] == "ABC" for item in reportable),
+        "v1_count": sum(item["record_format"] == "V1" for item in reportable),
+        "voided_count": sum(item["status"] == "Voided" for item in occurrences),
+        "calendar_dates_count": len({item["local_date"] for item in reportable}),
+        "duration_count": len(durations),
+        "duration_average": round(sum(durations) / len(durations), 2) if durations else None,
+        "duration_median": median(durations) if durations else None,
+        "duration_min": min(durations) if durations else None,
+        "duration_max": max(durations) if durations else None,
+        "shifts": shifts,
+    }
+
+
+def _behaviour_report_periods(from_date, to_date, group_by):
+    """Return every report period intersecting the selected local date range."""
+    first_period = _behaviour_report_period_start(
+        datetime.combine(from_date, datetime_time.min, VANCOUVER_TIMEZONE),
+        group_by,
+    )
+    last_period = _behaviour_report_period_start(
+        datetime.combine(to_date, datetime_time.min, VANCOUVER_TIMEZONE),
+        group_by,
+    )
+    periods = []
+    period = first_period
+    while period <= last_period:
+        periods.append(period)
+        if group_by == "Daily":
+            period += timedelta(days=1)
+        elif group_by == "Weekly":
+            period += timedelta(days=7)
+        elif group_by == "Monthly":
+            if period.month == 12:
+                period = date(period.year + 1, 1, 1)
+            else:
+                period = date(period.year, period.month + 1, 1)
+        else:
+            period = date(period.year + 1, 1, 1)
+    return periods
+
+
+def _behaviour_report_series(occurrences, group_by, periods=None):
+    """Return finalized occurrence counts grouped by actual shift."""
+    grouped = {}
+    for item in _behaviour_reportable_occurrences(occurrences):
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        period = _behaviour_report_period_start(local, group_by)
+        period_counts = grouped.setdefault(
+            period,
+            {shift: 0 for shift in (
+                *BEHAVIOUR_REPORT_SHIFTS,
+                BEHAVIOUR_REPORT_UNASSIGNED_LABEL,
+            )}
+        )
+        shift = item["shift_classification"]
+        if shift not in BEHAVIOUR_REPORT_SHIFTS:
+            shift = BEHAVIOUR_REPORT_UNASSIGNED_LABEL
+        period_counts[shift] += 1
+
+    if periods is None:
+        periods = sorted(grouped)
+    return [
+        {
+            "period": period.isoformat(),
+            "count": sum(
+                grouped.get(period, {}).get(shift, 0)
+                for shift in (
+                    *BEHAVIOUR_REPORT_SHIFTS,
+                    BEHAVIOUR_REPORT_UNASSIGNED_LABEL,
+                )
+            ),
+            "day_count": grouped.get(period, {}).get("Day", 0),
+            "afternoon_count": grouped.get(period, {}).get("Afternoon", 0),
+            "overnight_count": grouped.get(period, {}).get("Overnight", 0),
+            "unassigned_count": grouped.get(period, {}).get(
+                BEHAVIOUR_REPORT_UNASSIGNED_LABEL, 0
+            ),
+        }
+        for period in periods
+    ]
+
+
+def _behaviour_report_period_start(local, group_by):
+    """Return the selected report period for a Vancouver-local instant."""
+    if group_by == "Daily":
+        return local.date()
+    if group_by == "Weekly":
+        return get_behaviour_operational_week_start(local)
+    if group_by == "Monthly":
+        return local.date().replace(day=1)
+    return local.date().replace(month=1, day=1)
+
+
+def _behaviour_report_period_label(period, group_by):
+    """Return a compact, user-facing label for a report period."""
+    period_date = date.fromisoformat(period)
+    month = period_date.strftime("%b")
+    if group_by == "Daily":
+        return period_date.strftime("%b %d")
+    if group_by == "Weekly":
+        return f"Week of {month} {period_date.day:02d}"
+    if group_by == "Monthly":
+        return f"{month} {period_date.year}"
+    return str(period_date.year)
+
+
+def _behaviour_report_duration_series(occurrences, group_by, periods=None):
+    """Return finalized ABC duration averages grouped by the selected period."""
+    grouped = {}
+    for item in _behaviour_reportable_occurrences(occurrences):
+        duration = item["duration_until_calm_minutes"]
+        if (
+            item["record_format"] != "ABC"
+            or duration is None
+            or duration < 0
+        ):
+            continue
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        period = _behaviour_report_period_start(local, group_by)
+        grouped.setdefault(period, []).append(duration)
+
+    if periods is None:
+        periods = sorted(grouped)
+    return [
+        {
+            "period": period.isoformat(),
+            "average": (
+                round(sum(grouped[period]) / len(grouped[period]), 2)
+                if period in grouped else None
+            ),
+            "count": len(grouped[period]) if period in grouped else 0,
+        }
+        for period in periods
+    ]
+
+
+def _behaviour_report_chart_dimensions(period_count):
+    """Return readable dimensions shared by the report's SVG charts."""
+    chart_width = max(960, 92 + (period_count * 72))
+    chart_height = 340
+    plot_left = 64
+    plot_top = 24
+    plot_width = chart_width - plot_left - 28
+    plot_height = 190
+    return chart_width, chart_height, plot_left, plot_top, plot_width, plot_height
+
+
+def _behaviour_report_chart_context(
+    series, value_key, chart_id, title, y_axis_label, group_by="Daily",
+    description="Finalized Behaviour values by the selected report period.",
+):
+    """Build server-side geometry for one accessible responsive report chart."""
+    (
+        chart_width,
+        chart_height,
+        plot_left,
+        plot_top,
+        plot_width,
+        plot_height,
+    ) = _behaviour_report_chart_dimensions(len(series))
+    values = [
+        item[value_key] for item in series
+        if item.get(value_key) is not None
+    ]
+    maximum = max(values) if values else 0
+    scale_maximum = maximum if maximum > 0 else 1
+    slot_width = plot_width / max(len(series), 1)
+    bar_width = max(min(slot_width * 0.58, 52), 6)
+    points = []
+    bars = []
+
+    for index, item in enumerate(series):
+        value = item.get(value_key)
+        label_x = plot_left + (index * slot_width) + (slot_width / 2)
+        points.append({
+            "period": item["period"],
+            "label": _behaviour_report_period_label(item["period"], group_by),
+            "value": value,
+            "label_x": round(label_x, 2),
+        })
+        if value is None:
+            continue
+        height = plot_height * value / scale_maximum
+        x = plot_left + (index * slot_width) + ((slot_width - bar_width) / 2)
+        y = plot_top + plot_height - height
+        bars.append({
+            "period": item["period"],
+            "value": value,
+            "x": round(x, 2),
+            "y": round(y, 2),
+            "width": round(bar_width, 2),
+            "height": round(height, 2),
+            "label_x": round(label_x, 2),
+        })
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "y_axis_label": y_axis_label,
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "has_values": bool(values),
+        "points": points,
+        "bars": bars,
+    }
+
+
+def _behaviour_report_stacked_chart_context(series, group_by):
+    """Build server-side stacked actual-shift geometry for occurrence reporting."""
+    (
+        chart_width,
+        chart_height,
+        plot_left,
+        plot_top,
+        plot_width,
+        plot_height,
+    ) = _behaviour_report_chart_dimensions(len(series))
+    maximum = max((item["count"] for item in series), default=0)
+    scale_maximum = maximum if maximum > 0 else 1
+    slot_width = plot_width / max(len(series), 1)
+    bar_width = max(min(slot_width * 0.58, 52), 6)
+    points = []
+    columns = []
+    shift_fields = [
+        ("Day", "day_count"),
+        ("Afternoon", "afternoon_count"),
+        ("Overnight", "overnight_count"),
+    ]
+    if any(item.get("unassigned_count", 0) for item in series):
+        shift_fields.append((
+            BEHAVIOUR_REPORT_UNASSIGNED_LABEL, "unassigned_count"
+        ))
+
+    for index, item in enumerate(series):
+        label_x = plot_left + (index * slot_width) + (slot_width / 2)
+        points.append({
+            "period": item["period"],
+            "label": _behaviour_report_period_label(item["period"], group_by),
+            "value": item["count"],
+            "label_x": round(label_x, 2),
+        })
+        x = plot_left + (index * slot_width) + ((slot_width - bar_width) / 2)
+        cumulative_height = 0
+        segments = []
+        for shift, field in shift_fields:
+            value = item[field]
+            height = plot_height * value / scale_maximum
+            segments.append({
+                "shift": shift,
+                "value": value,
+                "x": round(x, 2),
+                "y": round(
+                    plot_top + plot_height - cumulative_height - height, 2
+                ),
+                "width": round(bar_width, 2),
+                "height": round(height, 2),
+                "color": BEHAVIOUR_REPORT_SHIFT_COLORS[shift],
+            })
+            cumulative_height += height
+        columns.append({
+            "period": item["period"],
+            "total": item["count"],
+            "total_y": round(
+                plot_top + plot_height - cumulative_height - 6, 2
+            ),
+            "segments": segments,
+        })
+
+    return {
+        "id": "behaviour-occurrence-chart",
+        "title": "Behaviour Occurrences Over Time",
+        "description": (
+            "Finalized Behaviour occurrences by report period, stacked by "
+            + ", ".join(shift for shift, _ in shift_fields)
+            + " shifts."
+        ),
+        "y_axis_label": "Occurrences",
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "has_values": bool(series),
+        "stacked": True,
+        "points": points,
+        "columns": columns,
+        "legend": [
+            {"label": shift, "color": BEHAVIOUR_REPORT_SHIFT_COLORS[shift]}
+            for shift, _ in shift_fields
+        ],
+    }
+
+
+def _behaviour_report_context(
+    conn, client_id, from_date, to_date, group_by
+):
+    """Build the reusable Behaviour report view model."""
+    occurrences = _behaviour_report_occurrences(
+        conn, client_id, from_date, to_date
+    )
+    periods = _behaviour_report_periods(from_date, to_date, group_by)
+    series = _behaviour_report_series(occurrences, group_by, periods)
+    duration_series = _behaviour_report_duration_series(
+        occurrences, group_by, periods
+    )
+    return {
+        "summary": _behaviour_report_summary(occurrences),
+        "series": series,
+        "duration_series": duration_series,
+        "occurrence_chart": _behaviour_report_stacked_chart_context(
+            series, group_by
+        ),
+        "duration_chart": _behaviour_report_chart_context(
+            duration_series,
+            "average",
+            "behaviour-duration-chart",
+            "Average Duration Until Calm Over Time",
+            "Minutes",
+            group_by,
+            "Average finalized ABC duration until calm by report period.",
+        ),
+        "occurrences": occurrences,
+    }
+
+
 def _render_behaviour_record(
     conn, selected_client_id=None, error=None, values=None, shift_context=False,
     submission_token=None, duplicate_warning=None,
@@ -4671,6 +5154,41 @@ def behaviour_weekly(monday):
         return "Access denied", 403
     except ValueError as error:
         return str(error), 404
+    finally:
+        conn.close()
+
+
+@app.route("/reports/behaviour")
+def behaviour_report():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn, session["user_id"]
+        )
+        client = _behaviour_report_active_client(conn)
+        controls = _behaviour_report_controls(request.args)
+        report = _behaviour_report_context(
+            conn,
+            client["client_id"],
+            controls["from_date"],
+            controls["to_date"],
+            controls["group_by"],
+        )
+        return render_template(
+            "behaviour_report.html",
+            client=client,
+            controls=controls,
+            groupings=BEHAVIOUR_REPORT_GROUPINGS,
+            report=report,
+            viewer_role=actor["role"],
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except (LookupError, ValueError) as error:
+        return str(error), 400
     finally:
         conn.close()
 
