@@ -67,12 +67,13 @@
 {% block content %}
 <style>
     .behaviour-report-chart {
-        margin: 1rem 0 1.5rem;
+        margin: 0 0 1.75rem;
         max-width: 100%;
     }
     .behaviour-report-chart-scroll {
         max-width: 100%;
         overflow-x: auto;
+        padding-bottom: .35rem;
     }
     .behaviour-report-chart-legend {
         display: flex;
@@ -98,6 +99,92 @@
         height: auto;
         min-height: 220px;
         overflow: visible;
+        width: auto;
+    }
+    .behaviour-report-summary-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        margin: 0 0 1.5rem;
+    }
+    .behaviour-report-summary-card {
+        background: #f5f7fa;
+        border: 1px solid #d5dde5;
+        border-top: 4px solid #004b87;
+        border-radius: 6px;
+        min-width: 0;
+        padding: 14px 16px;
+    }
+    .behaviour-report-summary-card dt {
+        color: #334155;
+        font-size: .9rem;
+        font-weight: bold;
+        line-height: 1.3;
+    }
+    .behaviour-report-summary-card dd {
+        color: #004b87;
+        font-size: clamp(1.6rem, 3vw, 2.35rem);
+        font-weight: bold;
+        line-height: 1.1;
+        margin: .45rem 0 0;
+    }
+    .behaviour-report-secondary-summary {
+        border-top: 1px solid #d5dde5;
+        margin: 0 0 1.75rem;
+        padding-top: .75rem;
+    }
+    .behaviour-report-secondary-summary summary,
+    .behaviour-report-trend-data summary {
+        color: #004b87;
+        cursor: pointer;
+        font-weight: bold;
+    }
+    .behaviour-report-shift-summary {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        margin: 0 0 1.75rem;
+    }
+    .behaviour-report-shift-summary > div {
+        background: #f5f7fa;
+        border: 1px solid #d5dde5;
+        border-radius: 5px;
+        padding: 9px 12px;
+    }
+    .behaviour-report-shift-summary dt {
+        font-size: .85rem;
+        font-weight: bold;
+    }
+    .behaviour-report-shift-summary dd {
+        color: #004b87;
+        font-size: 1.35rem;
+        font-weight: bold;
+        margin: .2rem 0 0;
+    }
+    .behaviour-report-section-heading {
+        border-top: 1px solid #d5dde5;
+        margin: 2rem 0 .75rem;
+        padding-top: 1.25rem;
+    }
+    .behaviour-report-detail-table {
+        margin-top: 0;
+        min-width: 900px;
+    }
+    .behaviour-report-table-scroll {
+        max-width: 100%;
+        overflow-x: auto;
+    }
+    @media (max-width: 800px) {
+        .behaviour-report-summary-grid,
+        .behaviour-report-shift-summary {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    @media (max-width: 480px) {
+        .behaviour-report-summary-grid,
+        .behaviour-report-shift-summary {
+            grid-template-columns: 1fr;
+        }
     }
 </style>
 <div class="card">
@@ -126,12 +213,12 @@
         <button type="submit">Run Report</button>
     </form>
 
-    <h3>Summary</h3>
-    <dl class="report-summary-grid">
-        <div><dt>Total Behaviour Occurrences</dt><dd>{{ report.summary.total_finalized }}</dd></div>
-        <div><dt>Days With Behaviour</dt><dd>{{ report.summary.calendar_dates_count }}</dd></div>
-        <div><dt>Average Duration Until Calm (minutes)</dt><dd>{{ report.summary.duration_average if report.summary.duration_average is not none else "&mdash;"|safe }}</dd></div>
-        <div><dt>Longest Duration Until Calm (minutes)</dt><dd>{{ report.summary.duration_max if report.summary.duration_max is not none else "&mdash;"|safe }}</dd></div>
+    <h3 class="behaviour-report-section-heading">Summary</h3>
+    <dl class="behaviour-report-summary-grid">
+        <div class="behaviour-report-summary-card"><dt>Total Behaviour Occurrences</dt><dd>{{ report.summary.total_finalized }}</dd></div>
+        <div class="behaviour-report-summary-card"><dt>Days With Behaviour</dt><dd>{{ report.summary.calendar_dates_count }}</dd></div>
+        <div class="behaviour-report-summary-card"><dt>Average Duration Until Calm (minutes)</dt><dd>{{ report.summary.duration_average if report.summary.duration_average is not none else "&mdash;"|safe }}</dd></div>
+        <div class="behaviour-report-summary-card"><dt>Longest Duration Until Calm (minutes)</dt><dd>{{ report.summary.duration_max if report.summary.duration_max is not none else "&mdash;"|safe }}</dd></div>
     </dl>
 
     <details class="behaviour-report-secondary-summary">
@@ -146,48 +233,48 @@
         </dl>
     </details>
 
-    <h3>Actual Shift Breakdown</h3>
-    <table>
-        <thead><tr><th>Shift</th><th>Finalized occurrences</th></tr></thead>
-        <tbody>
-            {% for shift in ("Day", "Afternoon", "Overnight") %}
-            <tr><th scope="row">{{ shift }}</th><td>{{ report.summary.shifts[shift] }}</td></tr>
-            {% endfor %}
-            {% if report.summary.shifts.Unassigned %}
-            <tr><th scope="row">Unassigned</th><td>{{ report.summary.shifts.Unassigned }}</td></tr>
-            {% endif %}
-        </tbody>
-    </table>
+    <h3 class="behaviour-report-section-heading">Actual Shift Breakdown</h3>
+    <dl class="behaviour-report-shift-summary">
+        {% for shift in ("Day", "Afternoon", "Overnight") %}
+        <div><dt>{{ shift }}</dt><dd>{{ report.summary.shifts[shift] }}</dd></div>
+        {% endfor %}
+        {% if report.summary.shifts.Unassigned %}
+        <div><dt>Unassigned</dt><dd>{{ report.summary.shifts.Unassigned }}</dd></div>
+        {% endif %}
+    </dl>
 
-    <h3>Behaviour Occurrences Over Time</h3>
+    <h3 class="behaviour-report-section-heading">Behaviour Occurrences Over Time</h3>
     {{ report_chart(
         report.occurrence_chart,
         "No finalized Behaviour occurrences are available for this chart."
     ) }}
 
-    <h3>{{ controls.group_by }} Trend</h3>
-    {% if report.series %}
-    <table>
-        <thead><tr><th>{{ controls.group_by }} starting</th><th>Finalized occurrences</th></tr></thead>
-        <tbody>
-            {% for period in report.series %}
-            <tr><th scope="row">{{ period.period }}</th><td>{{ period.count }}</td></tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-        <p>No finalized Behaviour occurrences were found for this period.</p>
-    {% endif %}
+    <details class="behaviour-report-trend-data">
+        <summary>View {{ controls.group_by|lower }} trend data</summary>
+        {% if report.series %}
+        <table>
+            <thead><tr><th>{{ controls.group_by }} starting</th><th>Finalized occurrences</th></tr></thead>
+            <tbody>
+                {% for period in report.series %}
+                <tr><th scope="row">{{ period.period }}</th><td>{{ period.count }}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+            <p>No finalized Behaviour occurrences were found for this period.</p>
+        {% endif %}
+    </details>
 
-    <h3>Average Duration Until Calm Over Time</h3>
+    <h3 class="behaviour-report-section-heading">Average Duration Until Calm Over Time</h3>
     {{ report_chart(
         report.duration_chart,
         "No finalized ABC duration values are available for this chart."
     ) }}
 
-    <h3>Behaviour Occurrences</h3>
+    <h3 class="behaviour-report-section-heading">Behaviour Occurrences</h3>
     {% if report.occurrences %}
-    <table>
+    <div class="behaviour-report-table-scroll">
+    <table class="behaviour-report-detail-table">
         <thead>
             <tr><th>Date</th><th>Start</th><th>Shift</th><th>Format</th><th>Structured summary</th><th>Duration</th><th>Status</th><th>Details</th></tr>
         </thead>
@@ -206,6 +293,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p>No Behaviour occurrences were found for this period.</p>
     {% endif %}

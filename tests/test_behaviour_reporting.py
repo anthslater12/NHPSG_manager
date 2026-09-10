@@ -183,7 +183,7 @@ class BehaviourReportingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Total Behaviour Occurrences</dt><dd>2", page)
         self.assertIn("Days With Behaviour</dt><dd>1", page)
-        self.assertIn("<th scope=\"row\">Day</th><td>2</td>", page)
+        self.assertIn("<dt>Day</dt><dd>2</dd>", page)
         self.assertIn("<th scope=\"row\">2026-08-01</th><td>2</td>", page)
         self.assertIn("&mdash;", page)
         self.assertNotIn("â", page)
@@ -269,6 +269,38 @@ class BehaviourReportingTests(unittest.TestCase):
         self.assertNotIn("<dt>V1 occurrences", page)
         self.assertIn("Additional report statistics", page)
 
+    def test_report_dashboard_presentation_keeps_primary_cards_and_supporting_data(self):
+        self.insert_occurrence(1, "2026-08-01")
+        self.login()
+        page = self.report(
+            "?from_date=2026-08-01&to_date=2026-08-01&group_by=Daily"
+        ).data.decode()
+
+        self.assertEqual(page.count('class="behaviour-report-summary-card"'), 4)
+        for label in (
+            "Total Behaviour Occurrences",
+            "Days With Behaviour",
+            "Average Duration Until Calm",
+            "Longest Duration Until Calm",
+        ):
+            self.assertIn(label, page)
+        self.assertIn("Actual Shift Breakdown", page)
+        self.assertIn("View daily trend data", page)
+        self.assertIn("behaviour-report-table-scroll", page)
+
+    def test_short_charts_use_the_report_width_and_shift_colours_are_distinct(self):
+        series = [{"period": "2026-08-01", "count": 1}]
+        chart = app._behaviour_report_chart_context(
+            series, "count", "test-chart", "Test chart", "Occurrences"
+        )
+        self.assertEqual(chart["width"], 960)
+        self.assertNotEqual(
+            app.BEHAVIOUR_REPORT_SHIFT_COLORS["Overnight"],
+            app.BEHAVIOUR_REPORT_SHIFT_COLORS["Unassigned"],
+        )
+        self.assertIn("#4c1d95", app.BEHAVIOUR_REPORT_SHIFT_COLORS.values())
+        self.assertIn("#6b7280", app.BEHAVIOUR_REPORT_SHIFT_COLORS.values())
+
     def test_occurrence_chart_stacks_finalized_behaviour_by_nhpsg_shift(self):
         self.insert_occurrence(1, "2026-08-01", "06:59", shift_id=10)
         self.insert_occurrence(2, "2026-08-01", "07:30", shift_id=10)
@@ -348,9 +380,7 @@ class BehaviourReportingTests(unittest.TestCase):
         )
         self.assertIn("Unassigned / No Shift", page)
         self.assertIn("Unassigned / Invalid Shift Link", page)
-        self.assertIn(
-            "<th scope=\"row\">Unassigned</th><td>3</td>", page
-        )
+        self.assertIn("<dt>Unassigned</dt><dd>3</dd>", page)
         self.assertNotIn("Night", page)
         self.assertNotIn("Evening", page)
 
@@ -473,7 +503,7 @@ class BehaviourReportingTests(unittest.TestCase):
         chart = app._behaviour_report_chart_context(
             series, "count", "test-chart", "Test chart", "Occurrences"
         )
-        self.assertGreater(chart["width"], 720)
+        self.assertGreaterEqual(chart["width"], 960)
         self.assertEqual(len(chart["bars"]), 40)
         self.assertGreaterEqual(
             chart["bars"][1]["x"] - chart["bars"][0]["x"], 72

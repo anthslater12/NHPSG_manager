@@ -217,7 +217,7 @@ BEHAVIOUR_REPORT_INVALID_SHIFT_LABEL = "Unassigned / Invalid Shift Link"
 BEHAVIOUR_REPORT_SHIFT_COLORS = {
     "Day": "#2f6f9f",
     "Afternoon": "#c47f1b",
-    "Overnight": "#4d5b8c",
+    "Overnight": "#4c1d95",
     "Unassigned": "#6b7280",
 }
 FOOD_FLUID_MANAGEMENT_ROLES = BEHAVIOUR_VOID_AUTHORITY_ROLES
@@ -3121,7 +3121,7 @@ def _behaviour_report_duration_series(occurrences, group_by, periods=None):
 
 def _behaviour_report_chart_dimensions(period_count):
     """Return readable dimensions shared by the report's SVG charts."""
-    chart_width = max(720, 92 + (period_count * 72))
+    chart_width = max(960, 92 + (period_count * 72))
     chart_height = 300
     plot_left = 64
     plot_top = 24
