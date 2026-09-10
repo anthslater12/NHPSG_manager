@@ -3122,7 +3122,7 @@ def _behaviour_report_duration_series(occurrences, group_by, periods=None):
 def _behaviour_report_chart_dimensions(period_count):
     """Return readable dimensions shared by the report's SVG charts."""
     chart_width = max(960, 92 + (period_count * 72))
-    chart_height = 300
+    chart_height = 340
     plot_left = 64
     plot_top = 24
     plot_width = chart_width - plot_left - 28

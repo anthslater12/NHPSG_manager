@@ -301,6 +301,30 @@ class BehaviourReportingTests(unittest.TestCase):
         self.assertIn("#4c1d95", app.BEHAVIOUR_REPORT_SHIFT_COLORS.values())
         self.assertIn("#6b7280", app.BEHAVIOUR_REPORT_SHIFT_COLORS.values())
 
+    def test_both_charts_reserve_space_for_rotated_period_labels(self):
+        occurrence_chart = app._behaviour_report_stacked_chart_context(
+            [{
+                "period": "2026-08-01",
+                "count": 1,
+                "day_count": 1,
+                "afternoon_count": 0,
+                "overnight_count": 0,
+                "unassigned_count": 0,
+            }],
+            "Daily",
+        )
+        duration_chart = app._behaviour_report_chart_context(
+            [{"period": "2026-08-01", "average": 10}],
+            "average", "duration-chart", "Duration", "Minutes",
+        )
+
+        for chart in (occurrence_chart, duration_chart):
+            with self.subTest(chart=chart["id"]):
+                self.assertEqual(chart["height"], 340)
+                self.assertEqual(chart["plot_height"], 190)
+                label_baseline = chart["plot_top"] + chart["plot_height"] + 18
+                self.assertGreaterEqual(chart["height"] - label_baseline, 100)
+
     def test_occurrence_chart_stacks_finalized_behaviour_by_nhpsg_shift(self):
         self.insert_occurrence(1, "2026-08-01", "06:59", shift_id=10)
         self.insert_occurrence(2, "2026-08-01", "07:30", shift_id=10)
