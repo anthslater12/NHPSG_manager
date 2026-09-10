@@ -4,12 +4,19 @@
 <figure class="behaviour-report-chart">
     {% if chart.has_values %}
     <div class="behaviour-report-chart-scroll">
+    {% if chart.legend %}
+    <ul class="behaviour-report-chart-legend" aria-label="Shift legend">
+        {% for legend_item in chart.legend %}
+        <li><span class="behaviour-report-chart-swatch" style="background-color: {{ legend_item.color }};"></span>{{ legend_item.label }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
     <svg class="behaviour-report-chart-svg" width="{{ chart.width }}" height="{{ chart.height }}"
          viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img"
          aria-labelledby="{{ chart.id }}-title {{ chart.id }}-description"
          preserveAspectRatio="xMidYMid meet">
         <title id="{{ chart.id }}-title">{{ chart.title }}</title>
-        <desc id="{{ chart.id }}-description">Finalized Behaviour values by the selected report period.</desc>
+        <desc id="{{ chart.id }}-description">{{ chart.description }}</desc>
         <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top + chart.plot_height }}"
               x2="{{ chart.plot_left + chart.plot_width }}" y2="{{ chart.plot_top + chart.plot_height }}"
               stroke="currentColor" />
@@ -23,22 +30,32 @@
         <text x="16" y="{{ chart.plot_top + (chart.plot_height / 2) }}"
               text-anchor="middle" transform="rotate(-90 16 {{ chart.plot_top + (chart.plot_height / 2) }})">{{ chart.y_axis_label }}</text>
         {% for point in chart.points %}
+        <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height + 18 }}"
+              text-anchor="end" transform="rotate(-45 {{ point.label_x }} {{ chart.plot_top + chart.plot_height + 18 }})">{{ point.label }}</text>
+        {% endfor %}
+        {% if chart.stacked %}
+        {% for column in chart.columns %}
+        {% for segment in column.segments %}
+        <rect x="{{ segment.x }}" y="{{ segment.y }}" width="{{ segment.width }}" height="{{ segment.height }}" fill="{{ segment.color }}" data-chart="{{ chart.id }}" data-period="{{ column.period }}" data-shift="{{ segment.shift }}" data-value="{{ segment.value }}">
+            <title>{{ column.period }} {{ segment.shift }}: {{ segment.value }}</title>
+        </rect>
+        {% endfor %}
+        <text x="{{ column.segments[0].x + (column.segments[0].width / 2) }}" y="{{ column.total_y }}" text-anchor="middle" data-chart="{{ chart.id }}" data-period="{{ column.period }}" data-total="{{ column.total }}">{{ column.total }}</text>
+        {% endfor %}
+        {% else %}
+        {% for point in chart.points %}
         {% if point.value is none %}
         <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height - 4 }}"
               text-anchor="middle">&mdash;</text>
         {% endif %}
-        <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height + 18 }}"
-              text-anchor="end" transform="rotate(-45 {{ point.label_x }} {{ chart.plot_top + chart.plot_height + 18 }})">{{ point.period }}</text>
         {% endfor %}
         {% for bar in chart.bars %}
-        <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}"
-              fill="#2f6f9f" data-chart="{{ chart.id }}" data-period="{{ bar.period }}" data-value="{{ bar.value }}">
+        <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" fill="#2f6f9f" data-chart="{{ chart.id }}" data-period="{{ bar.period }}" data-value="{{ bar.value }}">
             <title>{{ bar.period }}: {{ bar.value }}</title>
         </rect>
         <text x="{{ bar.label_x }}" y="{{ bar.y - 4 }}" text-anchor="middle">{{ bar.value }}</text>
         {% endfor %}
-        <text x="{{ chart.plot_left + (chart.plot_width / 2) }}" y="{{ chart.height - 4 }}"
-              text-anchor="middle">Report period</text>
+        {% endif %}
     </svg>
     </div>
     {% else %}
@@ -56,6 +73,25 @@
     .behaviour-report-chart-scroll {
         max-width: 100%;
         overflow-x: auto;
+    }
+    .behaviour-report-chart-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .75rem 1.25rem;
+        list-style: none;
+        margin: 0 0 .5rem;
+        padding: 0;
+    }
+    .behaviour-report-chart-legend li {
+        align-items: center;
+        display: flex;
+        gap: .35rem;
+    }
+    .behaviour-report-chart-swatch {
+        border: 1px solid currentColor;
+        display: inline-block;
+        height: .8rem;
+        width: .8rem;
     }
     .behaviour-report-chart-svg {
         display: block;
@@ -92,25 +128,34 @@
 
     <h3>Summary</h3>
     <dl class="report-summary-grid">
-        <div><dt>Total finalized occurrences</dt><dd>{{ report.summary.total_finalized }}</dd></div>
-        <div><dt>ABC occurrences</dt><dd>{{ report.summary.abc_count }}</dd></div>
-        <div><dt>V1 occurrences</dt><dd>{{ report.summary.v1_count }}</dd></div>
-        <div><dt>Voided occurrences</dt><dd>{{ report.summary.voided_count }}</dd></div>
-        <div><dt>Calendar dates with occurrences</dt><dd>{{ report.summary.calendar_dates_count }}</dd></div>
-        <div><dt>ABC records with duration</dt><dd>{{ report.summary.duration_count }}</dd></div>
-        <div><dt>Average duration until calm (minutes)</dt><dd>{{ report.summary.duration_average if report.summary.duration_average is not none else "&mdash;"|safe }}</dd></div>
-        <div><dt>Median duration until calm (minutes)</dt><dd>{{ report.summary.duration_median if report.summary.duration_median is not none else "&mdash;"|safe }}</dd></div>
-        <div><dt>Shortest duration (minutes)</dt><dd>{{ report.summary.duration_min if report.summary.duration_min is not none else "&mdash;"|safe }}</dd></div>
-        <div><dt>Longest duration (minutes)</dt><dd>{{ report.summary.duration_max if report.summary.duration_max is not none else "&mdash;"|safe }}</dd></div>
+        <div><dt>Total Behaviour Occurrences</dt><dd>{{ report.summary.total_finalized }}</dd></div>
+        <div><dt>Days With Behaviour</dt><dd>{{ report.summary.calendar_dates_count }}</dd></div>
+        <div><dt>Average Duration Until Calm (minutes)</dt><dd>{{ report.summary.duration_average if report.summary.duration_average is not none else "&mdash;"|safe }}</dd></div>
+        <div><dt>Longest Duration Until Calm (minutes)</dt><dd>{{ report.summary.duration_max if report.summary.duration_max is not none else "&mdash;"|safe }}</dd></div>
     </dl>
 
-    <h3>Operational Band Breakdown</h3>
+    <details class="behaviour-report-secondary-summary">
+        <summary>Additional report statistics</summary>
+        <dl class="report-summary-grid">
+            <div><dt>ABC records</dt><dd>{{ report.summary.abc_count }}</dd></div>
+            <div><dt>Legacy-format records</dt><dd>{{ report.summary.v1_count }}</dd></div>
+            <div><dt>Voided occurrences</dt><dd>{{ report.summary.voided_count }}</dd></div>
+            <div><dt>Median duration until calm (minutes)</dt><dd>{{ report.summary.duration_median if report.summary.duration_median is not none else "&mdash;"|safe }}</dd></div>
+            <div><dt>Shortest duration until calm (minutes)</dt><dd>{{ report.summary.duration_min if report.summary.duration_min is not none else "&mdash;"|safe }}</dd></div>
+            <div><dt>ABC records with duration</dt><dd>{{ report.summary.duration_count }}</dd></div>
+        </dl>
+    </details>
+
+    <h3>Actual Shift Breakdown</h3>
     <table>
-        <thead><tr><th>Band</th><th>Finalized occurrences</th></tr></thead>
+        <thead><tr><th>Shift</th><th>Finalized occurrences</th></tr></thead>
         <tbody>
-            {% for band in ("Night", "Day", "Evening") %}
-            <tr><th scope="row">{{ band }}</th><td>{{ report.summary.bands[band] }}</td></tr>
+            {% for shift in ("Day", "Afternoon", "Overnight") %}
+            <tr><th scope="row">{{ shift }}</th><td>{{ report.summary.shifts[shift] }}</td></tr>
             {% endfor %}
+            {% if report.summary.shifts.Unassigned %}
+            <tr><th scope="row">Unassigned</th><td>{{ report.summary.shifts.Unassigned }}</td></tr>
+            {% endif %}
         </tbody>
     </table>
 
@@ -144,13 +189,14 @@
     {% if report.occurrences %}
     <table>
         <thead>
-            <tr><th>Date</th><th>Start</th><th>Format</th><th>Structured summary</th><th>Duration</th><th>Status</th><th>Details</th></tr>
+            <tr><th>Date</th><th>Start</th><th>Shift</th><th>Format</th><th>Structured summary</th><th>Duration</th><th>Status</th><th>Details</th></tr>
         </thead>
         <tbody>
             {% for occurrence in report.occurrences %}
             <tr>
                 <td>{{ occurrence.local_date }}</td>
                 <td>{{ occurrence.local_time }}</td>
+                <td>{{ occurrence.shift_classification }}</td>
                 <td>{{ occurrence.record_format }}</td>
                 <td>{{ occurrence.summary }}</td>
                 <td>{{ occurrence.duration_until_calm_minutes if occurrence.duration_until_calm_minutes is not none else "&mdash;"|safe }}</td>
