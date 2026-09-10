@@ -1,6 +1,69 @@
 {% extends "base.html" %}
 
+{% macro report_chart(chart, empty_message) -%}
+<figure class="behaviour-report-chart">
+    {% if chart.has_values %}
+    <div class="behaviour-report-chart-scroll">
+    <svg class="behaviour-report-chart-svg" width="{{ chart.width }}" height="{{ chart.height }}"
+         viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img"
+         aria-labelledby="{{ chart.id }}-title {{ chart.id }}-description"
+         preserveAspectRatio="xMidYMid meet">
+        <title id="{{ chart.id }}-title">{{ chart.title }}</title>
+        <desc id="{{ chart.id }}-description">Finalized Behaviour values by the selected report period.</desc>
+        <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top + chart.plot_height }}"
+              x2="{{ chart.plot_left + chart.plot_width }}" y2="{{ chart.plot_top + chart.plot_height }}"
+              stroke="currentColor" />
+        <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top }}"
+              x2="{{ chart.plot_left }}" y2="{{ chart.plot_top + chart.plot_height }}"
+              stroke="currentColor" />
+        <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + 5 }}"
+              text-anchor="end">{{ chart.maximum }}</text>
+        <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + chart.plot_height + 5 }}"
+              text-anchor="end">0</text>
+        <text x="16" y="{{ chart.plot_top + (chart.plot_height / 2) }}"
+              text-anchor="middle" transform="rotate(-90 16 {{ chart.plot_top + (chart.plot_height / 2) }})">{{ chart.y_axis_label }}</text>
+        {% for point in chart.points %}
+        {% if point.value is none %}
+        <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height - 4 }}"
+              text-anchor="middle">&mdash;</text>
+        {% endif %}
+        <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height + 18 }}"
+              text-anchor="end" transform="rotate(-45 {{ point.label_x }} {{ chart.plot_top + chart.plot_height + 18 }})">{{ point.period }}</text>
+        {% endfor %}
+        {% for bar in chart.bars %}
+        <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}"
+              fill="#2f6f9f" data-chart="{{ chart.id }}" data-period="{{ bar.period }}" data-value="{{ bar.value }}">
+            <title>{{ bar.period }}: {{ bar.value }}</title>
+        </rect>
+        <text x="{{ bar.label_x }}" y="{{ bar.y - 4 }}" text-anchor="middle">{{ bar.value }}</text>
+        {% endfor %}
+        <text x="{{ chart.plot_left + (chart.plot_width / 2) }}" y="{{ chart.height - 4 }}"
+              text-anchor="middle">Report period</text>
+    </svg>
+    </div>
+    {% else %}
+    <p role="status">{{ empty_message }}</p>
+    {% endif %}
+</figure>
+{%- endmacro %}
+
 {% block content %}
+<style>
+    .behaviour-report-chart {
+        margin: 1rem 0 1.5rem;
+        max-width: 100%;
+    }
+    .behaviour-report-chart-scroll {
+        max-width: 100%;
+        overflow-x: auto;
+    }
+    .behaviour-report-chart-svg {
+        display: block;
+        height: auto;
+        min-height: 220px;
+        overflow: visible;
+    }
+</style>
 <div class="card">
     <h2>Behaviour Report</h2>
     <p><strong>Client:</strong> {{ client.client_name }}</p>
@@ -51,6 +114,12 @@
         </tbody>
     </table>
 
+    <h3>Behaviour Occurrences Over Time</h3>
+    {{ report_chart(
+        report.occurrence_chart,
+        "No finalized Behaviour occurrences are available for this chart."
+    ) }}
+
     <h3>{{ controls.group_by }} Trend</h3>
     {% if report.series %}
     <table>
@@ -62,8 +131,14 @@
         </tbody>
     </table>
     {% else %}
-    <p>No finalized Behaviour occurrences were found for this period.</p>
+        <p>No finalized Behaviour occurrences were found for this period.</p>
     {% endif %}
+
+    <h3>Average Duration Until Calm Over Time</h3>
+    {{ report_chart(
+        report.duration_chart,
+        "No finalized ABC duration values are available for this chart."
+    ) }}
 
     <h3>Behaviour Occurrences</h3>
     {% if report.occurrences %}

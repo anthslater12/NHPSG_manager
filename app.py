@@ -2972,25 +2972,150 @@ def _behaviour_report_summary(occurrences):
     }
 
 
-def _behaviour_report_series(occurrences, group_by):
+def _behaviour_report_periods(from_date, to_date, group_by):
+    """Return every report period intersecting the selected local date range."""
+    first_period = _behaviour_report_period_start(
+        datetime.combine(from_date, datetime_time.min, VANCOUVER_TIMEZONE),
+        group_by,
+    )
+    last_period = _behaviour_report_period_start(
+        datetime.combine(to_date, datetime_time.min, VANCOUVER_TIMEZONE),
+        group_by,
+    )
+    periods = []
+    period = first_period
+    while period <= last_period:
+        periods.append(period)
+        if group_by == "Daily":
+            period += timedelta(days=1)
+        elif group_by == "Weekly":
+            period += timedelta(days=7)
+        elif group_by == "Monthly":
+            if period.month == 12:
+                period = date(period.year + 1, 1, 1)
+            else:
+                period = date(period.year, period.month + 1, 1)
+        else:
+            period = date(period.year + 1, 1, 1)
+    return periods
+
+
+def _behaviour_report_series(occurrences, group_by, periods=None):
     """Return finalized occurrence counts grouped by the selected period."""
     grouped = {}
     for item in _behaviour_reportable_occurrences(occurrences):
         local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
-        if group_by == "Daily":
-            period = local.date()
-        elif group_by == "Weekly":
-            period = get_behaviour_operational_week_start(local)
-        elif group_by == "Monthly":
-            period = local.date().replace(day=1)
-        else:
-            period = local.date().replace(month=1, day=1)
+        period = _behaviour_report_period_start(local, group_by)
         grouped[period] = grouped.get(period, 0) + 1
 
+    if periods is None:
+        periods = sorted(grouped)
     return [
-        {"period": period.isoformat(), "count": grouped[period]}
-        for period in sorted(grouped)
+        {"period": period.isoformat(), "count": grouped.get(period, 0)}
+        for period in periods
     ]
+
+
+def _behaviour_report_period_start(local, group_by):
+    """Return the selected report period for a Vancouver-local instant."""
+    if group_by == "Daily":
+        return local.date()
+    if group_by == "Weekly":
+        return get_behaviour_operational_week_start(local)
+    if group_by == "Monthly":
+        return local.date().replace(day=1)
+    return local.date().replace(month=1, day=1)
+
+
+def _behaviour_report_duration_series(occurrences, group_by, periods=None):
+    """Return finalized ABC duration averages grouped by the selected period."""
+    grouped = {}
+    for item in _behaviour_reportable_occurrences(occurrences):
+        duration = item["duration_until_calm_minutes"]
+        if (
+            item["record_format"] != "ABC"
+            or duration is None
+            or duration < 0
+        ):
+            continue
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        period = _behaviour_report_period_start(local, group_by)
+        grouped.setdefault(period, []).append(duration)
+
+    if periods is None:
+        periods = sorted(grouped)
+    return [
+        {
+            "period": period.isoformat(),
+            "average": (
+                round(sum(grouped[period]) / len(grouped[period]), 2)
+                if period in grouped else None
+            ),
+            "count": len(grouped[period]) if period in grouped else 0,
+        }
+        for period in periods
+    ]
+
+
+def _behaviour_report_chart_context(
+    series, value_key, chart_id, title, y_axis_label
+):
+    """Build server-side geometry for one accessible responsive report chart."""
+    chart_width = max(720, 92 + (len(series) * 72))
+    chart_height = 280
+    plot_left = 64
+    plot_top = 24
+    plot_width = chart_width - plot_left - 28
+    plot_height = 190
+    values = [
+        item[value_key] for item in series
+        if item.get(value_key) is not None
+    ]
+    maximum = max(values) if values else 0
+    scale_maximum = maximum if maximum > 0 else 1
+    slot_width = plot_width / max(len(series), 1)
+    bar_width = max(min(slot_width * 0.58, 52), 6)
+    points = []
+    bars = []
+
+    for index, item in enumerate(series):
+        value = item.get(value_key)
+        label_x = plot_left + (index * slot_width) + (slot_width / 2)
+        points.append({
+            "period": item["period"],
+            "value": value,
+            "label_x": round(label_x, 2),
+        })
+        if value is None:
+            continue
+        height = plot_height * value / scale_maximum
+        x = plot_left + (index * slot_width) + ((slot_width - bar_width) / 2)
+        y = plot_top + plot_height - height
+        bars.append({
+            "period": item["period"],
+            "value": value,
+            "x": round(x, 2),
+            "y": round(y, 2),
+            "width": round(bar_width, 2),
+            "height": round(height, 2),
+            "label_x": round(label_x, 2),
+        })
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "y_axis_label": y_axis_label,
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "has_values": bool(values),
+        "points": points,
+        "bars": bars,
+    }
 
 
 def _behaviour_report_context(
@@ -3000,9 +3125,29 @@ def _behaviour_report_context(
     occurrences = _behaviour_report_occurrences(
         conn, client_id, from_date, to_date
     )
+    periods = _behaviour_report_periods(from_date, to_date, group_by)
+    series = _behaviour_report_series(occurrences, group_by, periods)
+    duration_series = _behaviour_report_duration_series(
+        occurrences, group_by, periods
+    )
     return {
         "summary": _behaviour_report_summary(occurrences),
-        "series": _behaviour_report_series(occurrences, group_by),
+        "series": series,
+        "duration_series": duration_series,
+        "occurrence_chart": _behaviour_report_chart_context(
+            series,
+            "count",
+            "behaviour-occurrence-chart",
+            "Behaviour Occurrences Over Time",
+            "Occurrences",
+        ),
+        "duration_chart": _behaviour_report_chart_context(
+            duration_series,
+            "average",
+            "behaviour-duration-chart",
+            "Average Duration Until Calm Over Time",
+            "Minutes",
+        ),
         "occurrences": occurrences,
     }
 

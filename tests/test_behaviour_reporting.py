@@ -226,6 +226,191 @@ class BehaviourReportingTests(unittest.TestCase):
         self.assertIn("In Progress", page)
         self.assertIn("Voided", page)
 
+    def test_charts_use_finalized_occurrences_and_valid_abc_durations(self):
+        self.insert_occurrence(1, "2026-08-01", status="In Progress")
+        self.insert_occurrence(
+            2, "2026-08-01", record_format="ABC", status="In Progress", duration=99
+        )
+        self.insert_occurrence(
+            3, "2026-08-01", record_format="ABC", status="Recorded", duration=10
+        )
+        self.insert_occurrence(
+            4, "2026-08-01", record_format="ABC", status="Completed", duration=20
+        )
+        self.insert_occurrence(5, "2026-08-01", status="Voided")
+        self.insert_occurrence(6, "2026-08-01", status="Recorded")
+        self.login()
+        page = self.report(
+            "?from_date=2026-08-01&to_date=2026-08-01&group_by=Daily"
+        ).data.decode()
+
+        self.assertIn("Behaviour Occurrences Over Time", page)
+        self.assertIn("Average Duration Until Calm Over Time", page)
+        self.assertIn('data-period="2026-08-01" data-value="3"', page)
+        self.assertNotIn('data-period="2026-08-01" data-value="5"', page)
+        self.assertIn('data-period="2026-08-01" data-value="15.0"', page)
+        self.assertNotIn('data-period="2026-08-01" data-value="99"', page)
+        self.assertIn("Total finalized occurrences</dt><dd>3", page)
+        self.assertIn("Average duration until calm (minutes)</dt><dd>15.0", page)
+
+    def test_charts_follow_daily_weekly_monthly_and_annual_grouping(self):
+        for occurrence_id, local_date in (
+            (1, "2026-08-01"),
+            (2, "2026-08-02"),
+            (3, "2026-08-10"),
+            (4, "2026-09-01"),
+            (5, "2027-01-01"),
+        ):
+            self.insert_occurrence(occurrence_id, local_date)
+        self.login()
+
+        cases = (
+            ("Daily", "2026-08-01", "2027-01-01", "2026-08-01", 1),
+            ("Weekly", "2026-08-01", "2026-08-31", "2026-07-27", 2),
+            ("Monthly", "2026-08-01", "2026-12-31", "2026-08-01", 3),
+            ("Annual", "2026-01-01", "2027-12-31", "2026-01-01", 4),
+        )
+        for grouping, from_date, to_date, first_period, count in cases:
+            with self.subTest(grouping=grouping):
+                page = self.report(
+                    f"?from_date={from_date}&to_date={to_date}"
+                    f"&group_by={grouping}"
+                ).data.decode()
+                self.assertIn(
+                    f'data-period="{first_period}" data-value="{count}"',
+                    page,
+                )
+
+    def test_occurrence_series_preserves_zero_periods_for_every_grouping(self):
+        self.insert_occurrence(1, "2026-08-01")
+        self.insert_occurrence(2, "2026-08-05")
+        self.login()
+
+        cases = (
+            (
+                "Daily", "2026-08-01", "2026-08-05",
+                '<th scope="row">2026-08-02</th><td>0</td>',
+            ),
+            (
+                "Weekly", "2026-08-01", "2026-08-31",
+                '<th scope="row">2026-08-10</th><td>0</td>',
+            ),
+            (
+                "Monthly", "2026-08-01", "2026-12-31",
+                '<th scope="row">2026-09-01</th><td>0</td>',
+            ),
+            (
+                "Annual", "2026-01-01", "2028-12-31",
+                '<th scope="row">2027-01-01</th><td>0</td>',
+            ),
+        )
+        for grouping, from_date, to_date, zero_period in cases:
+            with self.subTest(grouping=grouping):
+                page = self.report(
+                    f"?from_date={from_date}&to_date={to_date}"
+                    f"&group_by={grouping}"
+                ).data.decode()
+                self.assertIn(zero_period, page)
+
+    def test_duration_chart_marks_periods_without_qualifying_values_as_missing(self):
+        self.insert_occurrence(
+            1, "2026-08-01", record_format="ABC", duration=10
+        )
+        self.insert_occurrence(
+            2, "2026-08-03", record_format="ABC", duration=20
+        )
+        self.login()
+        page = self.report(
+            "?from_date=2026-08-01&to_date=2026-08-03&group_by=Daily"
+        ).data.decode()
+        self.assertIn(
+            'data-chart="behaviour-duration-chart" '
+            'data-period="2026-08-01" data-value="10.0"',
+            page,
+        )
+        self.assertIn(
+            'data-chart="behaviour-duration-chart" '
+            'data-period="2026-08-03" data-value="20.0"',
+            page,
+        )
+        self.assertNotIn(
+            'data-chart="behaviour-duration-chart" '
+            'data-period="2026-08-02"',
+            page,
+        )
+        self.assertIn(
+            '<text x="', page
+        )
+        self.assertIn("&mdash;", page)
+
+    def test_long_daily_chart_uses_readable_natural_width_and_scroll_layout(self):
+        series = [
+            {"period": f"2026-day-{index:03d}", "count": 1}
+            for index in range(40)
+        ]
+        chart = app._behaviour_report_chart_context(
+            series, "count", "test-chart", "Test chart", "Occurrences"
+        )
+        self.assertGreater(chart["width"], 720)
+        self.assertEqual(len(chart["bars"]), 40)
+        self.assertGreaterEqual(
+            chart["bars"][1]["x"] - chart["bars"][0]["x"], 72
+        )
+        with open(
+            os.path.join(ROOT, "templates", "behaviour_report.html"),
+            encoding="utf-8",
+        ) as template_file:
+            self.assertIn("overflow-x: auto", template_file.read())
+
+    def test_duration_chart_averages_multiple_records_and_excludes_missing(self):
+        self.insert_occurrence(
+            1, "2026-08-01", record_format="ABC", duration=10
+        )
+        self.insert_occurrence(
+            2, "2026-08-01", record_format="ABC", duration=20
+        )
+        self.insert_occurrence(3, "2026-08-01", duration=30)
+        self.login()
+        page = self.report(
+            "?from_date=2026-08-01&to_date=2026-08-01&group_by=Daily"
+        ).data.decode()
+        self.assertIn('data-period="2026-08-01" data-value="15.0"', page)
+        self.assertNotIn('data-period="2026-08-01" data-value="0"', page)
+        self.assertIn("ABC records with duration</dt><dd>2", page)
+
+        conn = sqlite3.connect(app.DB_NAME)
+        row = conn.execute(
+            "SELECT * FROM behaviour_occurrences WHERE behaviour_occurrence_id = 1"
+        ).fetchone()
+        columns = [column[1] for column in conn.execute(
+            "PRAGMA table_info(behaviour_occurrences)"
+        ).fetchall()]
+        conn.close()
+        missing_duration = dict(zip(columns, row))
+        missing_duration["duration_until_calm_minutes"] = None
+        self.assertEqual(
+            app._behaviour_report_duration_series(
+                [missing_duration], "Daily"
+            ),
+            [],
+        )
+
+    def test_empty_chart_ranges_render_safely(self):
+        self.login()
+        page = self.report(
+            "?from_date=2026-08-01&to_date=2026-08-01&group_by=Daily"
+        ).data.decode()
+        self.assertIn(
+            "No finalized ABC duration values are available for this chart.",
+            page,
+        )
+        self.assertIn(
+            'data-chart="behaviour-occurrence-chart" '
+            'data-period="2026-08-01" data-value="0"',
+            page,
+        )
+        self.assertEqual(page.count("<svg"), 1)
+
     def test_operational_band_counts_use_behaviour_band_boundaries(self):
         self.insert_occurrence(1, "2026-08-01", "06:59")
         self.insert_occurrence(2, "2026-08-01", "07:30")
