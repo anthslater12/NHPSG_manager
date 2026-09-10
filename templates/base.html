@@ -67,6 +67,10 @@
             Management Review
         </a>
 
+        <a href="{{ url_for('behaviour_report') }}">
+            Behaviour Report
+        </a>
+
         {% if management_storyline_url %}
             <a href="{{ management_storyline_url }}">
                 Storyline
@@ -102,6 +106,10 @@
         </a>
 
     {% elif session.role == "Behaviour Consultant" %}
+
+        <a href="{{ url_for('behaviour_report') }}">
+            Behaviour Report
+        </a>
 
         {% if management_storyline_url %}
             <a href="{{ management_storyline_url }}">

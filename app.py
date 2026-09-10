@@ -17,6 +17,7 @@ import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.datastructures import MultiDict
 from datetime import datetime, date, time as datetime_time, timedelta, timezone
+from statistics import median
 from zoneinfo import ZoneInfo
 import os
 import time
@@ -208,6 +209,7 @@ BEHAVIOUR_OCCURRENCE_FINALIZED_STATUSES = frozenset((
     "Completed",
     "Recorded",
 ))
+BEHAVIOUR_REPORT_GROUPINGS = ("Daily", "Weekly", "Monthly", "Annual")
 FOOD_FLUID_MANAGEMENT_ROLES = BEHAVIOUR_VOID_AUTHORITY_ROLES
 ACTION_STATUSES = frozenset((
     "Open",
@@ -2833,6 +2835,178 @@ def _behaviour_recent_occurrences(conn, client_id):
     return result
 
 
+def _behaviour_report_active_client(conn):
+    """Return the sole active client used by the current report surface."""
+    clients = conn.execute("""
+        SELECT client_id, client_name
+        FROM clients
+        WHERE active = 1
+        ORDER BY client_id
+    """).fetchall()
+    if len(clients) != 1:
+        raise LookupError("Behaviour reports require exactly one active client.")
+    return dict(clients[0])
+
+
+def _behaviour_report_controls(args, today=None):
+    """Parse and validate report date and grouping controls."""
+    if today is None:
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+
+    default_from = today.replace(day=1)
+    from_value = args.get("from_date") or default_from.isoformat()
+    to_value = args.get("to_date") or today.isoformat()
+    group_by = args.get("group_by") or "Daily"
+
+    try:
+        from_date = date.fromisoformat(from_value)
+        to_date = date.fromisoformat(to_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Report dates must be valid ISO dates.") from error
+
+    if from_date > to_date:
+        raise ValueError("From Date cannot be after To Date.")
+    if group_by not in BEHAVIOUR_REPORT_GROUPINGS:
+        raise ValueError("Report grouping is invalid.")
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "from_value": from_date.isoformat(),
+        "to_value": to_date.isoformat(),
+        "group_by": group_by,
+    }
+
+
+def _behaviour_report_utc_bounds(from_date, to_date):
+    """Convert inclusive Vancouver calendar dates to canonical UTC bounds."""
+    start_local = datetime.combine(
+        from_date, datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    end_local = datetime.combine(
+        to_date + timedelta(days=1), datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    return serialize_behaviour_utc(start_local), serialize_behaviour_utc(end_local)
+
+
+def _behaviour_report_occurrence_summary(row):
+    """Return a structured, format-specific summary for one occurrence."""
+    if row["record_format"] == "ABC":
+        summary = ", ".join(
+            ABC_FIELD_LABELS[field]
+            for field in ABC_BEHAVIOUR_FIELDS
+            if row[field]
+        )
+    else:
+        summary = ", ".join(_behaviour_categories_for_row(row))
+    return summary or "No structured behaviour selected"
+
+
+def _behaviour_report_occurrences(
+    conn, client_id, from_date, to_date
+):
+    """Return all Behaviour rows for one client and inclusive local date range."""
+    start_utc, end_utc = _behaviour_report_utc_bounds(from_date, to_date)
+    rows = conn.execute("""
+        SELECT bo.*, c.client_name, u.full_name AS recorder_name
+        FROM behaviour_occurrences bo
+        JOIN clients c ON c.client_id = bo.client_id
+        JOIN users u ON u.user_id = bo.recorded_by_user_id
+        WHERE bo.client_id = ?
+          AND bo.occurred_at_utc >= ?
+          AND bo.occurred_at_utc < ?
+        ORDER BY bo.occurred_at_utc, bo.behaviour_occurrence_id
+    """, (client_id, start_utc, end_utc)).fetchall()
+
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        item["local_date"] = local.date().isoformat()
+        item["local_time"] = local.strftime("%H:%M")
+        item["summary"] = _behaviour_report_occurrence_summary(row)
+        occurrences.append(item)
+    return occurrences
+
+
+def _behaviour_reportable_occurrences(occurrences):
+    """Return only finalized Behaviour rows eligible for report statistics."""
+    return [
+        item for item in occurrences
+        if item["status"] in BEHAVIOUR_OCCURRENCE_FINALIZED_STATUSES
+    ]
+
+
+def _behaviour_report_summary(occurrences):
+    """Calculate checkpoint-one headline and operational-band metrics."""
+    reportable = _behaviour_reportable_occurrences(occurrences)
+    durations = [
+        item["duration_until_calm_minutes"]
+        for item in reportable
+        if (
+            item["record_format"] == "ABC"
+            and item["duration_until_calm_minutes"] is not None
+            and item["duration_until_calm_minutes"] >= 0
+        )
+    ]
+    bands = {band: 0 for band in ("Night", "Day", "Evening")}
+    for item in reportable:
+        bands[
+            get_behaviour_operational_band(
+                behaviour_utc_to_vancouver(item["occurred_at_utc"])
+            )
+        ] += 1
+
+    return {
+        "total_finalized": len(reportable),
+        "abc_count": sum(item["record_format"] == "ABC" for item in reportable),
+        "v1_count": sum(item["record_format"] == "V1" for item in reportable),
+        "voided_count": sum(item["status"] == "Voided" for item in occurrences),
+        "calendar_dates_count": len({item["local_date"] for item in reportable}),
+        "duration_count": len(durations),
+        "duration_average": round(sum(durations) / len(durations), 2) if durations else None,
+        "duration_median": median(durations) if durations else None,
+        "duration_min": min(durations) if durations else None,
+        "duration_max": max(durations) if durations else None,
+        "bands": bands,
+    }
+
+
+def _behaviour_report_series(occurrences, group_by):
+    """Return finalized occurrence counts grouped by the selected period."""
+    grouped = {}
+    for item in _behaviour_reportable_occurrences(occurrences):
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        if group_by == "Daily":
+            period = local.date()
+        elif group_by == "Weekly":
+            period = get_behaviour_operational_week_start(local)
+        elif group_by == "Monthly":
+            period = local.date().replace(day=1)
+        else:
+            period = local.date().replace(month=1, day=1)
+        grouped[period] = grouped.get(period, 0) + 1
+
+    return [
+        {"period": period.isoformat(), "count": grouped[period]}
+        for period in sorted(grouped)
+    ]
+
+
+def _behaviour_report_context(
+    conn, client_id, from_date, to_date, group_by
+):
+    """Build the reusable Behaviour report view model."""
+    occurrences = _behaviour_report_occurrences(
+        conn, client_id, from_date, to_date
+    )
+    return {
+        "summary": _behaviour_report_summary(occurrences),
+        "series": _behaviour_report_series(occurrences, group_by),
+        "occurrences": occurrences,
+    }
+
+
 def _render_behaviour_record(
     conn, selected_client_id=None, error=None, values=None, shift_context=False,
     submission_token=None, duplicate_warning=None,
@@ -4671,6 +4845,41 @@ def behaviour_weekly(monday):
         return "Access denied", 403
     except ValueError as error:
         return str(error), 404
+    finally:
+        conn.close()
+
+
+@app.route("/reports/behaviour")
+def behaviour_report():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn, session["user_id"]
+        )
+        client = _behaviour_report_active_client(conn)
+        controls = _behaviour_report_controls(request.args)
+        report = _behaviour_report_context(
+            conn,
+            client["client_id"],
+            controls["from_date"],
+            controls["to_date"],
+            controls["group_by"],
+        )
+        return render_template(
+            "behaviour_report.html",
+            client=client,
+            controls=controls,
+            groupings=BEHAVIOUR_REPORT_GROUPINGS,
+            report=report,
+            viewer_role=actor["role"],
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except (LookupError, ValueError) as error:
+        return str(error), 400
     finally:
         conn.close()
 
