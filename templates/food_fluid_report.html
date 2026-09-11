@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+
+{% macro chart_legend(chart) -%}
+{% if chart.legend %}
+<ul class="food-fluid-report-chart-legend" aria-label="Chart legend">
+    {% for item in chart.legend %}
+    <li><span class="food-fluid-report-chart-swatch" style="background-color: {{ item.color }};"></span>{{ item.label }}</li>
+    {% endfor %}
+</ul>
+{% endif %}
+{%- endmacro %}
+
+{% macro report_chart(chart, empty_message) -%}
+<figure class="food-fluid-report-chart">
+    {% if chart.has_values %}
+    <div class="food-fluid-report-chart-scroll">
+        {{ chart_legend(chart) }}
+        <svg class="food-fluid-report-chart-svg" width="{{ chart.width }}" height="{{ chart.height }}"
+             viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img"
+             aria-labelledby="{{ chart.id }}-title {{ chart.id }}-description">
+            <title id="{{ chart.id }}-title">{{ chart.title }}</title>
+            <desc id="{{ chart.id }}-description">{{ chart.description }}</desc>
+            <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top + chart.plot_height }}"
+                  x2="{{ chart.plot_left + chart.plot_width }}" y2="{{ chart.plot_top + chart.plot_height }}" stroke="currentColor" />
+            <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top }}"
+                  x2="{{ chart.plot_left }}" y2="{{ chart.plot_top + chart.plot_height }}" stroke="currentColor" />
+            <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + 5 }}" text-anchor="end">{{ chart.maximum }}</text>
+            <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + chart.plot_height + 5 }}" text-anchor="end">0</text>
+            <text x="16" y="{{ chart.plot_top + (chart.plot_height / 2) }}" text-anchor="middle"
+                  transform="rotate(-90 16 {{ chart.plot_top + (chart.plot_height / 2) }})">{{ chart.y_axis_label }}</text>
+            {% for point in chart.points %}
+            <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height + 18 }}"
+                  text-anchor="end" transform="rotate(-45 {{ point.label_x }} {{ chart.plot_top + chart.plot_height + 18 }})">{{ point.label }}</text>
+            {% endfor %}
+            {% if chart.stacked %}
+                {% for column in chart.columns %}
+                    {% for segment in column.segments %}
+                    <rect x="{{ segment.x }}" y="{{ segment.y }}" width="{{ segment.width }}" height="{{ segment.height }}"
+                          fill="{{ segment.color }}" data-chart="{{ chart.id }}" data-period="{{ column.period }}"
+                          data-segment-label="{{ segment.label }}" data-value="{{ segment.value }}">
+                        <title>{{ column.period }} {{ segment.label }}: {{ segment.value }}</title>
+                    </rect>
+                    {% endfor %}
+                    <text x="{{ column.segments[0].x + (column.segments[0].width / 2) }}" y="{{ column.total_y }}"
+                          text-anchor="middle" data-chart="{{ chart.id }}" data-period="{{ column.period }}"
+                          data-total="{{ column.total }}">{{ column.total }}</text>
+                {% endfor %}
+            {% else %}
+                {% for bar in chart.bars %}
+                <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}"
+                      fill="{{ bar.color }}" data-chart="{{ chart.id }}" data-period="{{ bar.period }}"
+                      data-series-label="{{ bar.label }}" data-value="{{ bar.value }}">
+                    <title>{{ bar.period }} {{ bar.label }}: {{ bar.value }}</title>
+                </rect>
+                <text x="{{ bar.label_x }}" y="{{ bar.y - 4 }}" text-anchor="middle">{{ bar.value }}</text>
+                {% endfor %}
+            {% endif %}
+        </svg>
+    </div>
+    {% else %}<p role="status">{{ empty_message }}</p>{% endif %}
+</figure>
+{%- endmacro %}
+
+{% block content %}
+<style>
+    .food-fluid-report-chart { margin: 0 0 1.5rem; max-width: 100%; }
+    .food-fluid-report-chart-scroll { max-width: 100%; overflow-x: auto; padding-bottom: .35rem; }
+    .food-fluid-report-chart-legend { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; list-style: none; margin: 0 0 .5rem; padding: 0; }
+    .food-fluid-report-chart-legend li { align-items: center; display: flex; gap: .35rem; }
+    .food-fluid-report-chart-swatch { border: 1px solid currentColor; display: inline-block; height: .8rem; width: .8rem; }
+    .food-fluid-report-chart-svg { display: block; height: auto; min-height: 220px; overflow: visible; width: auto; }
+    .food-fluid-report-summary-grid, .food-fluid-report-breakdown { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 1.5rem; }
+    .food-fluid-report-summary-card, .food-fluid-report-breakdown > div { background: #f5f7fa; border: 1px solid #d5dde5; border-radius: 6px; min-width: 0; padding: 12px 14px; }
+    .food-fluid-report-summary-card { border-top: 4px solid #004b87; padding: 14px 16px; }
+    .food-fluid-report-summary-card dt, .food-fluid-report-breakdown dt { color: #334155; font-size: .9rem; font-weight: bold; line-height: 1.3; }
+    .food-fluid-report-summary-card dd, .food-fluid-report-breakdown dd { color: #004b87; font-size: 1.45rem; font-weight: bold; margin: .35rem 0 0; }
+    .food-fluid-report-summary-card dd { font-size: clamp(1.6rem, 3vw, 2.35rem); }
+    .food-fluid-report-section-heading { border-top: 1px solid #d5dde5; margin: 2rem 0 .75rem; padding-top: 1.25rem; }
+    .food-fluid-report-note { color: #475569; margin-top: -.35rem; }
+    .food-fluid-report-table-scroll { max-width: 100%; overflow-x: auto; }
+    .food-fluid-report-detail-table { min-width: 1120px; }
+    @media (max-width: 800px) { .food-fluid-report-summary-grid, .food-fluid-report-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 480px) { .food-fluid-report-summary-grid, .food-fluid-report-breakdown { grid-template-columns: 1fr; } }
+</style>
+
+<div class="card">
+    <h2>Food &amp; Fluid Report</h2>
+    <p><strong>Client:</strong> {{ client.client_name }}</p>
+
+    <form method="get" class="report-controls">
+        <div class="form-row">
+            <div class="form-field"><label for="from_date">From Date</label><input id="from_date" type="date" name="from_date" value="{{ controls.from_value }}" required></div>
+            <div class="form-field"><label for="to_date">To Date</label><input id="to_date" type="date" name="to_date" value="{{ controls.to_value }}" required></div>
+            <div class="form-field"><label for="group_by">Group By</label><select id="group_by" name="group_by">{% for grouping in groupings %}<option value="{{ grouping }}"{% if grouping == controls.group_by %} selected{% endif %}>{{ grouping }}</option>{% endfor %}</select></div>
+        </div>
+        <button type="submit">Run Report</button>
+    </form>
+
+    <h3 class="food-fluid-report-section-heading">Summary</h3>
+    <dl class="food-fluid-report-summary-grid">
+        <div class="food-fluid-report-summary-card"><dt>Total Recorded Entries</dt><dd>{{ report.summary.total_recorded }}</dd></div>
+        <div class="food-fluid-report-summary-card"><dt>Days With Entries</dt><dd>{{ report.summary.days }}</dd></div>
+        <div class="food-fluid-report-summary-card"><dt>Refused</dt><dd>{{ report.summary.refused }}</dd></div>
+        <div class="food-fluid-report-summary-card"><dt>Physically Thrown</dt><dd>{{ report.summary.physically_thrown }}</dd></div>
+    </dl>
+
+    <h3 class="food-fluid-report-section-heading">Additional Report Statistics</h3>
+    <dl class="food-fluid-report-breakdown">
+        <div><dt>Voided Entries</dt><dd>{{ report.summary.voided }}</dd></div>
+    </dl>
+
+    <h3 class="food-fluid-report-section-heading">Actual Shift Breakdown</h3>
+    <dl class="food-fluid-report-breakdown">
+        {% for shift in ("Day", "Afternoon", "Overnight") %}<div><dt>{{ shift }}</dt><dd>{{ report.summary.shifts[shift] }}</dd></div>{% endfor %}
+        {% if report.summary.shifts["Unassigned / Invalid Shift Link"] %}<div><dt>Unassigned / Invalid Shift Link</dt><dd>{{ report.summary.shifts["Unassigned / Invalid Shift Link"] }}</dd></div>{% endif %}
+    </dl>
+
+    <h3 class="food-fluid-report-section-heading">Interaction Type Breakdown</h3>
+    <dl class="food-fluid-report-breakdown">
+        {% for interaction in ("Offered", "Requested") %}<div><dt>{{ interaction }}</dt><dd>{{ report.summary.interactions[interaction] }}</dd></div>{% endfor %}
+    </dl>
+
+    <h3 class="food-fluid-report-section-heading">Outcome Breakdown</h3>
+    <dl class="food-fluid-report-breakdown">
+        {% for outcome in ("All consumed", "Partially consumed", "Refused", "Item not available") %}<div><dt>{{ outcome }}</dt><dd>{{ report.summary.outcomes[outcome] }}</dd></div>{% endfor %}
+    </dl>
+
+    <h3 class="food-fluid-report-section-heading">Physical Throwing</h3>
+    <dl class="food-fluid-report-breakdown">
+        <div><dt>Physically Thrown</dt><dd>{{ report.summary.physically_thrown_breakdown["Yes"] }}</dd></div>
+        <div><dt>Not Physically Thrown</dt><dd>{{ report.summary.physically_thrown_breakdown["No"] }}</dd></div>
+    </dl>
+
+    <h3 class="food-fluid-report-section-heading">Food &amp; Fluid Entries Over Time</h3>
+    {{ report_chart(report.shift_chart, "No Recorded Food &amp; Fluid entries are available for this chart.") }}
+
+    <h3 class="food-fluid-report-section-heading">Interaction Type Over Time</h3>
+    {{ report_chart(report.interaction_chart, "No Recorded interaction data is available for this chart.") }}
+
+    <h3 class="food-fluid-report-section-heading">Outcome Over Time</h3>
+    {{ report_chart(report.outcome_chart, "No Recorded outcome data is available for this chart.") }}
+
+    <details class="food-fluid-report-trend-data">
+        <summary>View {{ controls.group_by|lower }} trend data</summary>
+        <div class="food-fluid-report-table-scroll">
+            <table>
+                <thead><tr><th>{{ controls.group_by }} starting</th><th>Recorded Entries</th><th>Day</th><th>Afternoon</th><th>Overnight</th><th>Unassigned / Invalid Shift Link</th><th>Offered</th><th>Requested</th><th>All consumed</th><th>Partially consumed</th><th>Refused</th><th>Item not available</th></tr></thead>
+                <tbody>{% for period in report.trend %}<tr>
+                    <th scope="row">{{ period.period }}</th><td>{{ period.total_recorded }}</td>
+                    <td>{{ period.shifts.Day }}</td><td>{{ period.shifts.Afternoon }}</td><td>{{ period.shifts.Overnight }}</td><td>{{ period.shifts["Unassigned / Invalid Shift Link"] }}</td>
+                    <td>{{ period.interactions.Offered }}</td><td>{{ period.interactions.Requested }}</td>
+                    <td>{{ period.outcomes["All consumed"] }}</td><td>{{ period.outcomes["Partially consumed"] }}</td><td>{{ period.outcomes.Refused }}</td><td>{{ period.outcomes["Item not available"] }}</td>
+                </tr>{% endfor %}</tbody>
+            </table>
+        </div>
+    </details>
+
+    <h3 class="food-fluid-report-section-heading">Food &amp; Fluid Entries</h3>
+    <p class="food-fluid-report-note">Item descriptions and additional details are shown for audit context and are not classified or aggregated.</p>
+    {% if report.occurrences %}
+    <div class="food-fluid-report-table-scroll"><table class="food-fluid-report-detail-table">
+        <thead><tr><th>Date</th><th>Time</th><th>Shift</th><th>Interaction Type</th><th>Food or Beverage Item</th><th>Outcome</th><th>Physically Thrown</th><th>Status</th><th>Recorded By</th><th>Details</th></tr></thead>
+        <tbody>{% for item in report.occurrences %}<tr>
+            <td>{{ item.local_date }}</td><td>{{ item.local_time }}</td><td>{{ item.shift_classification }}</td><td>{{ item.interaction_type }}</td><td>{{ item.item_description }}</td><td>{{ item.outcome }}</td><td>{% if item.physically_thrown %}Yes{% else %}No{% endif %}</td><td>{{ item.status }}</td><td>{{ item.recorded_by_name }}</td><td><a href="{{ url_for('food_fluid_review_detail', entry_id=item.food_fluid_entry_id) }}">Review detail</a>{% if item.additional_details %}<br>{{ item.additional_details }}{% endif %}{% if item.status == "Voided" and item.void_reason %}<br>Void reason: {{ item.void_reason }}{% endif %}</td>
+        </tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<p>No Food &amp; Fluid entries were found for this period.</p>{% endif %}
+</div>
+{% endblock %}
