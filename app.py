@@ -1670,6 +1670,25 @@ def validate_behaviour_review_authority(conn, user_id):
     return user
 
 
+@app.context_processor
+def inject_reports_navigation():
+    """Expose database-backed reporting navigation authorization."""
+    if session.get("user_id") is None:
+        return {"reports_navigation_allowed": False}
+
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.row_factory = sqlite3.Row
+        validate_behaviour_review_authority(conn, session["user_id"])
+        return {"reports_navigation_allowed": True}
+    except (PermissionError, RuntimeError, sqlite3.Error):
+        return {"reports_navigation_allowed": False}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def get_behaviour_review_or_management_actor(conn, user_id):
     """Return an active management or Behaviour Consultant user."""
     return validate_behaviour_review_authority(conn, user_id)
@@ -5694,6 +5713,26 @@ def behaviour_report():
         return "Access denied", 403
     except (LookupError, ValueError) as error:
         return str(error), 400
+    finally:
+        conn.close()
+
+
+@app.route("/reports")
+def reports_index():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn, session["user_id"]
+        )
+        return render_template(
+            "reports.html",
+            viewer_role=actor["role"],
+        )
+    except PermissionError:
+        return "Access denied", 403
     finally:
         conn.close()
 
