@@ -339,6 +339,21 @@ SHIFT_ACTIVITY_EDITABLE_FIELDS = (
     "ls_selected",
     "activity_description",
 )
+ACTIVITY_REPORT_GROUPINGS = ("Daily", "Weekly", "Monthly", "Annual")
+ACTIVITY_REPORT_SHIFTS = ("Day", "Afternoon", "Overnight")
+ACTIVITY_REPORT_UNASSIGNED_LABEL = "Unassigned"
+ACTIVITY_REPORT_INVALID_SHIFT_LABEL = "Unassigned / Invalid Shift"
+ACTIVITY_REPORT_SHIFT_COLORS = {
+    "Day": "#2f6f9f",
+    "Afternoon": "#c47f1b",
+    "Overnight": "#4c1d95",
+    "Unassigned": "#6b7280",
+}
+ACTIVITY_REPORT_CATEGORY_FIELDS = (
+    ("Activity", "a_selected"),
+    ("Tangible", "t_selected"),
+    ("Lifeskill", "ls_selected"),
+)
 
 
 def is_shift_activity_editable(status):
@@ -2858,6 +2873,496 @@ def _behaviour_report_active_client(conn):
     return dict(clients[0])
 
 
+def _activity_report_active_client(conn):
+    """Return the sole active client used by the Activity report surface."""
+    clients = conn.execute("""
+        SELECT client_id, client_name
+        FROM clients
+        WHERE active = 1
+        ORDER BY client_id
+    """).fetchall()
+    if len(clients) != 1:
+        raise LookupError("Activity reports require exactly one active client.")
+    return dict(clients[0])
+
+
+def _activity_report_controls(args, today=None):
+    """Parse and validate Activity report date and grouping controls."""
+    if today is None:
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+
+    default_from = today.replace(day=1)
+    from_value = args.get("from_date") or default_from.isoformat()
+    to_value = args.get("to_date") or today.isoformat()
+    group_by = args.get("group_by") or "Daily"
+
+    try:
+        from_date = date.fromisoformat(from_value)
+        to_date = date.fromisoformat(to_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Report dates must be valid ISO dates.") from error
+
+    if from_date > to_date:
+        raise ValueError("From Date cannot be after To Date.")
+    if group_by not in ACTIVITY_REPORT_GROUPINGS:
+        raise ValueError("Report grouping is invalid.")
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "from_value": from_date.isoformat(),
+        "to_value": to_date.isoformat(),
+        "group_by": group_by,
+    }
+
+
+def _activity_report_period_start(value, group_by):
+    """Return a calendar-date Activity report bucket."""
+    if group_by == "Daily":
+        return value
+    if group_by == "Weekly":
+        return value - timedelta(days=value.weekday())
+    if group_by == "Monthly":
+        return value.replace(day=1)
+    return value.replace(month=1, day=1)
+
+
+def _activity_report_periods(from_date, to_date, group_by):
+    """Return every calendar period intersecting the selected date range."""
+    period = _activity_report_period_start(from_date, group_by)
+    last_period = _activity_report_period_start(to_date, group_by)
+    periods = []
+    while period <= last_period:
+        periods.append(period)
+        if group_by in ("Daily", "Weekly"):
+            period += timedelta(days=1 if group_by == "Daily" else 7)
+        elif group_by == "Monthly":
+            period = (
+                date(period.year + 1, 1, 1)
+                if period.month == 12
+                else date(period.year, period.month + 1, 1)
+            )
+        else:
+            period = date(period.year + 1, 1, 1)
+    return periods
+
+
+def _activity_report_period_label(period, group_by):
+    """Return a compact label for one Activity report period."""
+    month = period.strftime("%b")
+    if group_by == "Daily":
+        return period.strftime("%b %d")
+    if group_by == "Weekly":
+        return f"Week of {month} {period.day:02d}"
+    if group_by == "Monthly":
+        return f"{month} {period.year}"
+    return str(period.year)
+
+
+def _activity_report_duration(start_time, end_time):
+    """Return same-day Activity duration in minutes, or None if invalid."""
+    try:
+        start = datetime.strptime(start_time or "", "%H:%M")
+        end = datetime.strptime(end_time or "", "%H:%M")
+    except (TypeError, ValueError):
+        return None
+    minutes = int((end - start).total_seconds() / 60)
+    return minutes if minutes > 0 else None
+
+
+def _activity_report_occurrences(conn, client_id, from_date, to_date):
+    """Return Activity rows explicitly scoped through their runtime shift."""
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(shift_activities)").fetchall()
+    }
+    status_expression = "sa.status" if "status" in columns else "'Recorded'"
+    rows = conn.execute(f"""
+        SELECT
+            sa.*,
+            {status_expression} AS report_status,
+            s.client_id,
+            s.shift_date,
+            s.shift_type,
+            c.client_name,
+            u.full_name AS recorded_by_name
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        JOIN users u ON u.user_id = sa.recorded_by_user_id
+        WHERE s.client_id = ?
+          AND s.shift_date >= ?
+          AND s.shift_date <= ?
+        ORDER BY s.shift_date, sa.start_time, sa.shift_activity_id
+    """, (client_id, from_date.isoformat(), to_date.isoformat())).fetchall()
+
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        item["status"] = item["report_status"]
+        item["duration_minutes"] = _activity_report_duration(
+            item.get("start_time"), item.get("end_time")
+        )
+        item["shift_classification"] = (
+            item["shift_type"]
+            if item.get("shift_type") in ACTIVITY_REPORT_SHIFTS
+            else ACTIVITY_REPORT_INVALID_SHIFT_LABEL
+        )
+        occurrences.append(item)
+    return occurrences
+
+
+def _activity_reportable_occurrences(occurrences):
+    """Return only finalized Activity rows for formal report metrics."""
+    return [
+        item for item in occurrences
+        if is_shift_activity_finalized(item["status"])
+    ]
+
+
+def _activity_report_summary(occurrences):
+    reportable = _activity_reportable_occurrences(occurrences)
+    durations = [
+        item["duration_minutes"]
+        for item in reportable
+        if item["duration_minutes"] is not None
+    ]
+    shifts = {shift: 0 for shift in ACTIVITY_REPORT_SHIFTS}
+    shifts[ACTIVITY_REPORT_UNASSIGNED_LABEL] = 0
+    categories = {label: 0 for label, _ in ACTIVITY_REPORT_CATEGORY_FIELDS}
+    for item in reportable:
+        shift = item["shift_classification"]
+        if shift not in ACTIVITY_REPORT_SHIFTS:
+            shift = ACTIVITY_REPORT_UNASSIGNED_LABEL
+        shifts[shift] += 1
+        for label, field in ACTIVITY_REPORT_CATEGORY_FIELDS:
+            if item.get(field):
+                categories[label] += 1
+
+    return {
+        "total": len(reportable),
+        "days": len({item["shift_date"] for item in reportable}),
+        "average_duration": (
+            round(sum(durations) / len(durations), 2) if durations else None
+        ),
+        "longest_duration": max(durations) if durations else None,
+        "shifts": shifts,
+        "categories": categories,
+    }
+
+
+def _activity_report_shift_series(occurrences, group_by, periods):
+    grouped = {}
+    for item in _activity_reportable_occurrences(occurrences):
+        period = _activity_report_period_start(
+            date.fromisoformat(item["shift_date"]), group_by
+        )
+        counts = grouped.setdefault(
+            period, {shift: 0 for shift in ACTIVITY_REPORT_SHIFTS}
+        )
+        shift = item["shift_classification"]
+        if shift not in ACTIVITY_REPORT_SHIFTS:
+            shift = ACTIVITY_REPORT_UNASSIGNED_LABEL
+        counts[shift] = counts.get(shift, 0) + 1
+
+    return [
+        {
+            "period": period.isoformat(),
+            "count": sum(grouped.get(period, {}).values()),
+            **{
+                f"{shift.lower()}_count": grouped.get(period, {}).get(shift, 0)
+                for shift in ACTIVITY_REPORT_SHIFTS
+            },
+            "unassigned_count": grouped.get(period, {}).get(
+                ACTIVITY_REPORT_UNASSIGNED_LABEL, 0
+            ),
+        }
+        for period in periods
+    ]
+
+
+def _activity_report_category_series(occurrences, group_by, periods):
+    """Return independent, non-stacked category series."""
+    grouped = {}
+    for item in _activity_reportable_occurrences(occurrences):
+        period = _activity_report_period_start(
+            date.fromisoformat(item["shift_date"]), group_by
+        )
+        counts = grouped.setdefault(
+            period,
+            {label: 0 for label, _ in ACTIVITY_REPORT_CATEGORY_FIELDS},
+        )
+        for label, field in ACTIVITY_REPORT_CATEGORY_FIELDS:
+            if item.get(field):
+                counts[label] += 1
+
+    return [
+        {
+            "period": period.isoformat(),
+            "counts": {
+                label: grouped.get(period, {}).get(label, 0)
+                for label, _ in ACTIVITY_REPORT_CATEGORY_FIELDS
+            },
+        }
+        for period in periods
+    ]
+
+
+def _activity_report_duration_series(occurrences, group_by, periods):
+    grouped = {}
+    for item in _activity_reportable_occurrences(occurrences):
+        duration = item["duration_minutes"]
+        if duration is None:
+            continue
+        period = _activity_report_period_start(
+            date.fromisoformat(item["shift_date"]), group_by
+        )
+        grouped.setdefault(period, []).append(duration)
+    return [
+        {
+            "period": period.isoformat(),
+            "average": (
+                round(sum(grouped[period]) / len(grouped[period]), 2)
+                if period in grouped else None
+            ),
+        }
+        for period in periods
+    ]
+
+
+def _activity_report_chart_dimensions(period_count):
+    chart_width = max(960, 92 + (period_count * 72))
+    chart_height = 340
+    plot_left = 64
+    plot_top = 24
+    plot_width = chart_width - plot_left - 28
+    plot_height = 190
+    return chart_width, chart_height, plot_left, plot_top, plot_width, plot_height
+
+
+def _activity_report_stacked_chart(series, group_by):
+    dimensions = _activity_report_chart_dimensions(len(series))
+    chart_width, chart_height, plot_left, plot_top, plot_width, plot_height = dimensions
+    maximum = max((item["count"] for item in series), default=0)
+    scale = maximum or 1
+    slot = plot_width / max(len(series), 1)
+    bar_width = max(min(slot * 0.58, 52), 6)
+    fields = [(shift, f"{shift.lower()}_count") for shift in ACTIVITY_REPORT_SHIFTS]
+    if any(item.get("unassigned_count", 0) for item in series):
+        fields.append((ACTIVITY_REPORT_UNASSIGNED_LABEL, "unassigned_count"))
+    points = []
+    columns = []
+    for index, item in enumerate(series):
+        label_x = plot_left + index * slot + slot / 2
+        points.append({
+            "label": _activity_report_period_label(
+                date.fromisoformat(item["period"]), group_by
+            ),
+            "label_x": round(label_x, 2),
+        })
+        x = plot_left + index * slot + (slot - bar_width) / 2
+        cumulative = 0
+        segments = []
+        for label, field in fields:
+            value = item.get(field, 0)
+            height = plot_height * value / scale
+            segments.append({
+                "label": label,
+                "value": value,
+                "x": round(x, 2),
+                "y": round(plot_top + plot_height - cumulative - height, 2),
+                "width": round(bar_width, 2),
+                "height": round(height, 2),
+                "color": ACTIVITY_REPORT_SHIFT_COLORS[
+                    "Unassigned" if label == ACTIVITY_REPORT_UNASSIGNED_LABEL else label
+                ],
+            })
+            cumulative += height
+        columns.append({
+            "period": item["period"],
+            "total": item["count"],
+            "total_y": round(plot_top + plot_height - cumulative - 6, 2),
+            "segments": segments,
+        })
+    return {
+        "id": "activity-occurrence-chart",
+        "title": "Activities Over Time",
+        "description": "Finalized Activities by calendar report period and actual shift.",
+        "y_axis_label": "Activities",
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "points": points,
+        "columns": columns,
+        "stacked": True,
+        "legend": [
+            {"label": label, "color": ACTIVITY_REPORT_SHIFT_COLORS[
+                "Unassigned" if label == ACTIVITY_REPORT_UNASSIGNED_LABEL else label
+            ]}
+            for label, _ in fields
+        ],
+        "has_values": bool(series),
+    }
+
+
+def _activity_report_category_chart(series, group_by):
+    dimensions = _activity_report_chart_dimensions(len(series))
+    chart_width, chart_height, plot_left, plot_top, plot_width, plot_height = dimensions
+    maximum = max(
+        (value for item in series for value in item["counts"].values()),
+        default=0,
+    )
+    scale = maximum or 1
+    slot = plot_width / max(len(series), 1)
+    bar_width = max(min(slot * 0.2, 24), 6)
+    bars = []
+    points = []
+    colors = ("#2f6f9f", "#c47f1b", "#0f766e")
+    for index, item in enumerate(series):
+        center = plot_left + index * slot + slot / 2
+        points.append({
+            "label": _activity_report_period_label(
+                date.fromisoformat(item["period"]), group_by
+            ),
+            "label_x": round(center, 2),
+        })
+        for category_index, (label, _) in enumerate(ACTIVITY_REPORT_CATEGORY_FIELDS):
+            value = item["counts"][label]
+            x = center + (category_index - 1) * (bar_width + 4) - bar_width / 2
+            height = plot_height * value / scale
+            bars.append({
+                "label": label,
+                "period": item["period"],
+                "value": value,
+                "x": round(x, 2),
+                "y": round(plot_top + plot_height - height, 2),
+                "width": round(bar_width, 2),
+                "height": round(height, 2),
+                "color": colors[category_index],
+            })
+    return {
+        "id": "activity-category-chart",
+        "title": "Activity Categories Over Time",
+        "description": "Independent finalized Activity, Tangible, and Lifeskill counts by report period.",
+        "y_axis_label": "Category entries",
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "points": points,
+        "bars": bars,
+        "legend": [
+            {"label": label, "color": colors[index]}
+            for index, (label, _) in enumerate(ACTIVITY_REPORT_CATEGORY_FIELDS)
+        ],
+        "has_values": bool(series),
+    }
+
+
+def _activity_report_value_chart(series, value_key, chart_id, title, y_axis_label, group_by):
+    dimensions = _activity_report_chart_dimensions(len(series))
+    chart_width, chart_height, plot_left, plot_top, plot_width, plot_height = dimensions
+    values = [item[value_key] for item in series if item.get(value_key) is not None]
+    maximum = max(values, default=0)
+    scale = maximum or 1
+    slot = plot_width / max(len(series), 1)
+    bar_width = max(min(slot * 0.58, 52), 6)
+    points = []
+    bars = []
+    for index, item in enumerate(series):
+        center = plot_left + index * slot + slot / 2
+        value = item.get(value_key)
+        points.append({
+            "label": _activity_report_period_label(
+                date.fromisoformat(item["period"]), group_by
+            ),
+            "label_x": round(center, 2),
+            "value": value,
+        })
+        if value is None:
+            continue
+        height = plot_height * value / scale
+        bars.append({
+            "period": item["period"],
+            "value": value,
+            "x": round(center - bar_width / 2, 2),
+            "y": round(plot_top + plot_height - height, 2),
+            "width": round(bar_width, 2),
+            "height": round(height, 2),
+            "label_x": round(center, 2),
+        })
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": "Average derived duration for finalized Activities by report period.",
+        "y_axis_label": y_axis_label,
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "points": points,
+        "bars": bars,
+        "has_values": bool(values),
+    }
+
+
+def _activity_report_context(conn, client_id, from_date, to_date, group_by):
+    occurrences = _activity_report_occurrences(
+        conn, client_id, from_date, to_date
+    )
+    periods = _activity_report_periods(from_date, to_date, group_by)
+    shift_series = _activity_report_shift_series(occurrences, group_by, periods)
+    category_series = _activity_report_category_series(
+        occurrences, group_by, periods
+    )
+    duration_series = _activity_report_duration_series(
+        occurrences, group_by, periods
+    )
+    trend = [
+        {
+            "period": shift_item["period"],
+            "total": shift_item["count"],
+            "categories": category_item["counts"],
+            "average_duration": duration_item["average"],
+        }
+        for shift_item, category_item, duration_item in zip(
+            shift_series, category_series, duration_series
+        )
+    ]
+    return {
+        "summary": _activity_report_summary(occurrences),
+        "shift_series": shift_series,
+        "category_series": category_series,
+        "duration_series": duration_series,
+        "trend": trend,
+        "occurrence_chart": _activity_report_stacked_chart(
+            shift_series, group_by
+        ),
+        "category_chart": _activity_report_category_chart(
+            category_series, group_by
+        ),
+        "duration_chart": _activity_report_value_chart(
+            duration_series,
+            "average",
+            "activity-duration-chart",
+            "Average Activity Duration Over Time",
+            "Minutes",
+            group_by,
+        ),
+        "occurrences": occurrences,
+    }
+
+
 def _behaviour_report_controls(args, today=None):
     """Parse and validate report date and grouping controls."""
     if today is None:
@@ -5182,6 +5687,41 @@ def behaviour_report():
             client=client,
             controls=controls,
             groupings=BEHAVIOUR_REPORT_GROUPINGS,
+            report=report,
+            viewer_role=actor["role"],
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except (LookupError, ValueError) as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
+
+@app.route("/reports/activities")
+def activity_report():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn, session["user_id"]
+        )
+        client = _activity_report_active_client(conn)
+        controls = _activity_report_controls(request.args)
+        report = _activity_report_context(
+            conn,
+            client["client_id"],
+            controls["from_date"],
+            controls["to_date"],
+            controls["group_by"],
+        )
+        return render_template(
+            "activity_report.html",
+            client=client,
+            controls=controls,
+            groupings=ACTIVITY_REPORT_GROUPINGS,
             report=report,
             viewer_role=actor["role"],
         )
