@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% macro chart_legend(chart) -%}
+{% if chart.legend %}
+<ul class="activity-report-chart-legend" aria-label="Chart legend">
+    {% for item in chart.legend %}
+    <li><span class="activity-report-chart-swatch" style="background-color: {{ item.color }};"></span>{{ item.label }}</li>
+    {% endfor %}
+</ul>
+{% endif %}
+{%- endmacro %}
+
+{% macro report_chart(chart, empty_message) -%}
+<figure class="activity-report-chart">
+    {% if chart.has_values %}
+    <div class="activity-report-chart-scroll">
+        {{ chart_legend(chart) }}
+        <svg class="activity-report-chart-svg" width="{{ chart.width }}" height="{{ chart.height }}"
+             viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img"
+             aria-labelledby="{{ chart.id }}-title {{ chart.id }}-description">
+            <title id="{{ chart.id }}-title">{{ chart.title }}</title>
+            <desc id="{{ chart.id }}-description">{{ chart.description }}</desc>
+            <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top + chart.plot_height }}"
+                  x2="{{ chart.plot_left + chart.plot_width }}" y2="{{ chart.plot_top + chart.plot_height }}" stroke="currentColor" />
+            <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top }}"
+                  x2="{{ chart.plot_left }}" y2="{{ chart.plot_top + chart.plot_height }}" stroke="currentColor" />
+            <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + 5 }}" text-anchor="end">{{ chart.maximum }}</text>
+            <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + chart.plot_height + 5 }}" text-anchor="end">0</text>
+            <text x="16" y="{{ chart.plot_top + (chart.plot_height / 2) }}" text-anchor="middle" transform="rotate(-90 16 {{ chart.plot_top + (chart.plot_height / 2) }})">{{ chart.y_axis_label }}</text>
+            {% for point in chart.points %}
+            <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height + 18 }}" text-anchor="end" transform="rotate(-45 {{ point.label_x }} {{ chart.plot_top + chart.plot_height + 18 }})">{{ point.label }}</text>
+            {% endfor %}
+            {% if chart.stacked %}
+                {% for column in chart.columns %}
+                    {% for segment in column.segments %}
+                    <rect x="{{ segment.x }}" y="{{ segment.y }}" width="{{ segment.width }}" height="{{ segment.height }}" fill="{{ segment.color }}" data-chart="{{ chart.id }}" data-period="{{ column.period }}" data-shift="{{ segment.label }}" data-value="{{ segment.value }}"><title>{{ column.period }} {{ segment.label }}: {{ segment.value }}</title></rect>
+                    {% endfor %}
+                    <text x="{{ column.segments[0].x + (column.segments[0].width / 2) }}" y="{{ column.total_y }}" text-anchor="middle" data-chart="{{ chart.id }}" data-period="{{ column.period }}" data-total="{{ column.total }}">{{ column.total }}</text>
+                {% endfor %}
+            {% else %}
+                {% for point in chart.points if point.value is defined and point.value is none %}
+                <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height - 4 }}" text-anchor="middle">&mdash;</text>
+                {% endfor %}
+                {% for bar in chart.bars %}
+                <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" fill="{{ bar.color or '#2f6f9f' }}" data-chart="{{ chart.id }}" data-period="{{ bar.period }}" data-category="{{ bar.label or '' }}" data-value="{{ bar.value }}"><title>{{ bar.period }} {{ bar.label or '' }}: {{ bar.value }}</title></rect>
+                <text x="{{ bar.label_x }}" y="{{ bar.y - 4 }}" text-anchor="middle">{{ bar.value }}</text>
+                {% endfor %}
+            {% endif %}
+        </svg>
+    </div>
+    {% else %}<p role="status">{{ empty_message }}</p>{% endif %}
+</figure>
+{%- endmacro %}
+
+{% block content %}
+<style>
+    .activity-report-chart { margin: 0 0 1.5rem; max-width: 100%; }
+    .activity-report-chart-scroll { max-width: 100%; overflow-x: auto; padding-bottom: .35rem; }
+    .activity-report-chart-legend { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; list-style: none; margin: 0 0 .5rem; padding: 0; }
+    .activity-report-chart-legend li { align-items: center; display: flex; gap: .35rem; }
+    .activity-report-chart-swatch { border: 1px solid currentColor; display: inline-block; height: .8rem; width: .8rem; }
+    .activity-report-chart-svg { display: block; height: auto; min-height: 220px; overflow: visible; width: auto; }
+    .activity-report-summary-grid, .activity-report-breakdown { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 1.5rem; }
+    .activity-report-summary-card, .activity-report-breakdown > div { background: #f5f7fa; border: 1px solid #d5dde5; border-radius: 6px; min-width: 0; padding: 12px 14px; }
+    .activity-report-summary-card { border-top: 4px solid #004b87; padding: 14px 16px; }
+    .activity-report-summary-card dt, .activity-report-breakdown dt { color: #334155; font-size: .9rem; font-weight: bold; line-height: 1.3; }
+    .activity-report-summary-card dd, .activity-report-breakdown dd { color: #004b87; font-size: 1.45rem; font-weight: bold; margin: .35rem 0 0; }
+    .activity-report-summary-card dd { font-size: clamp(1.6rem, 3vw, 2.35rem); }
+    .activity-report-section-heading { border-top: 1px solid #d5dde5; margin: 2rem 0 .75rem; padding-top: 1.25rem; }
+    .activity-report-note { color: #475569; margin-top: -.35rem; }
+    .activity-report-table-scroll { max-width: 100%; overflow-x: auto; }
+    .activity-report-detail-table { min-width: 1050px; }
+    @media (max-width: 800px) { .activity-report-summary-grid, .activity-report-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 480px) { .activity-report-summary-grid, .activity-report-breakdown { grid-template-columns: 1fr; } }
+</style>
+
+<div class="card">
+    <h2>Activities Report</h2>
+    <p><strong>Client:</strong> {{ client.client_name }}</p>
+
+    <form method="get" class="report-controls">
+        <div class="form-row">
+            <div class="form-field"><label for="from_date">From Date</label><input id="from_date" type="date" name="from_date" value="{{ controls.from_value }}" required></div>
+            <div class="form-field"><label for="to_date">To Date</label><input id="to_date" type="date" name="to_date" value="{{ controls.to_value }}" required></div>
+            <div class="form-field"><label for="group_by">Group By</label><select id="group_by" name="group_by">{% for grouping in groupings %}<option value="{{ grouping }}"{% if grouping == controls.group_by %} selected{% endif %}>{{ grouping }}</option>{% endfor %}</select></div>
+        </div>
+        <button type="submit">Run Report</button>
+    </form>
+
+    <h3 class="activity-report-section-heading">Summary</h3>
+    <dl class="activity-report-summary-grid">
+        <div class="activity-report-summary-card"><dt>Total Activities</dt><dd>{{ report.summary.total }}</dd></div>
+        <div class="activity-report-summary-card"><dt>Days With Activities</dt><dd>{{ report.summary.days }}</dd></div>
+        <div class="activity-report-summary-card"><dt>Average Activity Duration</dt><dd>{{ report.summary.average_duration if report.summary.average_duration is not none else "&mdash;"|safe }}</dd></div>
+        <div class="activity-report-summary-card"><dt>Longest Activity Duration</dt><dd>{{ report.summary.longest_duration if report.summary.longest_duration is not none else "&mdash;"|safe }}</dd></div>
+    </dl>
+
+    <h3 class="activity-report-section-heading">Actual Shift Breakdown</h3>
+    <dl class="activity-report-breakdown">
+        {% for shift in ("Day", "Afternoon", "Overnight") %}<div><dt>{{ shift }}</dt><dd>{{ report.summary.shifts[shift] }}</dd></div>{% endfor %}
+        {% if report.summary.shifts.Unassigned %}<div><dt>Unassigned</dt><dd>{{ report.summary.shifts.Unassigned }}</dd></div>{% endif %}
+    </dl>
+
+    <h3 class="activity-report-section-heading">Activity Category Breakdown</h3>
+    <dl class="activity-report-breakdown">
+        {% for category in ("Activity", "Tangible", "Lifeskill") %}<div><dt>{{ category }}</dt><dd>{{ report.summary.categories[category] }}</dd></div>{% endfor %}
+    </dl>
+    <p class="activity-report-note">An Activity entry may include more than one category, so category counts may exceed the total number of Activity records.</p>
+
+    <h3 class="activity-report-section-heading">Activities Over Time</h3>
+    {{ report_chart(report.occurrence_chart, "No finalized Activities are available for this chart.") }}
+
+    <h3 class="activity-report-section-heading">Activity Categories Over Time</h3>
+    {{ report_chart(report.category_chart, "No finalized Activity categories are available for this chart.") }}
+    <p class="activity-report-note">Category series are independent; the three category counts are not parts of one total.</p>
+
+    <h3 class="activity-report-section-heading">Average Activity Duration Over Time</h3>
+    {{ report_chart(report.duration_chart, "No finalized Activity durations are available for this chart.") }}
+
+    <details class="activity-report-trend-data">
+        <summary>View {{ controls.group_by|lower }} trend data</summary>
+        <div class="activity-report-table-scroll">
+            <table>
+                <thead><tr><th>{{ controls.group_by }} starting</th><th>Finalized Activities</th><th>Activity</th><th>Tangible</th><th>Lifeskill</th><th>Average duration</th></tr></thead>
+                <tbody>{% for period in report.trend %}<tr><th scope="row">{{ period.period }}</th><td>{{ period.total }}</td><td>{{ period.categories.Activity }}</td><td>{{ period.categories.Tangible }}</td><td>{{ period.categories.Lifeskill }}</td><td>{{ period.average_duration if period.average_duration is not none else "&mdash;"|safe }}</td></tr>{% endfor %}</tbody>
+            </table>
+        </div>
+    </details>
+
+    <h3 class="activity-report-section-heading">Activities</h3>
+    {% if report.occurrences %}<div class="activity-report-table-scroll"><table class="activity-report-detail-table">
+        <thead><tr><th>Date</th><th>Start</th><th>End</th><th>Duration</th><th>Shift</th><th>Activity</th><th>Tangible</th><th>Lifeskill</th><th>Activity Description</th><th>Status</th><th>Details</th></tr></thead>
+        <tbody>{% for item in report.occurrences %}<tr>
+            <td>{{ item.shift_date }}</td><td>{{ item.start_time }}</td><td>{{ item.end_time or "&mdash;"|safe }}</td><td>{{ item.duration_minutes if item.duration_minutes is not none else "&mdash;"|safe }}</td><td>{{ item.shift_classification }}</td>
+            <td>{% if item.a_selected %}Yes{% else %}No{% endif %}</td><td>{% if item.t_selected %}Yes{% else %}No{% endif %}</td><td>{% if item.ls_selected %}Yes{% else %}No{% endif %}</td>
+            <td>{{ item.activity_description or "&mdash;"|safe }}</td><td>{{ item.status }}</td><td><a href="{{ url_for('activity_review_detail', activity_id=item.shift_activity_id) }}">Review detail</a></td>
+        </tr>{% endfor %}</tbody>
+    </table></div>{% else %}<p>No Activities were found for this period.</p>{% endif %}
+</div>
+{% endblock %}
