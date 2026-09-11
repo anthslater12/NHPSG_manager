@@ -354,6 +354,14 @@ ACTIVITY_REPORT_CATEGORY_FIELDS = (
     ("Tangible", "t_selected"),
     ("Lifeskill", "ls_selected"),
 )
+SLEEP_REPORT_GROUPINGS = ("Daily", "Weekly", "Monthly", "Annual")
+SLEEP_REPORT_EVENT_TYPES = ("fell_asleep", "woke_up")
+SLEEP_REPORT_SHIFTS = ("Day", "Afternoon", "Overnight")
+SLEEP_REPORT_INVALID_SHIFT_LABEL = "Unassigned / Invalid Shift Link"
+SLEEP_REPORT_EVENT_COLORS = {
+    "fell_asleep": "#2f6f9f",
+    "woke_up": "#c47f1b",
+}
 
 
 def is_shift_activity_editable(status):
@@ -3382,6 +3390,356 @@ def _activity_report_context(conn, client_id, from_date, to_date, group_by):
     }
 
 
+def _sleep_report_active_client(conn):
+    """Return the sole active client used by the Sleep report surface."""
+    clients = conn.execute("""
+        SELECT client_id, client_name
+        FROM clients
+        WHERE active = 1
+        ORDER BY client_id
+    """).fetchall()
+    if len(clients) != 1:
+        raise LookupError("Sleep reports require exactly one active client.")
+    return dict(clients[0])
+
+
+def _sleep_report_controls(args, today=None):
+    """Parse and validate Sleep report date and grouping controls."""
+    if today is None:
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+
+    default_from = today.replace(day=1)
+    from_value = args.get("from_date") or default_from.isoformat()
+    to_value = args.get("to_date") or today.isoformat()
+    group_by = args.get("group_by") or "Daily"
+
+    try:
+        from_date = date.fromisoformat(from_value)
+        to_date = date.fromisoformat(to_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Report dates must be valid ISO dates.") from error
+
+    if from_date > to_date:
+        raise ValueError("From Date cannot be after To Date.")
+    if group_by not in SLEEP_REPORT_GROUPINGS:
+        raise ValueError("Report grouping is invalid.")
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "from_value": from_date.isoformat(),
+        "to_value": to_date.isoformat(),
+        "group_by": group_by,
+    }
+
+
+def _sleep_report_utc_bounds(from_date, to_date):
+    """Convert inclusive Vancouver dates to canonical UTC bounds."""
+    start_local = datetime.combine(
+        from_date, datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    end_local = datetime.combine(
+        to_date + timedelta(days=1), datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    return serialize_behaviour_utc(start_local), serialize_behaviour_utc(end_local)
+
+
+def _sleep_report_occurrences(conn, client_id, from_date, to_date):
+    """Return client-scoped Sleep events in the inclusive local date range."""
+    start_utc, end_utc = _sleep_report_utc_bounds(from_date, to_date)
+    rows = conn.execute("""
+        SELECT
+            se.*,
+            c.client_name,
+            u.full_name AS recorder_name,
+            s.shift_type AS linked_shift_type
+        FROM sleep_events se
+        JOIN clients c ON c.client_id = se.client_id
+        JOIN users u ON u.user_id = se.recorded_by_user_id
+        LEFT JOIN shifts s
+          ON s.shift_id = se.shift_id
+         AND s.client_id = se.client_id
+        WHERE se.client_id = ?
+          AND se.event_datetime >= ?
+          AND se.event_datetime < ?
+        ORDER BY se.event_datetime, se.sleep_event_id
+    """, (client_id, start_utc, end_utc)).fetchall()
+
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        local = behaviour_utc_to_vancouver(item["event_datetime"])
+        item["local_date"] = local.date().isoformat()
+        item["local_time"] = local.strftime("%H:%M")
+        item["local_datetime"] = local
+        item["event_type_display"] = (
+            "Fell Asleep"
+            if item["event_type"] == "fell_asleep"
+            else "Woke Up"
+        )
+        item["shift_classification"] = _sleep_report_shift_classification(item)
+        occurrences.append(item)
+    return occurrences
+
+
+def _sleep_report_shift_classification(event):
+    """Return the actual linked shift category for report presentation."""
+    if event.get("linked_shift_type") in SLEEP_REPORT_SHIFTS:
+        return event["linked_shift_type"]
+    return SLEEP_REPORT_INVALID_SHIFT_LABEL
+
+
+def _sleep_report_period_start(value, group_by):
+    """Return the calendar-date Sleep report bucket."""
+    if group_by == "Daily":
+        return value
+    if group_by == "Weekly":
+        return value - timedelta(days=value.weekday())
+    if group_by == "Monthly":
+        return value.replace(day=1)
+    return value.replace(month=1, day=1)
+
+
+def _sleep_report_periods(from_date, to_date, group_by):
+    """Return every calendar period intersecting the selected date range."""
+    period = _sleep_report_period_start(from_date, group_by)
+    last_period = _sleep_report_period_start(to_date, group_by)
+    periods = []
+    while period <= last_period:
+        periods.append(period)
+        if group_by in ("Daily", "Weekly"):
+            period += timedelta(days=1 if group_by == "Daily" else 7)
+        elif group_by == "Monthly":
+            period = (
+                date(period.year + 1, 1, 1)
+                if period.month == 12
+                else date(period.year, period.month + 1, 1)
+            )
+        else:
+            period = date(period.year + 1, 1, 1)
+    return periods
+
+
+def _sleep_report_period_label(period, group_by):
+    """Return a compact, user-facing label for one report period."""
+    month = period.strftime("%b")
+    if group_by == "Daily":
+        return period.strftime("%b %d")
+    if group_by == "Weekly":
+        return f"Week of {month} {period.day:02d}"
+    if group_by == "Monthly":
+        return f"{month} {period.year}"
+    return str(period.year)
+
+
+def _sleep_report_event_series(occurrences, group_by, periods):
+    """Return independent Fell Asleep and Woke Up counts by period."""
+    grouped = {}
+    for event in occurrences:
+        period = _sleep_report_period_start(
+            date.fromisoformat(event["local_date"]), group_by
+        )
+        counts = grouped.setdefault(period, {
+            "fell_asleep": 0,
+            "woke_up": 0,
+        })
+        if event["event_type"] in SLEEP_REPORT_EVENT_TYPES:
+            counts[event["event_type"]] += 1
+
+    return [
+        {
+            "period": period.isoformat(),
+            "fell_asleep_count": grouped.get(period, {}).get(
+                "fell_asleep", 0
+            ),
+            "woke_up_count": grouped.get(period, {}).get("woke_up", 0),
+        }
+        for period in periods
+    ]
+
+
+def _sleep_report_summary(occurrences):
+    """Calculate event-based Sleep report headline metrics."""
+    fell_asleep = sum(
+        event["event_type"] == "fell_asleep" for event in occurrences
+    )
+    woke_up = sum(
+        event["event_type"] == "woke_up" for event in occurrences
+    )
+    shifts = {shift: 0 for shift in SLEEP_REPORT_SHIFTS}
+    shifts[SLEEP_REPORT_INVALID_SHIFT_LABEL] = 0
+    for event in occurrences:
+        shifts[event["shift_classification"]] += 1
+    return {
+        "total": len(occurrences),
+        "fell_asleep": fell_asleep,
+        "woke_up": woke_up,
+        "days": len({event["local_date"] for event in occurrences}),
+        "shifts": shifts,
+    }
+
+
+def _sleep_report_event_chart(series, group_by):
+    """Build server-side grouped-bar geometry for Sleep event counts."""
+    chart_width = max(960, 92 + (len(series) * 72))
+    chart_height = 340
+    plot_left = 64
+    plot_top = 24
+    plot_width = chart_width - plot_left - 28
+    plot_height = 190
+    maximum = max(
+        (max(item["fell_asleep_count"], item["woke_up_count"])
+         for item in series),
+        default=0,
+    )
+    scale = maximum or 1
+    slot = plot_width / max(len(series), 1)
+    bar_width = max(min(slot * 0.25, 28), 6)
+    bars = []
+    points = []
+    for index, item in enumerate(series):
+        center = plot_left + index * slot + slot / 2
+        points.append({
+            "period": item["period"],
+            "label": _sleep_report_period_label(
+                date.fromisoformat(item["period"]), group_by
+            ),
+            "label_x": round(center, 2),
+        })
+        for event_index, event_type in enumerate(SLEEP_REPORT_EVENT_TYPES):
+            value = item[f"{event_type}_count"]
+            x = center + (event_index - 0.5) * (bar_width + 4) - bar_width / 2
+            height = plot_height * value / scale
+            bars.append({
+                "period": item["period"],
+                "event_type": event_type,
+                "label": (
+                    "Fell Asleep"
+                    if event_type == "fell_asleep" else "Woke Up"
+                ),
+                "value": value,
+                "x": round(x, 2),
+                "y": round(plot_top + plot_height - height, 2),
+                "width": round(bar_width, 2),
+                "height": round(height, 2),
+                "label_x": round(x + bar_width / 2, 2),
+                "color": SLEEP_REPORT_EVENT_COLORS[event_type],
+            })
+    return {
+        "id": "sleep-event-chart",
+        "title": "Sleep Events Over Time",
+        "description": (
+            "Recorded Fell Asleep and Woke Up event counts by local report period."
+        ),
+        "y_axis_label": "Events",
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "points": points,
+        "bars": bars,
+        "legend": [
+            {"label": "Fell Asleep", "color": SLEEP_REPORT_EVENT_COLORS["fell_asleep"]},
+            {"label": "Woke Up", "color": SLEEP_REPORT_EVENT_COLORS["woke_up"]},
+        ],
+        "has_values": bool(series),
+    }
+
+
+def _sleep_report_timeline(occurrences, from_date, to_date):
+    """Build an unpaired, local-date/time Sleep/Wake timeline."""
+    dates = []
+    current = from_date
+    while current <= to_date:
+        dates.append(current)
+        current += timedelta(days=1)
+
+    chart_width = max(960, 92 + (len(dates) * 72))
+    chart_height = 580
+    plot_left = 64
+    plot_top = 24
+    plot_width = chart_width - plot_left - 28
+    plot_height = 480
+    slot = plot_width / max(len(dates), 1)
+    date_indexes = {value.isoformat(): index for index, value in enumerate(dates)}
+    positions = {}
+    timeline_events = []
+    for event in occurrences:
+        local = event["local_datetime"]
+        date_key = event["local_date"]
+        index = date_indexes.get(date_key)
+        if index is None:
+            continue
+        hour_value = local.hour + local.minute / 60 + local.second / 3600
+        center = plot_left + index * slot + slot / 2
+        y = plot_top + plot_height * hour_value / 24
+        position_key = (date_key, event["local_time"])
+        offset_index = positions.get(position_key, 0)
+        positions[position_key] = offset_index + 1
+        offset = (offset_index - 0.5) * 12
+        timeline_events.append({
+            "event_id": event["sleep_event_id"],
+            "event_type": event["event_type"],
+            "label": event["event_type_display"],
+            "date": date_key,
+            "time": event["local_time"],
+            "x": round(center + offset, 2),
+            "y": round(y, 2),
+            "color": SLEEP_REPORT_EVENT_COLORS[event["event_type"]],
+        })
+
+    return {
+        "id": "sleep-wake-timeline",
+        "title": "Sleep/Wake Timeline",
+        "description": (
+            "Recorded Sleep events shown by Vancouver-local calendar date and time; "
+            "events are not paired into episodes."
+        ),
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "dates": [
+            {
+                "date": value.isoformat(),
+                "label": value.strftime("%b %d"),
+                "x": round(plot_left + index * slot + slot / 2, 2),
+            }
+            for index, value in enumerate(dates)
+        ],
+        "y_ticks": [
+            {"label": f"{hour:02d}:00", "y": round(plot_top + plot_height * hour / 24, 2)}
+            for hour in (0, 6, 12, 18, 24)
+        ],
+        "events": timeline_events,
+        "legend": [
+            {"label": "Fell Asleep", "color": SLEEP_REPORT_EVENT_COLORS["fell_asleep"]},
+            {"label": "Woke Up", "color": SLEEP_REPORT_EVENT_COLORS["woke_up"]},
+        ],
+        "has_values": bool(timeline_events),
+    }
+
+
+def _sleep_report_context(conn, client_id, from_date, to_date, group_by):
+    occurrences = _sleep_report_occurrences(
+        conn, client_id, from_date, to_date
+    )
+    periods = _sleep_report_periods(from_date, to_date, group_by)
+    series = _sleep_report_event_series(occurrences, group_by, periods)
+    return {
+        "summary": _sleep_report_summary(occurrences),
+        "series": series,
+        "event_chart": _sleep_report_event_chart(series, group_by),
+        "timeline": _sleep_report_timeline(occurrences, from_date, to_date),
+        "occurrences": occurrences,
+    }
+
+
 def _behaviour_report_controls(args, today=None):
     """Parse and validate report date and grouping controls."""
     if today is None:
@@ -5733,6 +6091,41 @@ def reports_index():
         )
     except PermissionError:
         return "Access denied", 403
+    finally:
+        conn.close()
+
+
+@app.route("/reports/sleep")
+def sleep_report():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn, session["user_id"]
+        )
+        client = _sleep_report_active_client(conn)
+        controls = _sleep_report_controls(request.args)
+        report = _sleep_report_context(
+            conn,
+            client["client_id"],
+            controls["from_date"],
+            controls["to_date"],
+            controls["group_by"],
+        )
+        return render_template(
+            "sleep_report.html",
+            client=client,
+            controls=controls,
+            groupings=SLEEP_REPORT_GROUPINGS,
+            report=report,
+            viewer_role=actor["role"],
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except (LookupError, ValueError) as error:
+        return str(error), 400
     finally:
         conn.close()
 
