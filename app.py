@@ -362,6 +362,32 @@ SLEEP_REPORT_EVENT_COLORS = {
     "fell_asleep": "#2f6f9f",
     "woke_up": "#c47f1b",
 }
+FOOD_FLUID_REPORT_GROUPINGS = ("Daily", "Weekly", "Monthly", "Annual")
+FOOD_FLUID_REPORT_SHIFTS = ("Day", "Afternoon", "Overnight")
+FOOD_FLUID_REPORT_INTERACTIONS = ("Offered", "Requested")
+FOOD_FLUID_REPORT_OUTCOMES = (
+    "All consumed",
+    "Partially consumed",
+    "Refused",
+    "Item not available",
+)
+FOOD_FLUID_REPORT_INVALID_SHIFT_LABEL = "Unassigned / Invalid Shift Link"
+FOOD_FLUID_REPORT_SHIFT_COLORS = {
+    "Day": "#2f6f9f",
+    "Afternoon": "#c47f1b",
+    "Overnight": "#4c1d95",
+    "Unassigned": "#6b7280",
+}
+FOOD_FLUID_REPORT_INTERACTION_COLORS = {
+    "Offered": "#2f6f9f",
+    "Requested": "#0f766e",
+}
+FOOD_FLUID_REPORT_OUTCOME_COLORS = {
+    "All consumed": "#2f6f9f",
+    "Partially consumed": "#c47f1b",
+    "Refused": "#b42318",
+    "Item not available": "#6b7280",
+}
 
 
 def is_shift_activity_editable(status):
@@ -3390,6 +3416,467 @@ def _activity_report_context(conn, client_id, from_date, to_date, group_by):
     }
 
 
+def _food_fluid_report_active_client(conn):
+    """Return the sole active client used by the Food & Fluid report."""
+    clients = conn.execute("""
+        SELECT client_id, client_name
+        FROM clients
+        WHERE active = 1
+        ORDER BY client_id
+    """).fetchall()
+    if len(clients) != 1:
+        raise LookupError(
+            "Food & Fluid reports require exactly one active client."
+        )
+    return dict(clients[0])
+
+
+def _food_fluid_report_controls(args, today=None):
+    """Parse and validate Food & Fluid report controls."""
+    if today is None:
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+
+    default_from = today.replace(day=1)
+    from_value = args.get("from_date") or default_from.isoformat()
+    to_value = args.get("to_date") or today.isoformat()
+    group_by = args.get("group_by") or "Daily"
+
+    try:
+        from_date = date.fromisoformat(from_value)
+        to_date = date.fromisoformat(to_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Report dates must be valid ISO dates.") from error
+
+    if from_date > to_date:
+        raise ValueError("From Date cannot be after To Date.")
+    if group_by not in FOOD_FLUID_REPORT_GROUPINGS:
+        raise ValueError("Report grouping is invalid.")
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "from_value": from_date.isoformat(),
+        "to_value": to_date.isoformat(),
+        "group_by": group_by,
+    }
+
+
+def _food_fluid_report_utc_bounds(from_date, to_date):
+    """Convert inclusive Vancouver calendar dates to UTC bounds."""
+    start_local = datetime.combine(
+        from_date, datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    end_local = datetime.combine(
+        to_date + timedelta(days=1), datetime_time.min, VANCOUVER_TIMEZONE
+    )
+    return serialize_behaviour_utc(start_local), serialize_behaviour_utc(end_local)
+
+
+def _food_fluid_report_occurrences(conn, client_id, from_date, to_date):
+    """Return all selected-client entries, including Voided audit rows."""
+    start_utc, end_utc = _food_fluid_report_utc_bounds(from_date, to_date)
+    rows = conn.execute("""
+        SELECT
+            ffe.*,
+            c.client_name,
+            s.shift_type AS linked_shift_type,
+            recorded_by.full_name AS recorded_by_name,
+            voided_by.full_name AS voided_by_name
+        FROM food_fluid_entries AS ffe
+        JOIN clients AS c
+          ON c.client_id = ffe.client_id
+        JOIN users AS recorded_by
+          ON recorded_by.user_id = ffe.recorded_by_user_id
+        LEFT JOIN shifts AS s
+          ON s.shift_id = ffe.shift_id
+         AND s.client_id = ffe.client_id
+        LEFT JOIN users AS voided_by
+          ON voided_by.user_id = ffe.voided_by_user_id
+        WHERE ffe.client_id = ?
+          AND ffe.event_at_utc >= ?
+          AND ffe.event_at_utc < ?
+        ORDER BY ffe.event_at_utc, ffe.food_fluid_entry_id
+    """, (client_id, start_utc, end_utc)).fetchall()
+
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        local = behaviour_utc_to_vancouver(item["event_at_utc"])
+        item["local_date"] = local.date().isoformat()
+        item["local_time"] = local.strftime("%H:%M")
+        item["shift_classification"] = (
+            item["linked_shift_type"]
+            if item.get("linked_shift_type") in FOOD_FLUID_REPORT_SHIFTS
+            else FOOD_FLUID_REPORT_INVALID_SHIFT_LABEL
+        )
+        occurrences.append(item)
+    return occurrences
+
+
+def _food_fluid_reportable_occurrences(occurrences):
+    """Return only Recorded entries for formal report statistics."""
+    return [
+        item for item in occurrences
+        if item.get("status") == "Recorded"
+    ]
+
+
+def _food_fluid_report_period_start(value, group_by):
+    """Return the calendar-date Food & Fluid report bucket."""
+    if group_by == "Daily":
+        return value
+    if group_by == "Weekly":
+        return value - timedelta(days=value.weekday())
+    if group_by == "Monthly":
+        return value.replace(day=1)
+    return value.replace(month=1, day=1)
+
+
+def _food_fluid_report_periods(from_date, to_date, group_by):
+    """Return every calendar period intersecting the selected range."""
+    period = _food_fluid_report_period_start(from_date, group_by)
+    last_period = _food_fluid_report_period_start(to_date, group_by)
+    periods = []
+    while period <= last_period:
+        periods.append(period)
+        if group_by in ("Daily", "Weekly"):
+            period += timedelta(days=1 if group_by == "Daily" else 7)
+        elif group_by == "Monthly":
+            period = (
+                date(period.year + 1, 1, 1)
+                if period.month == 12
+                else date(period.year, period.month + 1, 1)
+            )
+        else:
+            period = date(period.year + 1, 1, 1)
+    return periods
+
+
+def _food_fluid_report_period_label(period, group_by):
+    """Return a compact user-facing label for a report period."""
+    month = period.strftime("%b")
+    if group_by == "Daily":
+        return period.strftime("%b %d")
+    if group_by == "Weekly":
+        return f"Week of {month} {period.day:02d}"
+    if group_by == "Monthly":
+        return f"{month} {period.year}"
+    return str(period.year)
+
+
+def _food_fluid_report_summary(occurrences):
+    reportable = _food_fluid_reportable_occurrences(occurrences)
+    shifts = {shift: 0 for shift in FOOD_FLUID_REPORT_SHIFTS}
+    shifts[FOOD_FLUID_REPORT_INVALID_SHIFT_LABEL] = 0
+    interactions = {value: 0 for value in FOOD_FLUID_REPORT_INTERACTIONS}
+    outcomes = {value: 0 for value in FOOD_FLUID_REPORT_OUTCOMES}
+    physically_thrown = {"Yes": 0, "No": 0}
+
+    for item in reportable:
+        shift = item["shift_classification"]
+        shifts[shift] += 1
+        interactions[item["interaction_type"]] += 1
+        outcomes[item["outcome"]] += 1
+        physically_thrown["Yes" if item["physically_thrown"] else "No"] += 1
+
+    return {
+        "total_recorded": len(reportable),
+        "days": len({item["local_date"] for item in reportable}),
+        "refused": sum(item["outcome"] == "Refused" for item in reportable),
+        "physically_thrown": sum(
+            item["physically_thrown"] for item in reportable
+        ),
+        "voided": sum(item.get("status") == "Voided" for item in occurrences),
+        "shifts": shifts,
+        "interactions": interactions,
+        "outcomes": outcomes,
+        "physically_thrown_breakdown": physically_thrown,
+    }
+
+
+def _food_fluid_report_shift_series(occurrences, group_by, periods):
+    grouped = {}
+    for item in _food_fluid_reportable_occurrences(occurrences):
+        period = _food_fluid_report_period_start(
+            date.fromisoformat(item["local_date"]), group_by
+        )
+        counts = grouped.setdefault(
+            period,
+            {shift: 0 for shift in FOOD_FLUID_REPORT_SHIFTS}
+            | {FOOD_FLUID_REPORT_INVALID_SHIFT_LABEL: 0},
+        )
+        counts[item["shift_classification"]] += 1
+
+    return [
+        {
+            "period": period.isoformat(),
+            "count": sum(grouped.get(period, {}).values()),
+            **{
+                f"{shift.lower()}_count": grouped.get(period, {}).get(shift, 0)
+                for shift in FOOD_FLUID_REPORT_SHIFTS
+            },
+            "unassigned_count": grouped.get(period, {}).get(
+                FOOD_FLUID_REPORT_INVALID_SHIFT_LABEL, 0
+            ),
+        }
+        for period in periods
+    ]
+
+
+def _food_fluid_report_count_series(
+    occurrences, group_by, periods, field_name, values
+):
+    grouped = {}
+    for item in _food_fluid_reportable_occurrences(occurrences):
+        period = _food_fluid_report_period_start(
+            date.fromisoformat(item["local_date"]), group_by
+        )
+        counts = grouped.setdefault(period, {value: 0 for value in values})
+        value = item[field_name]
+        if value in counts:
+            counts[value] += 1
+
+    return [
+        {
+            "period": period.isoformat(),
+            "counts": {
+                value: grouped.get(period, {}).get(value, 0)
+                for value in values
+            },
+        }
+        for period in periods
+    ]
+
+
+def _food_fluid_report_chart_dimensions(period_count):
+    chart_width = max(960, 92 + (period_count * 72))
+    chart_height = 340
+    plot_left = 64
+    plot_top = 24
+    plot_width = chart_width - plot_left - 28
+    plot_height = 190
+    return chart_width, chart_height, plot_left, plot_top, plot_width, plot_height
+
+
+def _food_fluid_report_stacked_chart(
+    series, group_by, chart_id, title, description, y_axis_label, fields
+):
+    dimensions = _food_fluid_report_chart_dimensions(len(series))
+    chart_width, chart_height, plot_left, plot_top, plot_width, plot_height = dimensions
+    maximum = max((item["count"] for item in series), default=0)
+    scale = maximum or 1
+    slot = plot_width / max(len(series), 1)
+    bar_width = max(min(slot * 0.58, 52), 6)
+    points = []
+    columns = []
+    for index, item in enumerate(series):
+        label_x = plot_left + index * slot + slot / 2
+        points.append({
+            "label": _food_fluid_report_period_label(
+                date.fromisoformat(item["period"]), group_by
+            ),
+            "label_x": round(label_x, 2),
+        })
+        x = plot_left + index * slot + (slot - bar_width) / 2
+        cumulative = 0
+        segments = []
+        for label, field, color_key in fields:
+            value = item.get(field, 0)
+            height = plot_height * value / scale
+            segments.append({
+                "label": label,
+                "value": value,
+                "x": round(x, 2),
+                "y": round(plot_top + plot_height - cumulative - height, 2),
+                "width": round(bar_width, 2),
+                "height": round(height, 2),
+                "color": FOOD_FLUID_REPORT_SHIFT_COLORS[color_key]
+                if color_key in FOOD_FLUID_REPORT_SHIFT_COLORS
+                else FOOD_FLUID_REPORT_OUTCOME_COLORS[color_key],
+            })
+            cumulative += height
+        columns.append({
+            "period": item["period"],
+            "total": item["count"],
+            "total_y": round(plot_top + plot_height - cumulative - 6, 2),
+            "segments": segments,
+        })
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "y_axis_label": y_axis_label,
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "points": points,
+        "columns": columns,
+        "stacked": True,
+        "legend": [
+            {
+                "label": label,
+                "color": (
+                    FOOD_FLUID_REPORT_SHIFT_COLORS[color_key]
+                    if color_key in FOOD_FLUID_REPORT_SHIFT_COLORS
+                    else FOOD_FLUID_REPORT_OUTCOME_COLORS[color_key]
+                ),
+            }
+            for label, _, color_key in fields
+        ],
+        "has_values": bool(series),
+    }
+
+
+def _food_fluid_report_grouped_chart(
+    series, group_by, chart_id, title, description, y_axis_label, values, colors
+):
+    dimensions = _food_fluid_report_chart_dimensions(len(series))
+    chart_width, chart_height, plot_left, plot_top, plot_width, plot_height = dimensions
+    maximum = max(
+        (item["counts"].get(value, 0) for item in series for value in values),
+        default=0,
+    )
+    scale = maximum or 1
+    slot = plot_width / max(len(series), 1)
+    bar_width = max(min(slot * (0.72 / max(len(values), 1)), 28), 6)
+    bars = []
+    points = []
+    for index, item in enumerate(series):
+        center = plot_left + index * slot + slot / 2
+        points.append({
+            "label": _food_fluid_report_period_label(
+                date.fromisoformat(item["period"]), group_by
+            ),
+            "label_x": round(center, 2),
+        })
+        for value_index, value in enumerate(values):
+            number = item["counts"].get(value, 0)
+            x = center + (value_index - (len(values) - 1) / 2) * (
+                bar_width + 4
+            ) - bar_width / 2
+            height = plot_height * number / scale
+            bars.append({
+                "label": value,
+                "period": item["period"],
+                "value": number,
+                "x": round(x, 2),
+                "y": round(plot_top + plot_height - height, 2),
+                "width": round(bar_width, 2),
+                "height": round(height, 2),
+                "label_x": round(x + bar_width / 2, 2),
+                "color": colors[value],
+            })
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "y_axis_label": y_axis_label,
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "points": points,
+        "bars": bars,
+        "stacked": False,
+        "legend": [
+            {"label": value, "color": colors[value]} for value in values
+        ],
+        "has_values": bool(series),
+    }
+
+
+def _food_fluid_report_context(conn, client_id, from_date, to_date, group_by):
+    occurrences = _food_fluid_report_occurrences(
+        conn, client_id, from_date, to_date
+    )
+    periods = _food_fluid_report_periods(from_date, to_date, group_by)
+    shift_series = _food_fluid_report_shift_series(
+        occurrences, group_by, periods
+    )
+    interaction_series = _food_fluid_report_count_series(
+        occurrences, group_by, periods,
+        "interaction_type", FOOD_FLUID_REPORT_INTERACTIONS
+    )
+    outcome_series = _food_fluid_report_count_series(
+        occurrences, group_by, periods,
+        "outcome", FOOD_FLUID_REPORT_OUTCOMES
+    )
+    trend = []
+    for shift_item, interaction_item, outcome_item in zip(
+        shift_series, interaction_series, outcome_series
+    ):
+        trend.append({
+            "period": shift_item["period"],
+            "total_recorded": shift_item["count"],
+            "shifts": {
+                "Day": shift_item["day_count"],
+                "Afternoon": shift_item["afternoon_count"],
+                "Overnight": shift_item["overnight_count"],
+                "Unassigned / Invalid Shift Link": shift_item[
+                    "unassigned_count"
+                ],
+            },
+            "interactions": interaction_item["counts"],
+            "outcomes": outcome_item["counts"],
+        })
+
+    shift_fields = [
+        (shift, f"{shift.lower()}_count", shift)
+        for shift in FOOD_FLUID_REPORT_SHIFTS
+    ]
+    if any(item["unassigned_count"] for item in shift_series):
+        shift_fields.append((
+            FOOD_FLUID_REPORT_INVALID_SHIFT_LABEL,
+            "unassigned_count",
+            "Unassigned",
+        ))
+
+    return {
+        "summary": _food_fluid_report_summary(occurrences),
+        "shift_series": shift_series,
+        "interaction_series": interaction_series,
+        "outcome_series": outcome_series,
+        "trend": trend,
+        "shift_chart": _food_fluid_report_stacked_chart(
+            shift_series, group_by, "food-fluid-shift-chart",
+            "Food & Fluid Entries Over Time",
+            "Recorded Food & Fluid entries by local report period and actual shift.",
+            "Recorded entries", shift_fields
+        ),
+        "interaction_chart": _food_fluid_report_grouped_chart(
+            interaction_series, group_by, "food-fluid-interaction-chart",
+            "Interaction Type Over Time",
+            "Recorded Food & Fluid entries by interaction type and local report period.",
+            "Recorded entries", FOOD_FLUID_REPORT_INTERACTIONS,
+            FOOD_FLUID_REPORT_INTERACTION_COLORS
+        ),
+        "outcome_chart": _food_fluid_report_stacked_chart(
+            [
+                {"period": item["period"], "count": sum(item["counts"].values()),
+                 **item["counts"]}
+                for item in outcome_series
+            ],
+            group_by, "food-fluid-outcome-chart", "Outcome Over Time",
+            "Recorded Food & Fluid entries by outcome and local report period.",
+            "Recorded entries",
+            [
+                (outcome, outcome, outcome)
+                for outcome in FOOD_FLUID_REPORT_OUTCOMES
+            ]
+        ),
+        "occurrences": occurrences,
+    }
+
+
 def _sleep_report_active_client(conn):
     """Return the sole active client used by the Sleep report surface."""
     clients = conn.execute("""
@@ -6119,6 +6606,41 @@ def sleep_report():
             client=client,
             controls=controls,
             groupings=SLEEP_REPORT_GROUPINGS,
+            report=report,
+            viewer_role=actor["role"],
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except (LookupError, ValueError) as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
+
+@app.route("/reports/food-fluid")
+def food_fluid_report():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn, session["user_id"]
+        )
+        client = _food_fluid_report_active_client(conn)
+        controls = _food_fluid_report_controls(request.args)
+        report = _food_fluid_report_context(
+            conn,
+            client["client_id"],
+            controls["from_date"],
+            controls["to_date"],
+            controls["group_by"],
+        )
+        return render_template(
+            "food_fluid_report.html",
+            client=client,
+            controls=controls,
+            groupings=FOOD_FLUID_REPORT_GROUPINGS,
             report=report,
             viewer_role=actor["role"],
         )
