@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Reports</h2>
+    <p>Choose a report to review finalized records and trends.</p>
+</div>
+
+<div class="management-review-grid">
+    <div class="card">
+        <h3>Behaviour</h3>
+        <p>Review Behaviour occurrence statistics and trends.</p>
+        <a href="{{ url_for('behaviour_report') }}">Open Behaviour Report</a>
+    </div>
+
+    <div class="card">
+        <h3>Activities</h3>
+        <p>Review Activity statistics, categories, shifts, and trends.</p>
+        <a href="{{ url_for('activity_report') }}">Open Activities Report</a>
+    </div>
+</div>
+{% endblock %}

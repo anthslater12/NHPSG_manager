@@ -61,14 +61,18 @@
         Incidents
     </a>
 
+    {% if reports_navigation_allowed %}
+
+        <a href="{{ url_for('reports_index') }}">
+            Reports
+        </a>
+
+    {% endif %}
+
     {% if session.role in ["Admin", "Program Manager", "Director"] %}
 
         <a href="{{ url_for('manager_review_hub') }}">
             Management Review
-        </a>
-
-        <a href="{{ url_for('behaviour_report') }}">
-            Behaviour Report
         </a>
 
         {% if management_storyline_url %}
@@ -106,10 +110,6 @@
         </a>
 
     {% elif session.role == "Behaviour Consultant" %}
-
-        <a href="{{ url_for('behaviour_report') }}">
-            Behaviour Report
-        </a>
 
         {% if management_storyline_url %}
             <a href="{{ management_storyline_url }}">
