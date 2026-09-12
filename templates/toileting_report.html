@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% macro report_chart(chart, empty_message) -%}
+<figure class="toileting-report-chart">
+    {% if chart.has_values %}
+    <div class="toileting-report-chart-scroll">
+        <ul class="toileting-report-chart-legend" aria-label="Chart legend">
+            {% for item in chart.legend %}
+            <li><span class="toileting-report-chart-swatch" style="background-color: {{ item.color }};"></span>{{ item.label }}</li>
+            {% endfor %}
+        </ul>
+        <svg class="toileting-report-chart-svg" width="{{ chart.width }}" height="{{ chart.height }}"
+             viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img"
+             aria-labelledby="{{ chart.id }}-title {{ chart.id }}-description">
+            <title id="{{ chart.id }}-title">{{ chart.title }}</title>
+            <desc id="{{ chart.id }}-description">{{ chart.description }}</desc>
+            <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top + chart.plot_height }}"
+                  x2="{{ chart.plot_left + chart.plot_width }}" y2="{{ chart.plot_top + chart.plot_height }}" stroke="currentColor" />
+            <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_top }}"
+                  x2="{{ chart.plot_left }}" y2="{{ chart.plot_top + chart.plot_height }}" stroke="currentColor" />
+            <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + 5 }}" text-anchor="end">{{ chart.maximum }}</text>
+            <text x="{{ chart.plot_left - 10 }}" y="{{ chart.plot_top + chart.plot_height + 5 }}" text-anchor="end">0</text>
+            <text x="16" y="{{ chart.plot_top + (chart.plot_height / 2) }}" text-anchor="middle"
+                  transform="rotate(-90 16 {{ chart.plot_top + (chart.plot_height / 2) }})">{{ chart.y_axis_label }}</text>
+            {% for point in chart.points %}
+            <text x="{{ point.label_x }}" y="{{ chart.plot_top + chart.plot_height + 18 }}"
+                  text-anchor="end" transform="rotate(-45 {{ point.label_x }} {{ chart.plot_top + chart.plot_height + 18 }})">{{ point.label }}</text>
+            {% endfor %}
+            {% for column in chart.columns %}
+                {% for segment in column.segments %}
+                <rect x="{{ segment.x }}" y="{{ segment.y }}" width="{{ segment.width }}" height="{{ segment.height }}"
+                      fill="{{ segment.color }}" data-chart="{{ chart.id }}" data-period="{{ column.period }}"
+                      data-segment-label="{{ segment.label }}" data-value="{{ segment.value }}">
+                    <title>{{ column.period }} {{ segment.label }}: {{ segment.value }}</title>
+                </rect>
+                {% endfor %}
+                <text x="{{ column.segments[0].x + (column.segments[0].width / 2) }}" y="{{ column.total_y }}"
+                      text-anchor="middle" data-chart="{{ chart.id }}" data-period="{{ column.period }}"
+                      data-total="{{ column.total }}">{{ column.total }}</text>
+            {% endfor %}
+        </svg>
+    </div>
+    {% else %}<p role="status">{{ empty_message }}</p>{% endif %}
+</figure>
+{%- endmacro %}
+
+{% block content %}
+<style>
+    .toileting-report-chart { margin: 0 0 1.5rem; max-width: 100%; }
+    .toileting-report-chart-scroll, .toileting-report-table-scroll { max-width: 100%; overflow-x: auto; padding-bottom: .35rem; }
+    .toileting-report-chart-legend { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; list-style: none; margin: 0 0 .5rem; padding: 0; }
+    .toileting-report-chart-legend li { align-items: center; display: flex; gap: .35rem; }
+    .toileting-report-chart-swatch { border: 1px solid currentColor; display: inline-block; height: .8rem; width: .8rem; }
+    .toileting-report-chart-svg { display: block; height: auto; min-height: 220px; overflow: visible; width: auto; }
+    .toileting-report-summary-grid, .toileting-report-breakdown { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 1.5rem; }
+    .toileting-report-summary-card, .toileting-report-breakdown > div { background: #f5f7fa; border: 1px solid #d5dde5; border-radius: 6px; min-width: 0; padding: 12px 14px; }
+    .toileting-report-summary-card { border-top: 4px solid #004b87; padding: 14px 16px; }
+    .toileting-report-summary-card dt, .toileting-report-breakdown dt { color: #334155; font-size: .9rem; font-weight: bold; line-height: 1.3; }
+    .toileting-report-summary-card dd, .toileting-report-breakdown dd { color: #004b87; font-size: 1.45rem; font-weight: bold; margin: .35rem 0 0; }
+    .toileting-report-summary-card dd { font-size: clamp(1.6rem, 3vw, 2.35rem); }
+    .toileting-report-section-heading { border-top: 1px solid #d5dde5; margin: 2rem 0 .75rem; padding-top: 1.25rem; }
+    .toileting-report-note { color: #475569; margin-top: -.35rem; }
+    .toileting-report-detail-table { min-width: 1100px; }
+    @media (max-width: 800px) { .toileting-report-summary-grid, .toileting-report-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 480px) { .toileting-report-summary-grid, .toileting-report-breakdown { grid-template-columns: 1fr; } }
+</style>
+
+<div class="card">
+    <h2>Toileting Report</h2>
+    <p><strong>Client:</strong> {{ client.client_name }}</p>
+
+    <form method="get" class="report-controls">
+        <div class="form-row">
+            <div class="form-field"><label for="from_date">From Date</label><input id="from_date" type="date" name="from_date" value="{{ controls.from_value }}" required></div>
+            <div class="form-field"><label for="to_date">To Date</label><input id="to_date" type="date" name="to_date" value="{{ controls.to_value }}" required></div>
+            <div class="form-field"><label for="group_by">Group By</label><select id="group_by" name="group_by">{% for grouping in groupings %}<option value="{{ grouping }}"{% if grouping == controls.group_by %} selected{% endif %}>{{ grouping }}</option>{% endfor %}</select></div>
+        </div>
+        <button type="submit">Run Report</button>
+    </form>
+
+    <h3 class="toileting-report-section-heading">Summary</h3>
+    <dl class="toileting-report-summary-grid">
+        <div class="toileting-report-summary-card"><dt>Total Toileting Events</dt><dd>{{ report.summary.total }}</dd></div>
+        <div class="toileting-report-summary-card"><dt>Days With Toileting Events</dt><dd>{{ report.summary.days }}</dd></div>
+        <div class="toileting-report-summary-card"><dt>BM Events</dt><dd>{{ report.summary.bm_events }}</dd></div>
+        <div class="toileting-report-summary-card"><dt>Urination Events</dt><dd>{{ report.summary.urination_events }}</dd></div>
+    </dl>
+    <p class="toileting-report-note">BM Events and Urination Events are component counts. A BM and Urination event contributes to both and may make their combined count exceed the total.</p>
+
+    <h3 class="toileting-report-section-heading">Event Type Breakdown</h3>
+    <dl class="toileting-report-breakdown">
+        <div><dt>BM</dt><dd>{{ report.summary.event_types.BM }}</dd></div>
+        <div><dt>Urination</dt><dd>{{ report.summary.event_types.Urination }}</dd></div>
+        <div><dt>BM and Urination</dt><dd>{{ report.summary.event_types.Both }}</dd></div>
+    </dl>
+
+    <h3 class="toileting-report-section-heading">Actual Shift Breakdown</h3>
+    <dl class="toileting-report-breakdown">
+        {% for shift in ("Day", "Afternoon", "Overnight") %}<div><dt>{{ shift }}</dt><dd>{{ report.summary.shifts[shift] }}</dd></div>{% endfor %}
+        {% if report.summary.shifts["Unassigned / Invalid Shift Link"] %}<div><dt>Unassigned / Invalid Shift Link</dt><dd>{{ report.summary.shifts["Unassigned / Invalid Shift Link"] }}</dd></div>{% endif %}
+    </dl>
+
+    <h3 class="toileting-report-section-heading">Location Breakdown</h3>
+    <dl class="toileting-report-breakdown">
+        {% for location in ("Bathroom", "Bedroom", "Living Room", "Kitchen", "Community", "Vehicle", "Other") %}<div><dt>{{ location }}</dt><dd>{{ report.summary.locations[location] }}</dd></div>{% endfor %}
+    </dl>
+
+    <h3 class="toileting-report-section-heading">BM Size</h3>
+    <dl class="toileting-report-breakdown">
+        {% for value in ("Small", "Medium", "Large") %}<div><dt>{{ value }}</dt><dd>{{ report.summary.bm_sizes[value] }}</dd></div>{% endfor %}
+    </dl>
+
+    <h3 class="toileting-report-section-heading">BM Consistency</h3>
+    <dl class="toileting-report-breakdown">
+        {% for value in ("Hard", "Firm", "Soft", "Loose", "Watery") %}<div><dt>{{ value }}</dt><dd>{{ report.summary.bm_consistencies[value] }}</dd></div>{% endfor %}
+    </dl>
+
+    <h3 class="toileting-report-section-heading">Urine Volume</h3>
+    <dl class="toileting-report-breakdown">
+        {% for value in ("Small", "Medium", "Large") %}<div><dt>{{ value }}</dt><dd>{{ report.summary.urine_volumes[value] }}</dd></div>{% endfor %}
+    </dl>
+    <p class="toileting-report-note">Urine Volume is a categorical observation; it is not a millilitre or intake measurement.</p>
+
+    <h3 class="toileting-report-section-heading">Toileting Events Over Time</h3>
+    {{ report_chart(report.shift_chart, "No active Toileting events are available for this chart.") }}
+
+    <h3 class="toileting-report-section-heading">Toileting Event Type Over Time</h3>
+    {{ report_chart(report.event_type_chart, "No active Toileting event type data is available for this chart.") }}
+
+    <details class="toileting-report-trend-data">
+        <summary>View {{ controls.group_by|lower }} trend data</summary>
+        <div class="toileting-report-table-scroll">
+            <table>
+                <thead><tr><th>{{ controls.group_by }} starting</th><th>Active Events</th><th>Day</th><th>Afternoon</th><th>Overnight</th><th>Unassigned / Invalid Shift Link</th><th>BM</th><th>Urination</th><th>BM and Urination</th></tr></thead>
+                <tbody>{% for period in report.trend %}<tr>
+                    <th scope="row">{{ period.period }}</th><td>{{ period.total }}</td>
+                    <td>{{ period.shifts.Day }}</td><td>{{ period.shifts.Afternoon }}</td><td>{{ period.shifts.Overnight }}</td><td>{{ period.shifts["Unassigned / Invalid Shift Link"] }}</td>
+                    <td>{{ period.event_types.BM }}</td><td>{{ period.event_types.Urination }}</td><td>{{ period.event_types.Both }}</td>
+                </tr>{% endfor %}</tbody>
+            </table>
+        </div>
+    </details>
+
+    <h3 class="toileting-report-section-heading">Toileting Event History</h3>
+    <p class="toileting-report-note">Colour, Bristol, blood, mucus, odour, unusual-colour, and concern fields are retained in existing detail/review screens but are not used as primary V1 statistics because the current entry workflow does not reliably populate them.</p>
+    {% if report.occurrences %}
+    <div class="toileting-report-table-scroll"><table class="toileting-report-detail-table">
+        <thead><tr><th>Date</th><th>Time</th><th>Shift</th><th>Event Type</th><th>Location</th><th>BM Size</th><th>BM Consistency</th><th>Urine Volume</th><th>Recorded By</th><th>Active</th><th>Details</th></tr></thead>
+        <tbody>{% for item in report.occurrences %}<tr>
+            <td>{{ item.local_date or "Not recorded" }}</td><td>{{ item.local_time }}</td><td>{{ item.shift_classification }}</td><td>{{ item.event_type_display }}</td><td>{{ item.location_display }}{% if item.location == "Other" and item.location_other %}<br><small>{{ item.location_other }}</small>{% endif %}</td>
+            <td>{% if item.event_type in ("BM", "Both") %}{{ item.bm_size or "Not recorded" }}{% else %}—{% endif %}</td><td>{% if item.event_type in ("BM", "Both") %}{{ item.bm_consistency or "Not recorded" }}{% else %}—{% endif %}</td><td>{% if item.event_type in ("Urination", "Both") %}{{ item.urine_volume or "Not recorded" }}{% else %}—{% endif %}</td><td>{{ item.recorded_by_name }}</td><td>{{ "Active" if item.active == 1 else "Inactive" }}</td>
+            <td><a href="{{ url_for('toileting_review_detail', entry_id=item.toileting_event_id) }}">Review detail</a>{% if item.bm_unusual_details %}<br>BM observations: {{ item.bm_unusual_details }}{% endif %}{% if item.urine_unusual_details %}<br>Urine observations: {{ item.urine_unusual_details }}{% endif %}{% if item.concern_details %}<br>Concern: {{ item.concern_details }}{% endif %}{% if item.general_comments %}<br>Notes: {{ item.general_comments }}{% endif %}{% if item.correction_reason %}<br>Correction reason: {{ item.correction_reason }}{% endif %}</td>
+        </tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<p>No Toileting events were found for this period.</p>{% endif %}
+</div>
+{% endblock %}
