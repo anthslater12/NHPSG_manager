@@ -388,6 +388,40 @@ FOOD_FLUID_REPORT_OUTCOME_COLORS = {
     "Refused": "#b42318",
     "Item not available": "#6b7280",
 }
+TOILETING_REPORT_GROUPINGS = ("Daily", "Weekly", "Monthly", "Annual")
+TOILETING_REPORT_SHIFTS = ("Day", "Afternoon", "Overnight")
+TOILETING_REPORT_EVENT_TYPES = ("BM", "Urination", "Both")
+TOILETING_REPORT_EVENT_LABELS = {
+    "BM": "BM",
+    "Urination": "Urination",
+    "Both": "BM and Urination",
+}
+TOILETING_REPORT_LOCATIONS = (
+    "Bathroom",
+    "Bedroom",
+    "Living Room",
+    "Kitchen",
+    "Community",
+    "Vehicle",
+    "Other",
+)
+TOILETING_REPORT_BM_SIZES = ("Small", "Medium", "Large")
+TOILETING_REPORT_BM_CONSISTENCIES = (
+    "Hard", "Firm", "Soft", "Loose", "Watery"
+)
+TOILETING_REPORT_URINE_VOLUMES = ("Small", "Medium", "Large")
+TOILETING_REPORT_INVALID_SHIFT_LABEL = "Unassigned / Invalid Shift Link"
+TOILETING_REPORT_SHIFT_COLORS = {
+    "Day": "#2f6f9f",
+    "Afternoon": "#c47f1b",
+    "Overnight": "#4c1d95",
+    "Unassigned": "#6b7280",
+}
+TOILETING_REPORT_EVENT_COLORS = {
+    "BM": "#2f6f9f",
+    "Urination": "#0f766e",
+    "Both": "#7c3aed",
+}
 
 
 def is_shift_activity_editable(status):
@@ -3877,6 +3911,402 @@ def _food_fluid_report_context(conn, client_id, from_date, to_date, group_by):
     }
 
 
+def _toileting_report_active_client(conn):
+    """Return the sole active client used by the Toileting report."""
+    clients = conn.execute("""
+        SELECT client_id, client_name
+        FROM clients
+        WHERE active = 1
+        ORDER BY client_id
+    """).fetchall()
+    if len(clients) != 1:
+        raise LookupError(
+            "Toileting reports require exactly one active client."
+        )
+    return dict(clients[0])
+
+
+def _toileting_report_controls(args, today=None):
+    """Parse and validate Toileting report controls."""
+    if today is None:
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+
+    default_from = today.replace(day=1)
+    from_value = args.get("from_date") or default_from.isoformat()
+    to_value = args.get("to_date") or today.isoformat()
+    group_by = args.get("group_by") or "Daily"
+
+    try:
+        from_date = date.fromisoformat(from_value)
+        to_date = date.fromisoformat(to_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Report dates must be valid ISO dates.") from error
+
+    if from_date > to_date:
+        raise ValueError("From Date cannot be after To Date.")
+    if group_by not in TOILETING_REPORT_GROUPINGS:
+        raise ValueError("Report grouping is invalid.")
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "from_value": from_date.isoformat(),
+        "to_value": to_date.isoformat(),
+        "group_by": group_by,
+    }
+
+
+def _toileting_report_occurrences(conn, client_id, from_date, to_date):
+    """Return selected-client Toileting rows in the local date range."""
+    start_value = f"{from_date.isoformat()}T00:00"
+    end_value = f"{(to_date + timedelta(days=1)).isoformat()}T00:00"
+    rows = conn.execute("""
+        SELECT
+            te.*,
+            c.client_name,
+            s.shift_type AS linked_shift_type,
+            recorded_by.full_name AS recorded_by_name
+        FROM toileting_events AS te
+        JOIN clients AS c
+          ON c.client_id = te.client_id
+        JOIN users AS recorded_by
+          ON recorded_by.user_id = te.recorded_by_user_id
+        LEFT JOIN shifts AS s
+          ON s.shift_id = te.shift_id
+         AND s.client_id = te.client_id
+        WHERE te.client_id = ?
+          AND te.event_datetime >= ?
+          AND te.event_datetime < ?
+        ORDER BY te.event_datetime, te.toileting_event_id
+    """, (client_id, start_value, end_value)).fetchall()
+
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        try:
+            local = datetime.strptime(
+                item["event_datetime"], "%Y-%m-%dT%H:%M"
+            )
+            item["local_date"] = local.date().isoformat()
+            item["local_time"] = local.strftime("%H:%M")
+        except (TypeError, ValueError):
+            item["local_date"] = None
+            item["local_time"] = "Date/time unavailable"
+        item["event_type_display"] = TOILETING_REPORT_EVENT_LABELS.get(
+            item.get("event_type"), item.get("event_type") or "Not recorded"
+        )
+        item["shift_classification"] = (
+            item["linked_shift_type"]
+            if item.get("linked_shift_type") in TOILETING_REPORT_SHIFTS
+            else TOILETING_REPORT_INVALID_SHIFT_LABEL
+        )
+        item["location_display"] = item.get("location") or "Not recorded"
+        occurrences.append(item)
+    return occurrences
+
+
+def _toileting_reportable_occurrences(occurrences):
+    """Return the active rows eligible for formal report statistics."""
+    return [item for item in occurrences if item.get("active") == 1]
+
+
+def _toileting_report_period_start(value, group_by):
+    if group_by == "Daily":
+        return value
+    if group_by == "Weekly":
+        return value - timedelta(days=value.weekday())
+    if group_by == "Monthly":
+        return value.replace(day=1)
+    return value.replace(month=1, day=1)
+
+
+def _toileting_report_periods(from_date, to_date, group_by):
+    period = _toileting_report_period_start(from_date, group_by)
+    last_period = _toileting_report_period_start(to_date, group_by)
+    periods = []
+    while period <= last_period:
+        periods.append(period)
+        if group_by in ("Daily", "Weekly"):
+            period += timedelta(days=1 if group_by == "Daily" else 7)
+        elif group_by == "Monthly":
+            period = (
+                date(period.year + 1, 1, 1)
+                if period.month == 12
+                else date(period.year, period.month + 1, 1)
+            )
+        else:
+            period = date(period.year + 1, 1, 1)
+    return periods
+
+
+def _toileting_report_period_label(period, group_by):
+    if group_by == "Daily":
+        return period.strftime("%b %d")
+    if group_by == "Weekly":
+        return f"Week of {period.strftime('%b')} {period.day:02d}"
+    if group_by == "Monthly":
+        return period.strftime("%b %Y")
+    return str(period.year)
+
+
+def _toileting_report_summary(occurrences):
+    reportable = _toileting_reportable_occurrences(occurrences)
+    shifts = {shift: 0 for shift in TOILETING_REPORT_SHIFTS}
+    shifts[TOILETING_REPORT_INVALID_SHIFT_LABEL] = 0
+    event_types = {event_type: 0 for event_type in TOILETING_REPORT_EVENT_TYPES}
+    locations = {location: 0 for location in TOILETING_REPORT_LOCATIONS}
+    bm_sizes = {value: 0 for value in TOILETING_REPORT_BM_SIZES}
+    bm_consistencies = {
+        value: 0 for value in TOILETING_REPORT_BM_CONSISTENCIES
+    }
+    urine_volumes = {value: 0 for value in TOILETING_REPORT_URINE_VOLUMES}
+
+    for item in reportable:
+        shift = item["shift_classification"]
+        shifts[shift] += 1
+        event_type = item.get("event_type")
+        if event_type in event_types:
+            event_types[event_type] += 1
+        location = item.get("location")
+        if location in locations:
+            locations[location] += 1
+        if event_type in ("BM", "Both"):
+            if item.get("bm_size") in bm_sizes:
+                bm_sizes[item["bm_size"]] += 1
+            if item.get("bm_consistency") in bm_consistencies:
+                bm_consistencies[item["bm_consistency"]] += 1
+        if event_type in ("Urination", "Both"):
+            if item.get("urine_volume") in urine_volumes:
+                urine_volumes[item["urine_volume"]] += 1
+
+    return {
+        "total": len(reportable),
+        "days": len({item["local_date"] for item in reportable
+                      if item.get("local_date")}),
+        "bm_events": sum(
+            item.get("event_type") in ("BM", "Both") for item in reportable
+        ),
+        "urination_events": sum(
+            item.get("event_type") in ("Urination", "Both")
+            for item in reportable
+        ),
+        "shifts": shifts,
+        "event_types": event_types,
+        "locations": locations,
+        "bm_sizes": bm_sizes,
+        "bm_consistencies": bm_consistencies,
+        "urine_volumes": urine_volumes,
+    }
+
+
+def _toileting_report_shift_series(occurrences, group_by, periods):
+    grouped = {}
+    for item in _toileting_reportable_occurrences(occurrences):
+        if not item.get("local_date"):
+            continue
+        period = _toileting_report_period_start(
+            date.fromisoformat(item["local_date"]), group_by
+        )
+        counts = grouped.setdefault(
+            period,
+            {shift: 0 for shift in TOILETING_REPORT_SHIFTS}
+            | {TOILETING_REPORT_INVALID_SHIFT_LABEL: 0},
+        )
+        counts[item["shift_classification"]] += 1
+
+    return [
+        {
+            "period": period.isoformat(),
+            "count": sum(grouped.get(period, {}).values()),
+            **{
+                f"{shift.lower()}_count": grouped.get(period, {}).get(shift, 0)
+                for shift in TOILETING_REPORT_SHIFTS
+            },
+            "unassigned_count": grouped.get(period, {}).get(
+                TOILETING_REPORT_INVALID_SHIFT_LABEL, 0
+            ),
+        }
+        for period in periods
+    ]
+
+
+def _toileting_report_count_series(
+    occurrences, group_by, periods, field_name, values
+):
+    grouped = {}
+    for item in _toileting_reportable_occurrences(occurrences):
+        if not item.get("local_date"):
+            continue
+        period = _toileting_report_period_start(
+            date.fromisoformat(item["local_date"]), group_by
+        )
+        counts = grouped.setdefault(period, {value: 0 for value in values})
+        value = item.get(field_name)
+        if value in counts:
+            counts[value] += 1
+
+    return [
+        {
+            "period": period.isoformat(),
+            "counts": {
+                value: grouped.get(period, {}).get(value, 0)
+                for value in values
+            },
+        }
+        for period in periods
+    ]
+
+
+def _toileting_report_chart_dimensions(period_count):
+    chart_width = max(960, 92 + period_count * 72)
+    chart_height = 340
+    plot_left = 64
+    plot_top = 24
+    plot_width = chart_width - plot_left - 28
+    plot_height = 190
+    return chart_width, chart_height, plot_left, plot_top, plot_width, plot_height
+
+
+def _toileting_report_stacked_chart(
+    series, group_by, chart_id, title, description, y_axis_label, fields, colors
+):
+    dimensions = _toileting_report_chart_dimensions(len(series))
+    (
+        chart_width, chart_height, plot_left, plot_top, plot_width, plot_height
+    ) = dimensions
+    maximum = max((item["count"] for item in series), default=0)
+    scale = maximum or 1
+    slot = plot_width / max(len(series), 1)
+    bar_width = max(min(slot * 0.58, 52), 6)
+    points = []
+    columns = []
+    for index, item in enumerate(series):
+        label_x = plot_left + index * slot + slot / 2
+        points.append({
+            "label": _toileting_report_period_label(
+                date.fromisoformat(item["period"]), group_by
+            ),
+            "label_x": round(label_x, 2),
+        })
+        x = plot_left + index * slot + (slot - bar_width) / 2
+        cumulative = 0
+        segments = []
+        for label, field, color_key in fields:
+            value = item.get(field, 0)
+            height = plot_height * value / scale
+            segments.append({
+                "label": label,
+                "value": value,
+                "x": round(x, 2),
+                "y": round(plot_top + plot_height - cumulative - height, 2),
+                "width": round(bar_width, 2),
+                "height": round(height, 2),
+                "color": colors[color_key],
+            })
+            cumulative += height
+        columns.append({
+            "period": item["period"],
+            "total": item["count"],
+            "total_y": round(plot_top + plot_height - cumulative - 6, 2),
+            "segments": segments,
+        })
+
+    return {
+        "id": chart_id,
+        "title": title,
+        "description": description,
+        "y_axis_label": y_axis_label,
+        "width": chart_width,
+        "height": chart_height,
+        "plot_left": plot_left,
+        "plot_top": plot_top,
+        "plot_width": plot_width,
+        "plot_height": plot_height,
+        "maximum": maximum,
+        "points": points,
+        "columns": columns,
+        "stacked": True,
+        "legend": [
+            {"label": label, "color": colors[color_key]}
+            for label, _, color_key in fields
+        ],
+        "has_values": bool(series),
+    }
+
+
+def _toileting_report_context(conn, client_id, from_date, to_date, group_by):
+    occurrences = _toileting_report_occurrences(
+        conn, client_id, from_date, to_date
+    )
+    periods = _toileting_report_periods(from_date, to_date, group_by)
+    shift_series = _toileting_report_shift_series(
+        occurrences, group_by, periods
+    )
+    event_type_series = _toileting_report_count_series(
+        occurrences, group_by, periods,
+        "event_type", TOILETING_REPORT_EVENT_TYPES
+    )
+    trend = []
+    for shift_item, event_type_item in zip(shift_series, event_type_series):
+        trend.append({
+            "period": shift_item["period"],
+            "total": shift_item["count"],
+            "shifts": {
+                "Day": shift_item["day_count"],
+                "Afternoon": shift_item["afternoon_count"],
+                "Overnight": shift_item["overnight_count"],
+                TOILETING_REPORT_INVALID_SHIFT_LABEL: shift_item[
+                    "unassigned_count"
+                ],
+            },
+            "event_types": event_type_item["counts"],
+        })
+
+    shift_fields = [
+        (shift, f"{shift.lower()}_count", shift)
+        for shift in TOILETING_REPORT_SHIFTS
+    ]
+    if any(item["unassigned_count"] for item in shift_series):
+        shift_fields.append((
+            TOILETING_REPORT_INVALID_SHIFT_LABEL,
+            "unassigned_count",
+            "Unassigned",
+        ))
+
+    event_chart_series = [
+        {
+            "period": item["period"],
+            "count": sum(item["counts"].values()),
+            **item["counts"],
+        }
+        for item in event_type_series
+    ]
+
+    return {
+        "summary": _toileting_report_summary(occurrences),
+        "shift_series": shift_series,
+        "event_type_series": event_type_series,
+        "trend": trend,
+        "shift_chart": _toileting_report_stacked_chart(
+            shift_series, group_by, "toileting-shift-chart",
+            "Toileting Events Over Time",
+            "Active Toileting events by local report period and actual shift.",
+            "Active events", shift_fields, TOILETING_REPORT_SHIFT_COLORS
+        ),
+        "event_type_chart": _toileting_report_stacked_chart(
+            event_chart_series, group_by, "toileting-event-type-chart",
+            "Toileting Event Type Over Time",
+            "Active Toileting events by stored event type and local report period.",
+            "Active events",
+            [
+                (TOILETING_REPORT_EVENT_LABELS[event_type], event_type, event_type)
+                for event_type in TOILETING_REPORT_EVENT_TYPES
+            ], TOILETING_REPORT_EVENT_COLORS
+        ),
+        "occurrences": occurrences,
+    }
+
+
 def _sleep_report_active_client(conn):
     """Return the sole active client used by the Sleep report surface."""
     clients = conn.execute("""
@@ -6641,6 +7071,41 @@ def food_fluid_report():
             client=client,
             controls=controls,
             groupings=FOOD_FLUID_REPORT_GROUPINGS,
+            report=report,
+            viewer_role=actor["role"],
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except (LookupError, ValueError) as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
+
+@app.route("/reports/toileting")
+def toileting_report():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = validate_behaviour_review_authority(
+            conn, session["user_id"]
+        )
+        client = _toileting_report_active_client(conn)
+        controls = _toileting_report_controls(request.args)
+        report = _toileting_report_context(
+            conn,
+            client["client_id"],
+            controls["from_date"],
+            controls["to_date"],
+            controls["group_by"],
+        )
+        return render_template(
+            "toileting_report.html",
+            client=client,
+            controls=controls,
+            groupings=TOILETING_REPORT_GROUPINGS,
             report=report,
             viewer_role=actor["role"],
         )
