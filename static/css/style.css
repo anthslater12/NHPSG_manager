@@ -103,6 +103,25 @@ button:hover{
 
 }
 
+.login-privacy-notice {
+    margin-top: 24px;
+    padding: 14px 16px;
+    border: 1px solid #d7e0e8;
+    border-radius: 6px;
+    background: #f4f8fb;
+}
+
+.login-privacy-notice h3 {
+    margin: 0 0 8px;
+    color: #17324d;
+    font-size: 1rem;
+}
+
+.login-privacy-notice p {
+    margin: 0;
+    line-height: 1.5;
+}
+
 .inline-form {
     display: inline;
     margin: 0;
