@@ -1896,6 +1896,8 @@ def get_active_food_fluid_shift_context(conn, shift_id, user_id):
             c.active AS client_active,
             ss.shift_staff_id,
             ss.active AS participation_active,
+            ss.actual_start_time,
+            ss.actual_end_at_utc,
             u.user_id AS recorded_by_user_id,
             u.role AS recorded_by_role,
             u.active AS recorded_by_active
@@ -2470,39 +2472,52 @@ def _storyline_source_ids_for_client(conn, client_id, candidates):
 
 
 def get_food_fluid_shift_window(shift):
-    """Return the half-open Vancouver interval for an authoritative shift."""
+    """Return the actual assignment interval for an authoritative shift."""
     try:
         shift_date = date.fromisoformat(shift["shift_date"])
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("The shift date is invalid.") from error
 
-    shift_type = shift["shift_type"]
-    if shift_type == "Day":
-        start_time = datetime_time(7, 0)
-        end_date = shift_date
-        end_time = datetime_time(15, 0)
-    elif shift_type == "Afternoon":
-        start_time = datetime_time(15, 0)
-        end_date = shift_date
-        end_time = datetime_time(23, 0)
-    elif shift_type == "Overnight":
-        start_time = datetime_time(23, 0)
-        end_date = shift_date + timedelta(days=1)
-        end_time = datetime_time(7, 0)
-    else:
-        raise ValueError("The shift type is invalid.")
+    try:
+        start_time = _parse_staff_notice_shift_clock(
+            shift["actual_start_time"],
+            "The actual assignment start"
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "The actual assignment start is invalid."
+        ) from error
+
+    if shift["shift_type"] == "Overnight" and start_time.hour < 7:
+        shift_date += timedelta(days=1)
 
     start_local = datetime.combine(
         shift_date,
         start_time,
         VANCOUVER_TIMEZONE
     )
-    end_local = datetime.combine(
-        end_date,
-        end_time,
-        VANCOUVER_TIMEZONE
-    )
-    return start_local, end_local
+    start_utc = start_local.astimezone(timezone.utc)
+
+    try:
+        actual_end_at_utc = shift["actual_end_at_utc"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "The actual assignment end is missing."
+        ) from error
+    if actual_end_at_utc is None:
+        return start_utc, None
+
+    try:
+        end_utc = parse_behaviour_utc(actual_end_at_utc)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "The actual assignment end is invalid."
+        ) from error
+    if end_utc < start_utc:
+        raise ValueError(
+            "The actual assignment end precedes the assignment start."
+        )
+    return start_utc, end_utc
 
 
 def convert_food_fluid_event_input_to_utc(
@@ -2529,13 +2544,15 @@ def convert_food_fluid_event_input_to_utc(
         now_utc
     )
     event_utc = parse_behaviour_utc(event_at_utc)
-    start_local, end_local = get_food_fluid_shift_window(shift)
-    start_utc = start_local.astimezone(timezone.utc)
-    end_utc = end_local.astimezone(timezone.utc)
+    start_utc, end_utc = get_food_fluid_shift_window(shift)
 
-    if not start_utc <= event_utc < end_utc:
+    if event_utc < start_utc:
         raise ValueError(
-            "Event time must fall within the selected shift."
+            "Event time must not be before the actual assignment start."
+        )
+    if end_utc is not None and event_utc > end_utc:
+        raise ValueError(
+            "Event time must not be after the actual assignment end."
         )
 
     return event_at_utc
