@@ -8416,6 +8416,195 @@ def get_shift_activity_in_progress_edit_context(
     return actor, context, activity
 
 
+def _get_active_worker_client_documentation_contexts(
+    conn, user_id, client_id
+):
+    """Return the worker's open active documentation contexts for one client."""
+    return [
+        context
+        for context in get_worker_documentation_assignments(conn, user_id)
+        if (
+            context["client_id"] == client_id
+            and context["documentation_access"] == DOCUMENTATION_ACCESS_ACTIVE
+            and context.get("shift_status") == "Open"
+        )
+    ]
+
+
+def _get_previous_operational_shift(conn, closing_context):
+    """Return the unique immediately preceding runtime shift slot, if any."""
+    shift_type = closing_context.get("shift_type")
+    if shift_type not in SCHEDULE_SHIFT_TYPES:
+        return None
+
+    shift_date = date.fromisoformat(closing_context["shift_date"])
+    shift_index = SCHEDULE_SHIFT_TYPES.index(shift_type)
+    if shift_index == 0:
+        shift_date -= timedelta(days=1)
+        previous_shift_type = SCHEDULE_SHIFT_TYPES[-1]
+    else:
+        previous_shift_type = SCHEDULE_SHIFT_TYPES[shift_index - 1]
+
+    matches = conn.execute("""
+        SELECT shift_id, client_id, shift_date, shift_type, status
+        FROM shifts
+        WHERE client_id = ?
+          AND shift_date = ?
+          AND shift_type = ?
+          AND status <> ?
+        ORDER BY shift_id
+    """, (
+        closing_context["client_id"],
+        shift_date.isoformat(),
+        previous_shift_type,
+        SHIFT_CANCELLED_STATUS,
+    )).fetchall()
+    if len(matches) != 1:
+        return None
+    return dict(matches[0])
+
+
+def _activity_handover_source_is_immediately_previous(
+    conn, activity, closing_context
+):
+    """Return whether a cross-shift Activity is from the prior operational slot."""
+    if activity["shift_id"] == closing_context["shift_id"]:
+        return True
+    previous_shift = _get_previous_operational_shift(conn, closing_context)
+    return (
+        previous_shift is not None
+        and previous_shift["shift_id"] == activity["shift_id"]
+    )
+
+
+def get_shift_activity_handover_context(
+    conn, shift_id, activity_id, user_id, closing_shift_id
+):
+    """Return an active non-creator context allowed to complete an Activity."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may complete a handover Activity."
+        )
+
+    if not _activity_documentation_context_schema_available(conn):
+        raise PermissionError(
+            "Activity handover completion requires an active open shift."
+        )
+
+    activity = conn.execute("""
+        SELECT sa.*, s.client_id AS activity_client_id,
+               c.client_name, c.active AS client_active,
+               s.status AS current_shift_status,
+               s.shift_date AS activity_shift_date,
+               s.shift_type AS activity_shift_type,
+               u.full_name AS recorded_by_name
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        JOIN users u ON u.user_id = sa.recorded_by_user_id
+        WHERE sa.shift_activity_id = ?
+          AND sa.shift_id = ?
+    """, (activity_id, shift_id)).fetchone()
+    if activity is None or activity["status"] != "In Progress":
+        raise PermissionError(
+            "Only an In Progress Activity may be completed by handover."
+        )
+    if (
+        activity["current_shift_status"] == SHIFT_CANCELLED_STATUS
+        or activity["client_active"] != 1
+    ):
+        raise PermissionError("Activity client and shift context do not match.")
+    if activity["recorded_by_user_id"] == actor["user_id"]:
+        raise PermissionError(
+            "The recording Support Worker must use the normal Activity editor."
+        )
+
+    closing_context = get_worker_documentation_shift_context(
+        conn, closing_shift_id, actor["user_id"]
+    )
+    if closing_context is None or (
+        closing_context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
+        or closing_context.get("shift_status") != "Open"
+        or closing_context["client_id"] != activity["activity_client_id"]
+    ):
+        raise PermissionError(
+            "Activity handover completion requires an active same-client shift."
+        )
+    if not _activity_handover_source_is_immediately_previous(
+        conn, activity, closing_context
+    ):
+        raise PermissionError(
+            "Activity handover completion requires the immediately previous shift."
+        )
+    return actor, closing_context, activity
+
+
+def get_shift_activity_handover_records(
+    conn, client_id, current_shift_id, user_id
+):
+    """Return eligible in-progress Activities from other shifts for this client."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        return []
+    closing_context = get_worker_documentation_shift_context(
+        conn, current_shift_id, actor["user_id"]
+    )
+    if (
+        closing_context is None
+        or closing_context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
+        or closing_context.get("shift_status") != "Open"
+        or closing_context["client_id"] != client_id
+    ):
+        return []
+    previous_shift = _get_previous_operational_shift(conn, closing_context)
+    if previous_shift is None:
+        return []
+
+    rows = conn.execute("""
+        SELECT
+            sa.shift_activity_id,
+            sa.shift_id,
+            sa.recorded_by_user_id,
+            sa.start_time,
+            sa.end_time,
+            sa.a_selected,
+            sa.t_selected,
+            sa.ls_selected,
+            sa.activity_description,
+            sa.created_at,
+            sa.status,
+            s.shift_date,
+            s.shift_type,
+            u.full_name AS recorded_by_name
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        JOIN users u ON u.user_id = sa.recorded_by_user_id
+        WHERE s.shift_id = ?
+          AND c.active = 1
+          AND sa.status = 'In Progress'
+          AND sa.recorded_by_user_id <> ?
+        ORDER BY sa.created_at ASC, sa.shift_activity_id ASC
+    """, (
+        previous_shift["shift_id"],
+        actor["user_id"],
+    )).fetchall()
+
+    records = []
+    for row in rows:
+        record = dict(row)
+        record["category_summary"] = ", ".join(
+            field_name.replace("_selected", "").upper()
+            for field_name in SHIFT_ACTIVITY_CATEGORY_FIELDS
+            if record.get(field_name)
+        )
+        if not record["category_summary"]:
+            record["category_summary"] = "None selected"
+        records.append(record)
+    return records
+
+
 def get_shift_activity_in_progress_resume_records(conn, shift_id, user_id):
     """Return the active worker's editable Activity drafts for one shift."""
     actor = get_active_authenticated_user(conn, user_id)
@@ -8854,6 +9043,51 @@ def parse_shift_activity_edit_form(form):
         "end_time": values["end_time"] or None,
         "action": action,
         "expected_version": expected_version,
+    }
+
+
+def _parse_shift_activity_handover_closing_shift_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]*", value):
+        raise ValueError("Activity handover closing shift is invalid.")
+    return int(value)
+
+
+def parse_shift_activity_handover_completion_form(form):
+    """Validate the restricted form used to complete another worker's Activity."""
+    allowed_fields = {
+        "action", "expected_version", "end_time", "closing_shift_id"
+    }
+    if not set(form).issubset(allowed_fields):
+        raise ValueError("Activity handover input is invalid.")
+
+    action_values = form.getlist("action")
+    if len(action_values) != 1 or action_values[0] != "complete":
+        raise ValueError("Activity handover action is invalid.")
+
+    version_values = form.getlist("expected_version")
+    if len(version_values) != 1 or not re.fullmatch(
+        r"[1-9][0-9]*", version_values[0]
+    ):
+        raise ValueError("Activity handover version is invalid.")
+
+    end_values = form.getlist("end_time")
+    if len(end_values) != 1:
+        raise ValueError("Activity times must use HH:MM.")
+    end_time = end_values[0].strip(SHIFT_ACTIVITY_ASCII_WHITESPACE)
+    _parse_shift_activity_time(end_time)
+
+    closing_shift_values = form.getlist("closing_shift_id")
+    if len(closing_shift_values) != 1:
+        raise ValueError("Activity handover closing shift is invalid.")
+    closing_shift_id = _parse_shift_activity_handover_closing_shift_id(
+        closing_shift_values[0]
+    )
+
+    return {
+        "action": "complete",
+        "end_time": end_time,
+        "expected_version": int(version_values[0]),
+        "closing_shift_id": closing_shift_id,
     }
 
 
@@ -24047,6 +24281,7 @@ def shift_activities(shift_id):
 
     conn = get_db()
     values = {}
+    handover_entries = []
 
     try:
         context, documentation_context_alternatives = (
@@ -24166,10 +24401,18 @@ def shift_activities(shift_id):
             ))
 
         entries = get_shift_activity_entries(conn, shift_id)
+        if context["editable"]:
+            handover_entries = get_shift_activity_handover_records(
+                conn,
+                context["client_id"],
+                context["shift_id"],
+                session["user_id"],
+            )
         return render_template(
             "shift_activities.html",
             shift=context,
             entries=entries,
+            handover_entries=handover_entries,
             values=values,
             error=None,
             created=request.args.get("created") == "1",
@@ -24200,6 +24443,7 @@ def shift_activities(shift_id):
             "shift_activities.html",
             shift=context,
             entries=entries,
+            handover_entries=handover_entries,
             values=values,
             error=str(error),
             created=False,
@@ -24393,6 +24637,146 @@ def shift_activity_edit(shift_id, activity_id):
         return str(error), 400
     finally:
         conn.close()
+
+@app.route(
+    "/shift/<int:shift_id>/activity/<int:activity_id>/handover-complete",
+    methods=["GET", "POST"],
+)
+def shift_activity_handover_complete(shift_id, activity_id):
+    """Allow an active same-client worker to complete another worker's Activity."""
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    values = {}
+    try:
+        closing_shift_id = _parse_shift_activity_handover_closing_shift_id(
+            request.args.get("closing_shift_id")
+        )
+        actor, closing_context, activity = (
+            get_shift_activity_handover_context(
+                conn,
+                shift_id,
+                activity_id,
+                session["user_id"],
+                closing_shift_id,
+            )
+        )
+        if request.method == "GET":
+            return render_template(
+                "shift_activity_handover_complete.html",
+                activity=activity,
+                closing_shift_id=closing_context["shift_id"],
+                values={
+                    "expected_version": str(activity["version_number"]),
+                    "end_time": activity["end_time"] or "",
+                },
+                error=None,
+            )
+
+        values = request.form.to_dict()
+        parsed = parse_shift_activity_handover_completion_form(request.form)
+        if parsed["closing_shift_id"] != closing_shift_id:
+            raise ValueError("Activity handover closing shift does not match.")
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, closing_context, current = (
+                get_shift_activity_handover_context(
+                    conn,
+                    shift_id,
+                    activity_id,
+                    session["user_id"],
+                    parsed["closing_shift_id"],
+                )
+            )
+            if current["version_number"] != parsed["expected_version"]:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before completing."
+                )
+
+            candidate = dict(current)
+            candidate["end_time"] = parsed["end_time"]
+            validate_shift_activity_final_candidate(candidate)
+
+            completed_at_utc = serialize_behaviour_utc(
+                datetime.now(timezone.utc).replace(microsecond=0)
+            )
+            resulting_version = current["version_number"] + 1
+            updated = conn.execute("""
+                UPDATE shift_activities
+                SET end_time = ?,
+                    status = 'Completed',
+                    completed_at_utc = ?,
+                    completed_by_user_id = ?,
+                    version_number = ?
+                WHERE shift_activity_id = ?
+                  AND shift_id = ?
+                  AND status = 'In Progress'
+                  AND version_number = ?
+            """, (
+                parsed["end_time"],
+                completed_at_utc,
+                actor["user_id"],
+                resulting_version,
+                activity_id,
+                shift_id,
+                parsed["expected_version"],
+            ))
+            if updated.rowcount != 1:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before completing."
+                )
+
+            details = (
+                f"Activity ID: {activity_id}\n"
+                f"Shift ID: {shift_id}\n"
+                f"Closing worker shift ID: {closing_context['shift_id']}\n"
+                "Changed fields:\n"
+                f"end_time: {current['end_time']!r} -> {parsed['end_time']!r}\n"
+                "Status: In Progress -> Completed\n"
+                f"Completion timestamp UTC: {completed_at_utc}\n"
+                f"Completion actor user ID: {actor['user_id']}\n"
+                f"Resulting version: {resulting_version}"
+            )
+            log_activity(
+                conn,
+                activity_class="ACTIVITY",
+                activity_type="shift_activity_completed",
+                summary="Activity completed by handover",
+                user_id=actor["user_id"],
+                client_id=current["activity_client_id"],
+                shift_id=shift_id,
+                related_table="shift_activities",
+                related_id=activity_id,
+                details=details,
+                success=1,
+                storyline_visible=True,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        flash("Activity completed.")
+        return redirect(url_for(
+            "shift_activities",
+            shift_id=closing_context["shift_id"],
+        ))
+    except ShiftActivityConcurrencyConflictError as error:
+        return str(error), 409
+    except PermissionError:
+        return "Access denied", 403
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Activity could not be completed.", 400
+    except ValueError as error:
+        return str(error), 400
+    finally:
+        conn.close()
+
 
 #####################################################################
 # INCIDENT REPORTS

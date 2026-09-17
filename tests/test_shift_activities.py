@@ -321,6 +321,33 @@ class ShiftActivitiesTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def insert_active_shift_assignment(
+        self, shift_id=11, client_id=1, shift_date="2026-08-03",
+        shift_type="Afternoon", user_id=2, actual_start_time="15:00",
+        sign_on_at="2026-08-03T22:00:00Z"
+    ):
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute(
+                "INSERT INTO shifts "
+                "(shift_id, client_id, shift_date, shift_type, status) "
+                "VALUES (?, ?, ?, ?, 'Open')",
+                (shift_id, client_id, shift_date, shift_type),
+            )
+            conn.execute(
+                "INSERT INTO shift_staff "
+                "(shift_staff_id, shift_id, user_id, active, "
+                "actual_start_time, sign_on_at) "
+                "VALUES (?, ?, ?, 1, ?, ?)",
+                (
+                    shift_id, shift_id, user_id,
+                    actual_start_time, sign_on_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def activity_row(self, activity_id):
         return self.rows(
             "SELECT * FROM shift_activities WHERE shift_activity_id = ?",
@@ -335,6 +362,15 @@ class ShiftActivitiesTests(unittest.TestCase):
             "end_time": "",
             "a_selected": "1",
             "activity_description": "Draft activity",
+        }
+        values.update(overrides)
+        return values
+
+    def handover_payload(self, action="complete", expected_version=1, **overrides):
+        values = {
+            "action": action,
+            "expected_version": str(expected_version),
+            "end_time": "11:00",
         }
         values.update(overrides)
         return values
@@ -973,6 +1009,235 @@ class ShiftActivitiesTests(unittest.TestCase):
         self.assertNotIn(
             f"/shift/10/activity/{recorded_id}/edit".encode(), response.data
         )
+
+    def test_same_client_worker_can_complete_handover_and_preserves_original_context(self):
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute(
+                "UPDATE shift_staff SET active = 0 "
+                "WHERE shift_id = 10 AND user_id = 2"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.insert_active_shift_assignment()
+        activity_id = self.insert_in_progress_activity(
+            shift_id=10,
+            user_id=1,
+            start_time="14:40",
+            description="Handover activity",
+        )
+        self.login(2)
+
+        response = self.client.get("/shift/11/activity")
+        self.assertEqual(response.status_code, 200)
+        handover_url = (
+            f"/shift/10/activity/{activity_id}/handover-complete"
+            "?closing_shift_id=11"
+        )
+        self.assertIn(handover_url.encode(), response.data)
+
+        response = self.client.get(handover_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'name="action" value="complete"', response.data)
+        self.assertNotIn(b'name="start_time"', response.data)
+
+        response = self.client.post(
+            handover_url,
+            data=self.handover_payload(
+                end_time="15:25",
+                closing_shift_id="11",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/shift/11/activity", response.location)
+
+        row = self.activity_row(activity_id)
+        self.assertEqual(row["shift_id"], 10)
+        self.assertEqual(row["recorded_by_user_id"], 1)
+        self.assertEqual(row["start_time"], "14:40")
+        self.assertEqual(row["end_time"], "15:25")
+        self.assertEqual(row["status"], "Completed")
+        self.assertEqual(row["completed_by_user_id"], 2)
+        self.assertRegex(
+            row["completed_at_utc"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        )
+        self.assertEqual(row["version_number"], 2)
+
+        audit = self.rows("""
+            SELECT * FROM activity_log
+            WHERE activity_type = 'shift_activity_completed'
+        """)[0]
+        self.assertEqual(audit["user_id"], 2)
+        self.assertEqual(audit["shift_id"], 10)
+        self.assertIn("Shift ID: 10", audit["details"])
+        self.assertIn("Closing worker shift ID: 11", audit["details"])
+        self.assertIn("Completion actor user ID: 2", audit["details"])
+
+    def test_handover_uses_requested_closing_context_when_worker_has_multiple(self):
+        activity_id = self.insert_in_progress_activity(
+            shift_id=10,
+            user_id=1,
+            start_time="14:40",
+            description="Multiple context handover activity",
+        )
+        self.insert_active_shift_assignment()
+        self.login(2)
+        handover_url = (
+            f"/shift/10/activity/{activity_id}/handover-complete"
+            "?closing_shift_id=10"
+        )
+
+        response = self.client.post(
+            handover_url,
+            data=self.handover_payload(
+                end_time="14:55",
+                closing_shift_id="10",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/shift/10/activity", response.location)
+        row = self.activity_row(activity_id)
+        self.assertEqual(row["completed_by_user_id"], 2)
+        audit = self.rows("""
+            SELECT * FROM activity_log
+            WHERE activity_type = 'shift_activity_completed'
+        """)[0]
+        self.assertIn("Closing worker shift ID: 10", audit["details"])
+
+    def test_handover_candidates_are_limited_to_the_immediately_previous_shift(self):
+        current_activity_id = self.insert_in_progress_activity(
+            shift_id=10,
+            user_id=1,
+            start_time="14:40",
+            description="Current handover activity",
+        )
+        historical_activity_id = self.insert_in_progress_activity(
+            shift_id=20,
+            user_id=1,
+            description="Historical unfinished activity",
+        )
+        self.insert_active_shift_assignment()
+        self.login(2)
+
+        response = self.client.get("/shift/11/activity")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            f"activity/{current_activity_id}/handover-complete".encode(),
+            response.data,
+        )
+        self.assertNotIn(
+            f"activity/{historical_activity_id}/handover-complete".encode(),
+            response.data,
+        )
+        self.assertEqual(
+            self.client.get(
+                f"/shift/20/activity/{historical_activity_id}/handover-complete"
+                "?closing_shift_id=11"
+            ).status_code,
+            403,
+        )
+
+    def test_handover_completion_is_not_a_general_edit_and_requires_authorization(self):
+        activity_id = self.insert_in_progress_activity(
+            shift_id=10,
+            user_id=1,
+            description="Protected handover activity",
+        )
+        handover_url = (
+            f"/shift/10/activity/{activity_id}/handover-complete"
+            "?closing_shift_id=10"
+        )
+
+        for user_id, role in (
+            (1, "Support Worker"),
+            (3, "Support Worker"),
+            (4, "Support Worker"),
+            (5, "Support Worker"),
+            (6, "Admin"),
+        ):
+            with self.subTest(user_id=user_id, role=role):
+                self.login(user_id, role)
+                self.assertEqual(self.client.get(handover_url).status_code, 403)
+                self.assertEqual(
+                    self.client.post(
+                        handover_url,
+                        data=self.handover_payload(),
+                    ).status_code,
+                    403,
+                )
+
+        self.login(2)
+        forged_closing_shift_url = (
+            f"/shift/10/activity/{activity_id}/handover-complete"
+            "?closing_shift_id=20"
+        )
+        self.assertEqual(
+            self.client.get(forged_closing_shift_url).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                handover_url,
+                data=self.handover_payload(
+                    action="save",
+                    closing_shift_id="10",
+                ),
+            ).status_code,
+            400,
+        )
+        self.assertEqual(self.activity_row(activity_id)["status"], "In Progress")
+
+        wrong_client_id = self.insert_in_progress_activity(
+            shift_id=40,
+            user_id=1,
+            description="Wrong client activity",
+        )
+        wrong_client_url = (
+            f"/shift/40/activity/{wrong_client_id}/handover-complete"
+            "?closing_shift_id=10"
+        )
+        self.assertEqual(self.client.get(wrong_client_url).status_code, 403)
+
+        completed_id = self.insert_completed_activity(shift_id=10, user_id=1)
+        completed_url = (
+            f"/shift/10/activity/{completed_id}/handover-complete"
+            "?closing_shift_id=10"
+        )
+        self.assertEqual(self.client.get(completed_url).status_code, 403)
+
+    def test_handover_completion_rechecks_version_before_writing(self):
+        activity_id = self.insert_in_progress_activity(
+            shift_id=10,
+            user_id=1,
+            description="Stale handover activity",
+        )
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute(
+                "UPDATE shift_activities SET version_number = 2 "
+                "WHERE shift_activity_id = ?",
+                (activity_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login(2)
+        response = self.client.post(
+            f"/shift/10/activity/{activity_id}/handover-complete"
+            "?closing_shift_id=10",
+            data=self.handover_payload(
+                expected_version=1,
+                closing_shift_id="10",
+            ),
+        )
+        self.assertEqual(response.status_code, 409)
+        row = self.activity_row(activity_id)
+        self.assertEqual(row["status"], "In Progress")
+        self.assertEqual(row["version_number"], 2)
+        self.assertIsNone(row["completed_by_user_id"])
 
     def test_validation_rejects_no_category_blank_description_and_bad_times(self):
         self.login(1)

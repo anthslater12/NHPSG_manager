@@ -145,6 +145,13 @@
                                 shift_id=shift.shift_id,
                                 activity_id=entry.shift_activity_id
                             ) }}">Continue</a>
+                        {% elif shift.editable and entry.status == 'In Progress' %}
+                            <a href="{{ url_for(
+                                'shift_activity_handover_complete',
+                                shift_id=entry.shift_id,
+                                activity_id=entry.shift_activity_id,
+                                closing_shift_id=shift.shift_id
+                            ) }}">Complete Handover</a>
                         {% endif %}
                     </td>
                 </tr>
@@ -152,6 +159,39 @@
         </table>
     {% else %}
         <p>No activities recorded for this shift yet.</p>
+    {% endif %}
+
+    {% if handover_entries %}
+        <h3>Other In-Progress Activities for this Client</h3>
+        <table>
+            <tr>
+                <th>Original Shift</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Categories</th>
+                <th>Description</th>
+                <th>Started By</th>
+                <th></th>
+            </tr>
+            {% for entry in handover_entries %}
+                <tr>
+                    <td>{{ entry.shift_date }} ({{ entry.shift_type }})</td>
+                    <td>{{ entry.start_time }}</td>
+                    <td>{{ entry.end_time or "Not recorded" }}</td>
+                    <td>{{ entry.category_summary }}</td>
+                    <td>{{ entry.activity_description or "Not recorded" }}</td>
+                    <td>{{ entry.recorded_by_name }}</td>
+                    <td>
+                        <a href="{{ url_for(
+                            'shift_activity_handover_complete',
+                            shift_id=entry.shift_id,
+                            activity_id=entry.shift_activity_id,
+                            closing_shift_id=shift.shift_id
+                        ) }}">Complete Handover</a>
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
     {% endif %}
 
     <p>
