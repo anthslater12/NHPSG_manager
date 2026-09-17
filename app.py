@@ -2544,12 +2544,14 @@ def convert_food_fluid_event_input_to_utc(
         now_utc
     )
     event_utc = parse_behaviour_utc(event_at_utc)
-    start_utc, end_utc = get_food_fluid_shift_window(shift)
-
-    if event_utc < start_utc:
+    shift_date = date.fromisoformat(shift["shift_date"])
+    event_local = event_utc.astimezone(VANCOUVER_TIMEZONE)
+    if get_current_shift_date(event_local) != shift_date:
         raise ValueError(
-            "Event time must not be before the actual assignment start."
+            "Event date must belong to the selected operational shift."
         )
+
+    _, end_utc = get_food_fluid_shift_window(shift)
     if end_utc is not None and event_utc > end_utc:
         raise ValueError(
             "Event time must not be after the actual assignment end."

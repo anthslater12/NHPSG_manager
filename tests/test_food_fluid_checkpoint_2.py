@@ -285,19 +285,26 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.counts(), (1, 1))
 
-    def test_event_before_actual_assignment_start_is_rejected(self):
+    def test_automatic_sign_on_allows_retrospective_same_day_entry(self):
         conn = sqlite3.connect(self.database_path)
         conn.execute(
-            "UPDATE shift_staff SET actual_start_time = '14:00' "
+            "UPDATE shift_staff SET actual_start_time = '08:00', "
+            "sign_on_at = '2024-01-15T16:00:00Z' "
             "WHERE shift_id = 10 AND user_id = 1"
         )
         conn.commit()
         conn.close()
 
         self.login(1)
-        response = self.post(event_local="2024-01-15T13:59")
+        response = self.post(event_local="2024-01-15T07:40")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.counts(), (1, 1))
+
+    def test_unrelated_operational_date_is_rejected(self):
+        self.login(1)
+        response = self.post(event_local="2024-01-14T23:59")
         self.assertEqual(response.status_code, 400)
-        self.assertIn(b"actual assignment start", response.data)
+        self.assertIn(b"operational shift", response.data)
         self.assertEqual(self.counts(), (0, 0))
 
     def test_completed_assignment_uses_actual_end(self):
@@ -439,8 +446,16 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
         }
         for field_name, value in unapproved_fields.items():
             with self.subTest(field_name=field_name):
+                if field_name == "shift_id":
+                    response = self.client.post(
+                        "/shift/10/food-fluid/new",
+                        data=self.payload(shift_id=value),
+                        follow_redirects=False
+                    )
+                else:
+                    response = self.post(**{field_name: value})
                 self.assertEqual(
-                    self.post(**{field_name: value}).status_code,
+                    response.status_code,
                     400
                 )
         self.assertEqual(self.counts(), (0, 0))
