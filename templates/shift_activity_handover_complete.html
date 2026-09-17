@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+{% include "_documentation_context_banner.html" %}
+
+<div class="card">
+    <h2>Complete Handover Activity</h2>
+
+    <p>
+        <strong>Original Shift:</strong>
+        {{ activity.shift_date }} ({{ activity.shift_type }})<br>
+        <strong>Started by:</strong> {{ activity.recorded_by_name }}<br>
+        <strong>Status:</strong> {{ activity.status }}
+    </p>
+
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <p>
+        This Activity remains recorded against its original shift. Only the
+        completion time may be supplied here.
+    </p>
+
+    <form method="post">
+        <input type="hidden" name="action" value="complete">
+        <input type="hidden" name="expected_version" value="{{ values.get('expected_version', activity.version_number) }}">
+        <input type="hidden" name="closing_shift_id" value="{{ closing_shift_id }}">
+
+        <label for="end_time">End Time</label>
+        <input
+            type="time"
+            id="end_time"
+            name="end_time"
+            value="{{ values.get('end_time') or '' }}"
+            required
+        >
+
+        <button type="submit">Complete Activity</button>
+    </form>
+
+    <p>
+        <a href="{{ url_for('shift_activities', shift_id=closing_shift_id) }}">
+            Back to Activities
+        </a>
+    </p>
+</div>
+
+{% endblock %}
