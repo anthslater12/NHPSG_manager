@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -62,6 +63,7 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
                 user_id INTEGER NOT NULL,
                 actual_start_time TEXT NOT NULL,
                 actual_end_time TEXT,
+                actual_end_at_utc TEXT,
                 sign_on_at TEXT,
                 sign_off_at TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
@@ -262,12 +264,95 @@ class FoodFluidCheckpointTwoTests(unittest.TestCase):
             "2026-07-25"
         )
 
-    def test_event_time_outside_shift_window_is_rejected(self):
+    def test_event_at_nominal_day_boundary_uses_actual_assignment_window(self):
         self.login(1)
         response = self.post(event_local="2024-01-15T15:00")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.counts(), (1, 1))
+
+    def test_open_assignment_accepts_entry_after_nominal_day_boundary(self):
+        conn = sqlite3.connect(self.database_path)
+        conn.execute(
+            "UPDATE shift_staff SET actual_start_time = '14:00' "
+            "WHERE shift_id = 10 AND user_id = 1"
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self.rows("shifts")[0]["shift_type"], "Day")
+        self.login(1)
+        response = self.post(event_local="2024-01-15T15:01")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.counts(), (1, 1))
+
+    def test_event_before_actual_assignment_start_is_rejected(self):
+        conn = sqlite3.connect(self.database_path)
+        conn.execute(
+            "UPDATE shift_staff SET actual_start_time = '14:00' "
+            "WHERE shift_id = 10 AND user_id = 1"
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(1)
+        response = self.post(event_local="2024-01-15T13:59")
         self.assertEqual(response.status_code, 400)
-        self.assertIn(b"within the selected shift", response.data)
+        self.assertIn(b"actual assignment start", response.data)
         self.assertEqual(self.counts(), (0, 0))
+
+    def test_completed_assignment_uses_actual_end(self):
+        conn = sqlite3.connect(self.database_path)
+        conn.execute("""
+            UPDATE shift_staff
+            SET actual_start_time = '14:00',
+                actual_end_at_utc = '2024-01-15T23:00:00Z',
+                sign_on_at = '2024-01-15T22:00:00Z',
+                sign_off_at = '2024-01-15T23:00:00Z',
+                active = 0
+            WHERE shift_id = 10 AND user_id = 1
+        """)
+        conn.commit()
+        conn.close()
+
+        self.login(1)
+        with self.client.session_transaction() as session:
+            session[app.DOCUMENTATION_CONTEXT_SESSION_KEY] = 10
+
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2024, 1, 16, 2, 0, tzinfo=timezone.utc)
+        ):
+            inside = self.post(event_local="2024-01-15T14:30")
+            outside = self.post(event_local="2024-01-15T15:01")
+
+        self.assertEqual(inside.status_code, 302)
+        self.assertEqual(outside.status_code, 400)
+        self.assertIn(b"actual assignment end", outside.data)
+        self.assertEqual(self.counts(), (1, 1))
+
+    def test_future_event_remains_rejected(self):
+        shift = {
+            "shift_date": "2024-01-15",
+            "shift_type": "Day",
+            "actual_start_time": "14:00",
+            "actual_end_at_utc": None,
+        }
+        with self.assertRaisesRegex(ValueError, "future"):
+            app.convert_food_fluid_event_input_to_utc(
+                shift,
+                "2024-01-15T15:01",
+                now_utc=datetime(2024, 1, 15, 22, 0, tzinfo=timezone.utc)
+            )
+
+    def test_missing_actual_assignment_end_is_rejected(self):
+        shift = {
+            "shift_date": "2024-01-15",
+            "shift_type": "Day",
+            "actual_start_time": "14:00",
+        }
+        with self.assertRaisesRegex(ValueError, "actual assignment end"):
+            app.get_food_fluid_shift_window(shift)
 
     def test_repeated_fall_back_time_requires_explicit_choice(self):
         self.login(1)

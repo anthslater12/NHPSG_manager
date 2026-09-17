@@ -461,7 +461,7 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
                 "note": "previous sleep",
             })
             self.client.post("/shift/11/food-fluid/new", data={
-                "event_local": "2026-08-06T09:00",
+                "event_local": "2026-08-06T07:30",
                 "interaction_type": "Offered",
                 "item_description": "Breakfast",
                 "outcome": "All consumed",
@@ -518,7 +518,7 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
             conn.execute(
                 "SELECT event_at_utc FROM food_fluid_entries WHERE shift_id = 11"
             ).fetchone()[0],
-            "2026-08-06T16:00:00Z"
+            "2026-08-06T14:30:00Z"
         )
         self.assertEqual(
             conn.execute(

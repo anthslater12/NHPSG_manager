@@ -55,6 +55,7 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
                 user_id INTEGER NOT NULL,
                 actual_start_time TEXT NOT NULL,
                 actual_end_time TEXT,
+                actual_end_at_utc TEXT,
                 sign_on_at TEXT,
                 sign_off_at TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
