@@ -105,10 +105,10 @@ class SleepEventsTests(unittest.TestCase):
 
     def test_assigned_worker_records_fell_asleep_with_one_visible_audit(self):
         self.login(1)
-        response = self.post("fell_asleep")
+        response = self.post("fell_asleep", note="Settled")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type, client_id, shift_id, recorded_by_user_id FROM sleep_events"), [("fell_asleep", 2, 10, 1)])
-        self.assertEqual(self.rows("SELECT activity_type, summary, client_id, shift_id, user_id, related_table, related_id, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_fell_asleep", "Client fell asleep", 2, 10, 1, "sleep_events", 1, "2026-08-02T15:00:00Z", None, 0)])
+        self.assertEqual(self.rows("SELECT activity_type, summary, client_id, shift_id, user_id, related_table, related_id, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_fell_asleep", "Client fell asleep", 2, 10, 1, "sleep_events", 1, "2026-08-02T15:00:00Z", "Note: Settled", 1)])
 
     def test_sleep_note_is_trimmed_and_storyline_visible(self):
         self.login(1)
@@ -123,24 +123,57 @@ class SleepEventsTests(unittest.TestCase):
         self.assertIn(b"&lt;b&gt;Settled&lt;/b&gt;", response.data)
         self.assertNotIn(b"<b>Settled</b>", response.data)
 
-    def test_whitespace_only_sleep_note_is_null_and_hidden(self):
+    def test_blank_or_whitespace_fell_asleep_note_is_rejected(self):
         self.login(1)
-        self.assertEqual(self.post("fell_asleep", note="  \t ").status_code, 302)
-        self.assertEqual(self.rows("SELECT note FROM sleep_events"), [(None,)])
-        self.assertEqual(self.rows("SELECT details, storyline_visible FROM activity_log"), [(None, 0)])
+        for note in ("", "  \t "):
+            with self.subTest(note=repr(note)):
+                response = self.post("fell_asleep", note=note)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(b"Notes are required.", response.data)
+                self.assertEqual(self.rows("SELECT COUNT(*) FROM sleep_events"), [(0,)])
+                self.assertEqual(self.rows("SELECT COUNT(*) FROM activity_log"), [(0,)])
+
+    def test_blank_or_whitespace_woke_up_note_is_rejected(self):
+        self.login(1)
+        for note in ("", "\t  "):
+            with self.subTest(note=repr(note)):
+                response = self.post("woke_up", note=note)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(b"Notes are required.", response.data)
+                self.assertEqual(self.rows("SELECT COUNT(*) FROM sleep_events"), [(0,)])
+                self.assertEqual(self.rows("SELECT COUNT(*) FROM activity_log"), [(0,)])
+
+    def test_sleep_note_field_is_required(self):
+        self.login(1)
+        response = self.client.get("/shift/10/sleep")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'<label for="sleep-note">Notes</label>', response.data)
+        self.assertIn(
+            b'<textarea id="sleep-note" name="note" rows="3" required>',
+            response.data,
+        )
+        self.assertNotIn(b"Optional note", response.data)
 
     def test_sleep_history_uses_dash_for_missing_note(self):
         self.login(1)
-        self.assertEqual(self.post("fell_asleep").status_code, 302)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO sleep_events "
+            "(client_id, shift_id, event_type, event_datetime, "
+            "recorded_by_user_id, note) VALUES (?, ?, ?, ?, ?, ?)",
+            (2, 10, "fell_asleep", "2026-08-02T15:00:00Z", 1, None),
+        )
+        conn.commit()
+        conn.close()
         response = self.client.get("/shift/10/sleep")
         self.assertIn(b">\xe2\x80\x94</td>", response.data)
 
     def test_assigned_worker_records_woke_up_without_prior_event(self):
         self.login(1)
-        response = self.post("woke_up")
+        response = self.post("woke_up", note="Awake and asking for breakfast")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type FROM sleep_events"), [("woke_up",)])
-        self.assertEqual(self.rows("SELECT activity_type, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_woke_up", "2026-08-02T15:00:00Z", None, 0)])
+        self.assertEqual(self.rows("SELECT activity_type, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_woke_up", "2026-08-02T15:00:00Z", "Note: Awake and asking for breakfast", 1)])
 
     def test_wake_note_is_stored_and_logged(self):
         self.login(1)
@@ -150,8 +183,8 @@ class SleepEventsTests(unittest.TestCase):
 
     def test_duplicate_events_are_append_only(self):
         self.login(1)
-        self.assertEqual(self.post("fell_asleep").status_code, 302)
-        self.assertEqual(self.post("fell_asleep", event_local="2026-08-02T08:01").status_code, 302)
+        self.assertEqual(self.post("fell_asleep", note="Settled").status_code, 302)
+        self.assertEqual(self.post("fell_asleep", event_local="2026-08-02T08:01", note="Settled again").status_code, 302)
         self.assertEqual(self.rows("SELECT event_type FROM sleep_events"), [("fell_asleep",), ("fell_asleep",)])
 
     def test_unassigned_signed_off_closed_cancelled_and_invalid_submissions_write_nothing(self):
@@ -166,22 +199,22 @@ class SleepEventsTests(unittest.TestCase):
         self.login(1)
         response = self.client.post("/shift/10/sleep", data={
             "event_type": "fell_asleep", "event_local": "2026-08-02T08:00",
-            "client_id": "1", "shift_id": "999"
+            "client_id": "1", "shift_id": "999", "note": "Settled"
         })
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT client_id, shift_id FROM sleep_events"), [(2, 10)])
 
     def test_recent_history_is_newest_first(self):
         self.login(1)
-        self.post("fell_asleep", event_local="2026-08-02T06:00")
-        self.post("woke_up", event_local="2026-08-02T07:00")
+        self.post("fell_asleep", event_local="2026-08-02T06:00", note="Settled")
+        self.post("woke_up", event_local="2026-08-02T07:00", note="Awake")
         response = self.client.get("/shift/10/sleep")
         self.assertEqual(response.status_code, 200)
         self.assertLess(response.data.find(b"Woke up"), response.data.find(b"Fell asleep"))
 
     def test_sleep_history_displays_vancouver_local_time_without_utc_iso(self):
         self.login(1)
-        self.post("woke_up", event_local="2026-08-03T06:00")
+        self.post("woke_up", event_local="2026-08-03T06:00", note="Awake")
         response = self.client.get("/shift/10/sleep")
         self.assertIn(b"2026-08-03 06:00 AM", response.data)
         self.assertNotIn(b"2026-08-03T13:00:00Z", response.data)

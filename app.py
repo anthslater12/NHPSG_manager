@@ -22211,11 +22211,14 @@ def sleep_events(shift_id):
     if request.method == "POST":
         event_type = request.form.get("event_type", "")
         event_local = request.form.get("event_local", "")
-        note = request.form.get("note", "").strip() or None
+        submitted_note = request.form.get("note", "")
+        note = submitted_note.strip()
         values["event_local"] = event_local
-        values["note"] = request.form.get("note", "")
+        values["note"] = submitted_note
         if event_type not in ("fell_asleep", "woke_up"):
             error = "Sleep event type is invalid."
+        elif not note:
+            error = "Notes are required."
         else:
             try:
                 local_naive = _parse_vancouver_local_input(event_local)

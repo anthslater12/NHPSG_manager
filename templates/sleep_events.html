@@ -11,8 +11,8 @@
     <form method="post">
         <label for="event_local">Event date and time</label>
         <input type="datetime-local" id="event_local" name="event_local" value="{{ values.event_local }}" required>
-        <label for="sleep-note">Optional note</label>
-        <textarea id="sleep-note" name="note" rows="3">{{ values.note }}</textarea>
+        <label for="sleep-note">Notes</label>
+        <textarea id="sleep-note" name="note" rows="3" required>{{ values.note }}</textarea>
         <button type="submit" name="event_type" value="fell_asleep">Record Fell Asleep</button>
         <button type="submit" name="event_type" value="woke_up">Record Woke Up</button>
     </form>
