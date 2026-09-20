@@ -37,8 +37,8 @@
                             <td>{{ resource['display_order'] }}</td>
                             <td>{{ resource['original_filename'] }}</td>
                             <td>{{ resource['uploaded_by_name'] or ('User ' ~ resource['uploaded_by_user_id']) }}</td>
-                            <td>{{ resource['created_at_utc'] }}</td>
-                            <td>{{ resource['updated_at_utc'] }}</td>
+                            <td>{{ resource['created_at_display'] }}</td>
+                            <td>{{ resource['updated_at_display'] }}</td>
                             <td>
                                 <a href="{{ url_for('worker_resource_edit', resource_id=resource['resource_id']) }}">Edit</a>
                                 {% if resource['active'] %}

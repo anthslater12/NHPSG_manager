@@ -233,6 +233,46 @@ class WorkerResourceManagementTests(unittest.TestCase):
         )
         self.assertNotIn(b"/worker-resources/manage/" + str(active_id).encode() + b"/activate", response.data)
 
+    def test_management_timestamps_display_vancouver_local_time_without_mutating_utc(self):
+        resource_id = self.seed_resource(
+            title="Timestamp example",
+            stored_filename="timestamp-example.mp4",
+            created_at_utc="2026-09-20T02:16:50Z",
+            updated_at_utc="2026-01-15T08:16:50Z",
+        )
+        summer_id = self.seed_resource(
+            title="Summer timestamp",
+            stored_filename="summer-timestamp.mp4",
+            created_at_utc="2026-07-15T08:16:50Z",
+            updated_at_utc="2026-07-15T08:16:50Z",
+        )
+        malformed_id = self.seed_resource(
+            title="Malformed timestamp",
+            stored_filename="malformed-timestamp.mp4",
+            created_at_utc="not-a-timestamp",
+            updated_at_utc="",
+        )
+        before = self.row(resource_id)
+        self.login(2)
+        response = self.client.get("/worker-resources/manage")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Sep 19, 2026 7:16 PM", response.data)
+        self.assertIn(b"Jan 15, 2026 12:16 AM", response.data)
+        self.assertIn(b"Jul 15, 2026 1:16 AM", response.data)
+        self.assertIn(b"Date/time unavailable", response.data)
+        for raw_value in (
+            b"2026-09-20T02:16:50Z",
+            b"2026-01-15T08:16:50Z",
+            b"2026-07-15T08:16:50Z",
+        ):
+            self.assertNotIn(raw_value, response.data)
+        self.assertEqual(self.row(resource_id)["created_at_utc"], before["created_at_utc"])
+        self.assertEqual(self.row(resource_id)["updated_at_utc"], before["updated_at_utc"])
+        self.assertEqual(app.VANCOUVER_TIMEZONE.key, "America/Vancouver")
+        self.assertIsNotNone(self.row(summer_id))
+        self.assertIsNotNone(self.row(malformed_id))
+
     def test_management_list_uses_active_category_display_title_order(self):
         self.seed_resource(
             title="Alpha late",

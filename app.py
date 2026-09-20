@@ -32232,6 +32232,23 @@ WORKER_RESOURCE_ALLOWED_FILE_TYPES = {
 }
 
 
+def format_worker_resource_local_datetime(value):
+    """Format a stored UTC Worker Resource timestamp for management display."""
+    try:
+        local_value = parse_staff_notice_utc_datetime(value).astimezone(
+            VANCOUVER_TIMEZONE
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "Date/time unavailable"
+
+    hour = local_value.hour % 12 or 12
+    meridiem = "AM" if local_value.hour < 12 else "PM"
+    return (
+        f"{local_value.strftime('%b')} {local_value.day}, "
+        f"{local_value.year} {hour}:{local_value.minute:02d} {meridiem}"
+    )
+
+
 def _worker_resource_form_values(form=None):
     if form is None:
         form = {}
@@ -32750,6 +32767,19 @@ def worker_resource_manage():
         """).fetchall()
     finally:
         conn.close()
+
+    resources = [
+        {
+            **dict(resource),
+            "created_at_display": format_worker_resource_local_datetime(
+                resource["created_at_utc"]
+            ),
+            "updated_at_display": format_worker_resource_local_datetime(
+                resource["updated_at_utc"]
+            ),
+        }
+        for resource in resources
+    ]
 
     return render_template(
         "worker_resource_manage.html",
