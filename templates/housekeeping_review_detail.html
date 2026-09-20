@@ -12,7 +12,7 @@
                 'client_storyline',
                 client_id=storyline_return_context.storyline_client_id,
                 filter=storyline_return_context.storyline_filter,
-                page=storyline_return_context.storyline_page
+                date=storyline_return_context.storyline_date
             ) }}">
                 Back to Client Storyline
             </a>
@@ -150,7 +150,7 @@
             {% if storyline_return_context %}
                 <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
                 <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
-                <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+                <input type="hidden" name="storyline_date" value="{{ storyline_return_context.storyline_date }}">
             {% endif %}
 
             <button type="submit">

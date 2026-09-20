@@ -139,6 +139,7 @@ class ClientStorylineTests(unittest.TestCase):
         conn.commit()
         behaviour_migration.migrate(conn)
         conn.close()
+        self.today = datetime.now(app.VANCOUVER_TIMEZONE).date()
         self.client = app.app.test_client()
 
     def cleanup(self):
@@ -150,7 +151,9 @@ class ClientStorylineTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             session.update(user_id=user_id, role=role, full_name="Test User")
 
-    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when="2026-08-02 10:00:00", user_id=1, details=None, event_datetime=None, related_table=None, related_id=None):
+    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when=None, user_id=1, details=None, event_datetime=None, related_table=None, related_id=None):
+        if when is None:
+            when = f"{self.today} 10:00:00"
         conn = sqlite3.connect(self.path)
         conn.execute("""
             INSERT INTO activity_log
@@ -168,14 +171,17 @@ class ClientStorylineTests(unittest.TestCase):
             INSERT INTO incident_reports
             (incident_id, client_id, reported_by_user_id, incident_date,
              incident_time, location, incident_type, description)
-            VALUES (?, ?, 1, '2026-08-02', '10:00', 'Home', 'Medical', 'Details')
-        """, (incident_id, client_id))
+            VALUES (?, ?, 1, ?, '10:00', 'Home', 'Medical', 'Details')
+        """, (incident_id, client_id, self.today.isoformat()))
         conn.commit()
         conn.close()
 
     def add_behaviour_occurrence(
         self, occurrence_id, client_id=1, status="Recorded", shift_id=None
     ):
+        occurred_at_utc = self.event_utc(self.today, 10, 0)
+        recorded_at_utc = self.event_utc(self.today, 10, 1)
+        voided_at_utc = self.event_utc(self.today, 10, 2)
         conn = sqlite3.connect(self.path)
         conn.execute("""
             INSERT INTO behaviour_occurrences
@@ -183,13 +189,14 @@ class ClientStorylineTests(unittest.TestCase):
              aggression_towards_others, notes, recorded_by_user_id,
              recorded_at_utc, submission_token, status,
              voided_by_user_id, voided_at_utc, void_reason, shift_id)
-            VALUES (?, ?, '2026-08-02T17:00:00Z', 1, 'Behaviour notes',
-                    1, '2026-08-02T17:01:00Z', ?, ?,
+            VALUES (?, ?, ?, 1, 'Behaviour notes',
+                    1, ?, ?, ?,
                     CASE WHEN ? = 'Voided' THEN 2 ELSE NULL END,
-                    CASE WHEN ? = 'Voided' THEN '2026-08-02T17:02:00Z' ELSE NULL END,
+                    CASE WHEN ? = 'Voided' THEN ? ELSE NULL END,
                     CASE WHEN ? = 'Voided' THEN 'Test void' ELSE NULL END, ?)
-        """, (occurrence_id, client_id, f"behaviour-{occurrence_id}", status,
-               status, status, status, shift_id))
+        """, (occurrence_id, client_id, occurred_at_utc, recorded_at_utc,
+               f"behaviour-{occurrence_id}", status, status, status,
+               voided_at_utc, status, shift_id))
         conn.commit()
         conn.close()
 
@@ -200,18 +207,19 @@ class ClientStorylineTests(unittest.TestCase):
     ):
         conn = sqlite3.connect(self.path)
         conn.execute(
-            "UPDATE shifts SET shift_date = '2026-08-02' WHERE shift_id = ?",
-            (shift_id,)
+            "UPDATE shifts SET shift_date = ? WHERE shift_id = ?",
+            (self.today.isoformat(), shift_id)
         )
         conn.execute("""
             INSERT INTO shift_activities
             (shift_activity_id, shift_id, recorded_by_user_id, start_time,
              end_time, a_selected, t_selected, ls_selected,
              activity_description, created_at, status)
-            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, '2026-08-02 09:00:00', ?)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             activity_id, shift_id, start_time, end_time, a_selected,
-            t_selected, ls_selected, description, status
+            t_selected, ls_selected, description,
+            f"{self.today} 09:00:00", status
         ))
         conn.commit()
         conn.close()
@@ -585,7 +593,7 @@ class ClientStorylineTests(unittest.TestCase):
             for field_name in (
                 "storyline_client_id",
                 "storyline_filter",
-                "storyline_page",
+                "storyline_date",
             ):
                 self.assertIn(field_name, source, template_name)
 
@@ -605,7 +613,7 @@ class ClientStorylineTests(unittest.TestCase):
             query_string={
                 "storyline_client_id": 1,
                 "storyline_filter": "Incident",
-                "storyline_page": 2,
+                "storyline_date": "2026-08-02",
             }
         )
         self.assertEqual(detail.status_code, 200)
@@ -623,13 +631,13 @@ class ClientStorylineTests(unittest.TestCase):
             data={
                 "storyline_client_id": "1",
                 "storyline_filter": "Incident",
-                "storyline_page": "2",
+                "storyline_date": "2026-08-02",
             }
         )
         self.assertEqual(reviewed.status_code, 302)
         self.assertIn(b"storyline_client_id=1", reviewed.data)
         self.assertIn(b"storyline_filter=Incident", reviewed.data)
-        self.assertIn(b"storyline_page=2", reviewed.data)
+        self.assertIn(b"storyline_date=2026-08-02", reviewed.data)
         self.assertEqual(self._incident_review_count(31), 1)
         conn = sqlite3.connect(self.path)
         self.assertEqual(
@@ -653,7 +661,7 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"Back to Client Storyline", reviewed_detail.data)
         self.assertIn(b"You have reviewed this incident", reviewed_detail.data)
         storyline_after_review = self.client.get(
-            "/client/1/storyline?filter=Incident&page=2"
+            f"/client/1/storyline?filter=Incident&date={self.today.isoformat()}"
         )
         self.assertIn(b"You have reviewed this", storyline_after_review.data)
         self.assertIn(b"client-storyline-detail-position", storyline_after_review.data)
@@ -785,7 +793,7 @@ class ClientStorylineTests(unittest.TestCase):
 
         detail = self.client.get(
             "/manager-review/incidents/44?storyline_client_id=1&"
-            "storyline_filter=Incident&storyline_page=1"
+            "storyline_filter=Incident&storyline_date=2026-08-02"
         )
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Back to Client Storyline", detail.data)
@@ -841,14 +849,15 @@ class ClientStorylineTests(unittest.TestCase):
 
     def test_labels_filters_unknown_events_and_date_heading(self):
         self.login()
-        today = datetime.now().date()
+        today = self.today
         self.add_event("sleep_woke_up", "Client woke up", when=f"{today} 10:00:00")
         self.add_event("care_task_completed", "Bath - Completed", when=f"{today} 10:01:00")
-        self.add_event("unknown_visible", "Unknown summary", when=f"{today - timedelta(days=2)} 10:02:00")
+        self.add_event("unknown_visible", "Unknown summary", when=f"{today} 10:02:00")
         page = self.client.get("/client/1/storyline").data
         self.assertIn(b"Sleep", page)
         self.assertIn(b"Care", page)
-        self.assertIn(b"Client activity", page)
+        self.assertIn(b"Read-only client activity history", page)
+        self.assertIn(b'<span class="status-active">Client activity</span>', page)
         self.assertIn(b"Today", page)
         filtered = self.client.get("/client/1/storyline?filter=Sleep").data
         self.assertIn(b"Client woke up", filtered)
@@ -892,28 +901,92 @@ class ClientStorylineTests(unittest.TestCase):
             self.assertIn(included, filtered)
             self.assertNotIn(excluded, filtered)
 
-    def test_invalid_filter_and_pagination_are_safe(self):
+    def test_invalid_filter_and_date_are_safe(self):
         self.login()
-        for index in range(30):
-            self.add_event("shift_activity_created", f"Activity {index}", when=f"2026-08-02 10:{index % 60:02d}:00")
-        response = self.client.get("/client/1/storyline?filter=invalid&page=2")
+        self.add_event("shift_activity_created", "Activity event")
+        response = self.client.get(
+            "/client/1/storyline?filter=invalid&date=not-a-date"
+        )
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Newer Events", response.data)
-        older = self.client.get("/client/1/storyline?filter=Activity&page=2").data
-        self.assertIn(b"Newer Events", older)
-        self.assertNotIn(b"Client activity", older)
+        self.assertIn(b"Activity event", response.data)
+        self.assertIn(self.today.strftime("%Y-%m-%d").encode(), response.data)
+        future = self.today + timedelta(days=1)
+        future_response = self.client.get(
+            "/client/1/storyline",
+            query_string={"date": future.isoformat()},
+        )
+        self.assertEqual(future_response.status_code, 200)
+        self.assertIn(self.today.strftime("%A, %B").encode(), future_response.data)
 
-    def test_pagination_is_limited_and_links_preserve_filter(self):
+    def test_selected_day_is_full_not_capped_and_navigation_preserves_filter(self):
         self.login()
-        for index in range(26):
-            self.add_event("shift_activity_created", f"Paged {index}", when=f"2026-08-02 09:{index:02d}:00")
-        first = self.client.get("/client/1/storyline?filter=Activity&page=1").data
-        self.assertIn(b"Older Events", first)
-        self.assertIn(b"filter=Activity", first)
-        self.assertLess(first.find(b"Paged 25"), first.find(b"Paged 1"))
-        second = self.client.get("/client/1/storyline?filter=Activity&page=2").data
-        self.assertIn(b"Newer Events", second)
-        self.assertIn(b"Paged 0", second)
+        selected = self.today - timedelta(days=1)
+        for index in range(30):
+            self.add_event(
+                "shift_activity_created",
+                f"Full day {index}",
+                when=f"{selected} 09:{index:02d}:00",
+            )
+        self.add_event(
+            "shift_activity_created", "Previous day event",
+            when=f"{selected - timedelta(days=1)} 23:59:00",
+        )
+        self.add_event(
+            "shift_activity_created", "Following day event",
+            when=f"{selected + timedelta(days=1)} 00:01:00",
+        )
+        first = self.client.get(
+            "/client/1/storyline",
+            query_string={"filter": "Activity", "date": selected.isoformat()},
+        ).data
+        self.assertEqual(first.count(b'class="storyline-event"'), 30)
+        self.assertIn(b"Full day 0", first)
+        self.assertIn(b"Full day 29", first)
+        self.assertNotIn(b"Previous day event", first)
+        self.assertNotIn(b"Following day event", first)
+        self.assertNotIn(b"Older Events", first)
+        self.assertNotIn(b"Newer Events", first)
+        self.assertIn(
+            f"/client/1/storyline?filter=Activity&amp;date={(selected - timedelta(days=1)).isoformat()}".encode(),
+            first,
+        )
+        self.assertIn(
+            f"/client/1/storyline?filter=Activity&amp;date={(selected + timedelta(days=1)).isoformat()}".encode(),
+            first,
+        )
+
+    def test_selected_date_uses_vancouver_midnight_and_legacy_fallback(self):
+        self.login()
+        selected = self.today
+        previous = selected - timedelta(days=1)
+        self.add_event(
+            "sleep_woke_up", "Before local midnight",
+            when=f"{previous} 23:59:00",
+            event_datetime=self.event_utc(previous, 23, 59),
+        )
+        self.add_event(
+            "sleep_woke_up", "At local midnight",
+            when=f"{selected} 00:00:00",
+            event_datetime=self.event_utc(selected, 0, 0),
+        )
+        self.add_event(
+            "sleep_woke_up", "Legacy local fallback",
+            when=f"{selected} 00:30:00",
+            event_datetime="invalid UTC timestamp",
+        )
+        self.add_event(
+            "sleep_woke_up", "After local midnight",
+            when=f"{selected} 01:00:00",
+            event_datetime=self.event_utc(selected, 1, 0),
+        )
+        page = self.client.get(
+            "/client/1/storyline",
+            query_string={"date": selected.isoformat()},
+        ).data
+        self.assertNotIn(b"Before local midnight", page)
+        self.assertIn(b"At local midnight", page)
+        self.assertIn(b"Legacy local fallback", page)
+        self.assertIn(b"After local midnight", page)
 
     def test_empty_and_filtered_empty_states_render(self):
         self.login()
@@ -1029,7 +1102,9 @@ class ClientStorylineTests(unittest.TestCase):
         conn.close()
 
         self.login(2, "Program Manager")
-        partial = self.client.get("/client/1/storyline?filter=Behaviour")
+        partial = self.client.get(
+            "/client/1/storyline?filter=Behaviour&date=2026-08-02"
+        )
         self.assertEqual(partial.status_code, 200)
         self.assertIn(b"In Progress", partial.data)
         self.assertIn(b"Asked to transition between activities", partial.data)
@@ -1052,7 +1127,9 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertEqual(save.status_code, 302)
 
         self.login(2, "Program Manager")
-        saved = self.client.get("/client/1/storyline?filter=Behaviour")
+        saved = self.client.get(
+            "/client/1/storyline?filter=Behaviour&date=2026-08-02"
+        )
         self.assertIn(b"Blocked behaviour", saved.data)
         self.assertIn(b"Saved current details", saved.data)
         self.assertEqual(saved.data.count(b"Behaviour occurrence recorded"), 1)
@@ -1075,7 +1152,9 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertEqual(complete.status_code, 302)
 
         self.login(2, "Program Manager")
-        final = self.client.get("/client/1/storyline?filter=Behaviour")
+        final = self.client.get(
+            "/client/1/storyline?filter=Behaviour&date=2026-08-02"
+        )
         self.assertIn(b"Completed", final.data)
         self.assertIn(b"Duration until calm: 12 minutes", final.data)
         self.assertIn(b"Moved to a quiet area", final.data)
@@ -1165,7 +1244,9 @@ class ClientStorylineTests(unittest.TestCase):
         )
 
         self.login(1, "Support Worker")
-        page = self.client.get("/client/1/storyline?filter=Behaviour")
+        page = self.client.get(
+            "/client/1/storyline?filter=Behaviour&date=2026-08-02"
+        )
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"12 minutes", page.data)
         self.assertIn(b"Redirected", page.data)
@@ -1261,7 +1342,7 @@ class ClientStorylineTests(unittest.TestCase):
         conn.execute("UPDATE users SET full_name = 'ActorUsername' WHERE user_id = 1")
         conn.commit()
         conn.close()
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get("/client/1/storyline?date=2026-08-02").data
         self.assertIn(b"15:44", page)
         self.assertNotIn(b"15:44:30", page)
         self.assertNotIn(b"ActorUsername", page)
@@ -1273,7 +1354,7 @@ class ClientStorylineTests(unittest.TestCase):
 
     def test_storyline_uses_event_time_for_display_order_and_vancouver_date(self):
         self.login()
-        today = datetime.now(app.VANCOUVER_TIMEZONE).date()
+        today = self.today
         yesterday = today - timedelta(days=1)
         event_datetime = self.event_utc(yesterday, 6, 0)
         self.add_event(
@@ -1283,13 +1364,15 @@ class ClientStorylineTests(unittest.TestCase):
         self.add_event(
             "incident_created", "Legacy event", when=f"{yesterday} 13:30:00"
         )
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get(
+            f"/client/1/storyline?date={yesterday.isoformat()}"
+        ).data
         self.assertIn(b"06:00", page)
         self.assertIn(b"Yesterday", page)
         self.assertLess(page.find(b"Legacy event"), page.find(b"Wake event"))
         self.assertNotIn(event_datetime.encode(), page)
 
-    def test_storyline_is_globally_ordered_by_one_canonical_datetime(self):
+    def test_storyline_selected_day_is_ordered_by_one_canonical_datetime(self):
         self.login()
         today = datetime.now(app.VANCOUVER_TIMEZONE).date()
         yesterday = today - timedelta(days=1)
@@ -1328,24 +1411,18 @@ class ClientStorylineTests(unittest.TestCase):
             when=f"{yesterday} 05:20:00"
         )
 
-        page = self.client.get("/client/1/storyline").data.decode()
-        self.assertEqual(page.count("<h3>Today</h3>"), 1)
+        page = self.client.get(
+            f"/client/1/storyline?date={yesterday.isoformat()}"
+        ).data.decode()
         self.assertEqual(page.count("<h3>Yesterday</h3>"), 1)
-        self.assertEqual(
-            page.count(
-                f"<h3>{older_date.strftime('%A, %B')} "
-                f"{older_date.day}, {older_date.year}</h3>"
-            ),
-            1
-        )
+        self.assertNotIn("<h3>Today</h3>", page)
+        self.assertNotIn("Older 23:00", page)
         summaries = (
-            "Today 08:30",
             "Yesterday 15:38",
             "Yesterday 15:11",
             "Yesterday 15:09",
             "Yesterday 15:08",
             "Yesterday 05:20",
-            "Older 23:00",
         )
         positions = [page.find(summary) for summary in summaries]
         self.assertTrue(all(position >= 0 for position in positions))
@@ -1357,15 +1434,15 @@ class ClientStorylineTests(unittest.TestCase):
         )
         self.add_event(
             "shift_activity_created", "Authoritative ordering Activity",
-            when="2026-08-02 18:00:00",
-            event_datetime=self.event_utc(datetime(2026, 8, 2), 18, 0),
+            when=f"{self.today} 18:00:00",
+            event_datetime=self.event_utc(self.today, 18, 0),
             details="A",
             related_table="shift_activities", related_id=50,
         )
         self.add_event(
             "sleep_woke_up", "Other visible event",
-            when="2026-08-02 12:00:00",
-            event_datetime=self.event_utc(datetime(2026, 8, 2), 12, 0),
+            when=f"{self.today} 12:00:00",
+            event_datetime=self.event_utc(self.today, 12, 0),
         )
         self.login()
 
@@ -1375,6 +1452,72 @@ class ClientStorylineTests(unittest.TestCase):
             page.find(b"Other visible event"),
             page.find(b"Authoritative ordering Activity"),
         )
+
+    def test_authoritative_activity_date_controls_selected_day_membership(self):
+        date_a = self.today - timedelta(days=1)
+        date_b = self.today
+        activity_id = 70
+        self.add_shift_activity(
+            activity_id,
+            start_time="09:30",
+            description="Authoritative date Activity",
+        )
+        self.add_event(
+            "shift_activity_created",
+            "Stale activity-log Activity",
+            when=f"{date_a} 18:00:00",
+            event_datetime=self.event_utc(date_a, 18, 0),
+            related_table="shift_activities",
+            related_id=activity_id,
+        )
+        self.login()
+
+        date_a_page = self.client.get(
+            f"/client/1/storyline?date={date_a.isoformat()}"
+        )
+        self.assertNotIn(b"Authoritative date Activity", date_a_page.data)
+
+        date_b_page = self.client.get(
+            f"/client/1/storyline?date={date_b.isoformat()}"
+        )
+        self.assertIn(b"Authoritative date Activity", date_b_page.data)
+
+    def test_authoritative_behaviour_date_controls_selected_day_membership(self):
+        date_a = self.today - timedelta(days=1)
+        date_b = self.today
+        occurrence_id = 71
+        self.add_behaviour_occurrence(occurrence_id)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE behaviour_occurrences SET occurred_at_utc = ?, "
+            "recorded_at_utc = ? WHERE behaviour_occurrence_id = ?",
+            (
+                self.event_utc(date_b, 11, 0),
+                self.event_utc(date_b, 11, 1),
+                occurrence_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        self.add_event(
+            "behaviour_occurrence_created",
+            "Stale behaviour-log occurrence",
+            when=f"{date_a} 18:00:00",
+            event_datetime=self.event_utc(date_a, 18, 0),
+            related_table="behaviour_occurrences",
+            related_id=occurrence_id,
+        )
+        self.login()
+
+        date_a_page = self.client.get(
+            f"/client/1/storyline?date={date_a.isoformat()}"
+        )
+        self.assertNotIn(b"Stale behaviour-log occurrence", date_a_page.data)
+
+        date_b_page = self.client.get(
+            f"/client/1/storyline?date={date_b.isoformat()}"
+        )
+        self.assertIn(b"Stale behaviour-log occurrence", date_b_page.data)
 
     def test_storyline_same_event_time_uses_activity_id_tie_breaker_and_malformed_falls_back(self):
         self.login()
@@ -1390,7 +1533,9 @@ class ClientStorylineTests(unittest.TestCase):
             "shift_activity_created", "Malformed", when="2026-08-02 12:00:00",
             event_datetime="not-a-timestamp"
         )
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get(
+            "/client/1/storyline?date=2026-08-02"
+        ).data
         self.assertLess(page.find(b"Second"), page.find(b"First"))
         self.assertIn(b"Malformed", page)
 
@@ -1556,12 +1701,12 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"Legacy snapshot details", page)
         self.assertIn(b"Missing source snapshot", page)
 
-    def test_activity_update_completion_audits_are_suppressed_before_pagination(self):
+    def test_activity_update_completion_audits_are_suppressed_in_full_day_view(self):
         self.login()
         for index in range(25):
             self.add_event(
                 "shift_activity_created", f"Primary Activity {index}",
-                when=f"2026-08-02 10:{index:02d}:00"
+                when=f"{self.today} 10:{index:02d}:00"
             )
         self.add_event(
             "shift_activity_updated", "Update audit row",
@@ -1576,7 +1721,6 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertEqual(page.count(b'class="storyline-event"'), 25)
         self.assertNotIn(b"Update audit row", page)
         self.assertNotIn(b"Completion audit row", page)
-        self.assertNotIn(b"Older Events", page)
 
         conn = sqlite3.connect(self.path)
         audit_types = conn.execute("""
@@ -1646,7 +1790,7 @@ class ClientStorylineTests(unittest.TestCase):
         """)
         conn.commit()
         conn.close()
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get("/client/1/storyline?date=2026-08-03").data
         self.assertIn(b"Location: Bathroom", page)
         self.assertIn(b"Size: Large", page)
         self.assertIn(b"Consistency: Soft", page)
@@ -1684,14 +1828,14 @@ class ClientStorylineTests(unittest.TestCase):
         self.login(2, "Program Manager")
         detail = self.client.get(
             "/manager-review/behaviour/42?storyline_client_id=1&"
-            "storyline_filter=Behaviour&storyline_page=2"
+            "storyline_filter=Behaviour&storyline_date=2026-08-02"
         )
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Behaviour notes", detail.data)
         self.assertIn(b"filter=Behaviour", detail.data)
         reviewed = self.client.post(
             "/manager-review/behaviour/42/review",
-            data={"storyline_client_id": "1", "storyline_filter": "Behaviour", "storyline_page": "2"}
+            data={"storyline_client_id": "1", "storyline_filter": "Behaviour", "storyline_date": "2026-08-02"}
         )
         self.assertEqual(reviewed.status_code, 302)
         self.assertIn("filter=Behaviour", reviewed.location)
@@ -1712,7 +1856,7 @@ class ClientStorylineTests(unittest.TestCase):
 
         detail = self.client.get(
             "/manager-review/behaviour/44?storyline_client_id=1&"
-            "storyline_filter=Behaviour&storyline_page=3"
+            "storyline_filter=Behaviour&storyline_date=2026-08-02"
         )
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Management Notes", detail.data)
@@ -1721,7 +1865,7 @@ class ClientStorylineTests(unittest.TestCase):
         reviewed = self.client.post(
             "/manager-review/behaviour/44/review",
             data={"storyline_client_id": "1", "storyline_filter": "Behaviour",
-                  "storyline_page": "3"}
+                  "storyline_date": "2026-08-02"}
         )
         self.assertEqual(reviewed.status_code, 302)
 
@@ -1729,7 +1873,7 @@ class ClientStorylineTests(unittest.TestCase):
             "/manager-review/behaviour/44/management-note",
             data={"note_text": "  Consultant follow-up  ",
                   "storyline_client_id": "1", "storyline_filter": "Behaviour",
-                  "storyline_page": "3"}
+                  "storyline_date": "2026-08-02"}
         )
         self.assertEqual(noted.status_code, 302)
         self.assertIn("filter=Behaviour", noted.location)
@@ -1769,15 +1913,18 @@ class ClientStorylineTests(unittest.TestCase):
         self.add_behaviour_occurrence(48, shift_id=10)
         self.login(2, "Program Manager")
 
+        storyline_date = self.today.isoformat()
         form = self.client.get(
             "/manager-review/behaviour/48/action/new?storyline_client_id=1&"
-            "storyline_filter=Behaviour&storyline_page=4"
+            f"storyline_filter=Behaviour&storyline_date={storyline_date}"
         )
         self.assertEqual(form.status_code, 200)
         self.assertIn(b"Create Behaviour Action", form.data)
         self.assertIn(b"Shift #10", form.data)
-        self.assertIn(b"2026-08-02 10:00", form.data)
-        self.assertNotIn(b"2026-08-02T17:00:00Z", form.data)
+        self.assertIn(f"{self.today} 10:00".encode(), form.data)
+        self.assertNotIn(
+            self.event_utc(self.today, 10, 0).encode(), form.data
+        )
         self.assertIn(b"storyline_client_id", form.data)
 
         created = self.client.post(
@@ -1789,7 +1936,7 @@ class ClientStorylineTests(unittest.TestCase):
                 "assigned_to_user_id": "1",
                 "storyline_client_id": "1",
                 "storyline_filter": "Behaviour",
-                "storyline_page": "4",
+                "storyline_date": storyline_date,
             }
         )
         self.assertEqual(created.status_code, 302)
@@ -1871,8 +2018,12 @@ class ClientStorylineTests(unittest.TestCase):
         self.add_event("sleep_woke_up", "Client Two history", client_id=2)
         for user_id, role in ((2, "Program Manager"), (9, "Behaviour Consultant")):
             self.login(user_id, role)
-            client_one = self.client.get("/client/1/storyline?filter=Sleep&page=1")
-            client_two = self.client.get("/client/2/storyline?filter=Sleep&page=1")
+            client_one = self.client.get(
+                f"/client/1/storyline?filter=Sleep&date={self.today.isoformat()}"
+            )
+            client_two = self.client.get(
+                f"/client/2/storyline?filter=Sleep&date={self.today.isoformat()}"
+            )
             self.assertEqual(client_one.status_code, 200)
             self.assertEqual(client_two.status_code, 200)
             self.assertIn(b"Client One history", client_one.data)

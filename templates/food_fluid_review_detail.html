@@ -12,7 +12,7 @@
                 'client_storyline',
                 client_id=storyline_return_context.storyline_client_id,
                 filter=storyline_return_context.storyline_filter,
-                page=storyline_return_context.storyline_page
+                date=storyline_return_context.storyline_date
             ) }}">
                 Back to Client Storyline
             </a>
@@ -161,7 +161,7 @@
                 state=state_filter,
                 storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
                 storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
-                storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
+                storyline_date=(storyline_return_context.storyline_date if storyline_return_context else None)
             ) }}">
             <button type="submit">Mark Reviewed</button>
         </form>
@@ -189,7 +189,7 @@
             state=state_filter,
             storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
             storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
-            storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
+            storyline_date=(storyline_return_context.storyline_date if storyline_return_context else None)
         ) }}"
     >
 
@@ -255,7 +255,7 @@
                 state=state_filter,
                 storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
                 storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
-                storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
+                storyline_date=(storyline_return_context.storyline_date if storyline_return_context else None)
             ) }}">
                 Create Action
             </a>

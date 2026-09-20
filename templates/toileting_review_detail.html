@@ -12,7 +12,7 @@
                 'client_storyline',
                 client_id=storyline_return_context.storyline_client_id,
                 filter=storyline_return_context.storyline_filter,
-                page=storyline_return_context.storyline_page
+                date=storyline_return_context.storyline_date
             ) }}">
                 Back to Client Storyline
             </a>
@@ -331,7 +331,7 @@
             {% if storyline_return_context %}
                 <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
                 <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
-                <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+                <input type="hidden" name="storyline_date" value="{{ storyline_return_context.storyline_date }}">
             {% endif %}
             <button type="submit" class="link-button">
                 Mark as Reviewed
@@ -364,7 +364,7 @@
         {% if storyline_return_context %}
             <input type="hidden" name="storyline_client_id" value="{{ storyline_return_context.storyline_client_id }}">
             <input type="hidden" name="storyline_filter" value="{{ storyline_return_context.storyline_filter }}">
-            <input type="hidden" name="storyline_page" value="{{ storyline_return_context.storyline_page }}">
+            <input type="hidden" name="storyline_date" value="{{ storyline_return_context.storyline_date }}">
         {% endif %}
 
         <label for="note_text">
@@ -423,7 +423,7 @@
             entry_id=entry.toileting_event_id,
             storyline_client_id=(storyline_return_context.storyline_client_id if storyline_return_context else None),
             storyline_filter=(storyline_return_context.storyline_filter if storyline_return_context else None),
-            storyline_page=(storyline_return_context.storyline_page if storyline_return_context else None)
+            storyline_date=(storyline_return_context.storyline_date if storyline_return_context else None)
         ) }}">
             Create Action
         </a>

@@ -104,7 +104,7 @@ class ToiletingStorylineNotesTests(unittest.TestCase):
         )
         for user_id, role in ((1, "Support Worker"), (2, "Program Manager")):
             self.login(user_id, role)
-            page = self.client.get("/client/1/storyline")
+            page = self.client.get("/client/1/storyline?date=2026-08-04")
             self.assertEqual(page.status_code, 200)
             self.assertIn(b"Additional notes:", page.data)
             self.assertIn(b"Line one", page.data)
@@ -118,7 +118,7 @@ class ToiletingStorylineNotesTests(unittest.TestCase):
         self.add_log("Other client", client_id=99)
         self.add_log("Failed note", success=0)
         self.login()
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get("/client/1/storyline?date=2026-08-04").data
         self.assertIn(b"Location: Bathroom", page)
         self.assertIn(b"Legacy operational note", page)
         self.assertNotIn(b"Hidden note", page)

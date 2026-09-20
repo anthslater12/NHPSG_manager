@@ -311,7 +311,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.login(2, "Admin")
         detail = self.client.get(
             "/manager-review/sleep/1?storyline_client_id=1&"
-            "storyline_filter=Sleep&storyline_page=2"
+            "storyline_filter=Sleep&storyline_date=2026-08-02"
         )
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Back to Management Review", detail.data)
@@ -323,7 +323,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
 
         response = self.client.post(
             "/manager-review/sleep/1/management-note?"
-            "storyline_client_id=1&storyline_filter=Sleep&storyline_page=2",
+            "storyline_client_id=1&storyline_filter=Sleep&storyline_date=2026-08-02",
             data={"note_text": "  Check overnight support plan.  "}
         )
         self.assertEqual(response.status_code, 302)
@@ -412,7 +412,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.login(2, "Admin")
         detail = self.client.get(
             "/manager-review/sleep/1?storyline_client_id=1&"
-            "storyline_filter=Sleep&storyline_page=2"
+            "storyline_filter=Sleep&storyline_date=2026-08-02"
         )
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Linked Actions", detail.data)
@@ -422,7 +422,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
 
         form = self.client.get(
             "/manager-review/sleep/1/action/new?"
-            "storyline_client_id=1&storyline_filter=Sleep&storyline_page=2"
+            "storyline_client_id=1&storyline_filter=Sleep&storyline_date=2026-08-02"
         )
         self.assertEqual(form.status_code, 200)
         self.assertIn(b"Create Sleep Action", form.data)
@@ -555,7 +555,9 @@ class SleepStorylineReviewTests(unittest.TestCase):
             "sleep_woke_up", 2
         )
         self.login(4, "Program Manager")
-        response = self.client.get("/client/1/storyline?filter=Sleep")
+        response = self.client.get(
+            "/client/1/storyline?filter=Sleep&date=2026-08-02"
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data.count(b"View details"), 2)
         self.assertIn(b"/manager-review/sleep/1?", response.data)
@@ -574,10 +576,14 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.add_storyline_event("sleep_fell_asleep", 1)
         self.add_acknowledgement(1, 2)
         self.login(2, "Admin")
-        reviewed = self.client.get("/client/1/storyline").data
+        reviewed = self.client.get(
+            "/client/1/storyline?date=2026-08-02"
+        ).data
         self.assertIn(b"You have reviewed this", reviewed)
         self.login(4, "Program Manager")
-        unreviewed = self.client.get("/client/1/storyline").data
+        unreviewed = self.client.get(
+            "/client/1/storyline?date=2026-08-02"
+        ).data
         self.assertIn(b"Review required", unreviewed)
         self.assertNotIn(b"You have reviewed this", unreviewed)
 
@@ -592,7 +598,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.add_storyline_event("sleep_fell_asleep", 2)
         self.add_storyline_event("sleep_woke_up", 3)
         self.login(2, "Admin")
-        response = self.client.get("/client/1/storyline")
+        response = self.client.get("/client/1/storyline?date=2026-08-02")
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"View details", response.data)
 
@@ -600,7 +606,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.add_sleep_event(1)
         self.add_storyline_event("sleep_fell_asleep", 1)
         self.login(1, "Support Worker")
-        response = self.client.get("/client/1/storyline")
+        response = self.client.get("/client/1/storyline?date=2026-08-02")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Client fell asleep", response.data)
         self.assertNotIn(b"View details", response.data)
@@ -611,7 +617,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.login(2, "Admin")
         detail = self.client.get(
             "/manager-review/sleep/1?storyline_client_id=1&"
-            "storyline_filter=Sleep&storyline_page=2"
+            "storyline_filter=Sleep&storyline_date=2026-08-02"
         )
         self.assertIn(b"Back to Client Storyline", detail.data)
         self.assertIn(b"filter=Sleep", detail.data)
@@ -620,20 +626,20 @@ class SleepStorylineReviewTests(unittest.TestCase):
             data={
                 "storyline_client_id": "1",
                 "storyline_filter": "Sleep",
-                "storyline_page": "2",
+                "storyline_date": "2026-08-02",
             }
         )
         self.assertEqual(response.status_code, 302)
         self.assertIn("storyline_client_id=1", response.location)
         self.assertIn("storyline_filter=Sleep", response.location)
-        self.assertIn("storyline_page=2", response.location)
+        self.assertIn("storyline_date=2026-08-02", response.location)
 
     def test_invalid_storyline_context_does_not_render_back_link(self):
         self.add_sleep_event(1)
         self.login(2, "Admin")
         response = self.client.get(
             "/manager-review/sleep/1?storyline_client_id=2&"
-            "storyline_filter=Sleep&storyline_page=1"
+            "storyline_filter=Sleep&storyline_date=2026-08-02"
         )
         self.assertNotIn(b"Back to Client Storyline", response.data)
 
@@ -641,7 +647,7 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.add_sleep_event(1)
         activity_id = self.add_storyline_event("sleep_fell_asleep", 1)
         self.login(2, "Admin")
-        response = self.client.get("/client/1/storyline")
+        response = self.client.get("/client/1/storyline?date=2026-08-02")
         self.assertIn(
             f'id="storyline-event-{activity_id}"'.encode(),
             response.data

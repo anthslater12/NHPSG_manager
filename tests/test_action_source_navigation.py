@@ -102,7 +102,7 @@ class ActionSourceNavigationTests(unittest.TestCase):
                 return_context={
                     "storyline_client_id": 3,
                     "storyline_filter": "Incident",
-                    "storyline_page": 2,
+                    "storyline_date": "2026-08-02",
                 },
             )
 
@@ -110,13 +110,13 @@ class ActionSourceNavigationTests(unittest.TestCase):
                 context["url"],
                 "/manager-review/incidents/17?"
                 "storyline_client_id=3&storyline_filter=Incident&"
-                "storyline_page=2",
+                "storyline_date=2026-08-02",
             )
 
     def test_storyline_context_rejects_invalid_values(self):
         with app.app.test_request_context(
             "/action/1?storyline_client_id=3&"
-            "storyline_filter=NotAFilter&storyline_page=0"
+            "storyline_filter=NotAFilter&storyline_date=2026-08-02"
         ):
             self.assertIsNone(
                 app.get_action_storyline_return_context(app.request.args)

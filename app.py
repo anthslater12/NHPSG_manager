@@ -2103,6 +2103,25 @@ def _storyline_heading(local_datetime):
     return f"{event_date.strftime('%A, %B')} {event_date.day}, {event_date.year}"
 
 
+def _storyline_valid_date(value, today=None):
+    if today is None:
+        today = datetime.now(VANCOUVER_TIMEZONE).date()
+    if not isinstance(value, str):
+        return None
+    try:
+        selected_date = date.fromisoformat(value)
+    except ValueError:
+        return None
+    if selected_date.isoformat() != value or selected_date > today:
+        return None
+    return selected_date
+
+
+def _storyline_selected_date(value):
+    today = datetime.now(VANCOUVER_TIMEZONE).date()
+    return _storyline_valid_date(value, today=today) or today
+
+
 def _storyline_time(local_datetime):
     try:
         return local_datetime.strftime("%H:%M")
@@ -2337,18 +2356,19 @@ def _storyline_access_allowed(conn, client_id, user_id):
 def _storyline_return_context(values, client_id):
     storyline_client_id = values.get("storyline_client_id", type=int)
     storyline_filter = values.get("storyline_filter", "")
-    storyline_page = values.get("storyline_page", type=int)
+    storyline_date = _storyline_valid_date(
+        values.get("storyline_date", "")
+    )
     if (
         storyline_client_id != client_id
         or storyline_filter not in STORYLINE_FILTERS
-        or storyline_page is None
-        or storyline_page < 1
+        or storyline_date is None
     ):
         return None
     return {
         "storyline_client_id": storyline_client_id,
         "storyline_filter": storyline_filter,
-        "storyline_page": storyline_page,
+        "storyline_date": storyline_date.isoformat(),
     }
 
 
@@ -22309,8 +22329,7 @@ def client_storyline(client_id):
     selected_filter = request.args.get("filter", "All")
     if selected_filter not in STORYLINE_FILTERS:
         selected_filter = "All"
-    page = max(request.args.get("page", 1, type=int), 1)
-    page_size = 25
+    selected_date = _storyline_selected_date(request.args.get("date"))
     filter_types = STORYLINE_FILTERS[selected_filter]
     where = [
         "al.client_id = ?",
@@ -22341,12 +22360,6 @@ def client_storyline(client_id):
         parameters.extend(sorted(STORYLINE_SUPPRESSED_AUDIT_TYPES))
 
     where_sql = " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM activity_log al WHERE {where_sql}",
-        parameters
-    ).fetchone()[0]
-    page_count = max((total + page_size - 1) // page_size, 1)
-    page = min(page, page_count)
     activity_log_columns = {
         row[1] for row in conn.execute('PRAGMA table_info("activity_log")')
     }
@@ -22559,6 +22572,11 @@ def client_storyline(client_id):
         event["local_datetime"] = _storyline_local_datetime(
             event["event_datetime"], event["activity_datetime"]
         )
+        if (
+            event["local_datetime"] is None
+            or event["local_datetime"].date() != selected_date
+        ):
+            continue
         event["heading"] = _storyline_heading(event["local_datetime"])
         event["event_date"] = (
             event["local_datetime"].date().isoformat()
@@ -22599,7 +22617,7 @@ def client_storyline(client_id):
                 **{id_parameter: event["related_id"]},
                 storyline_client_id=client_id,
                 storyline_filter=selected_filter,
-                storyline_page=page,
+                storyline_date=selected_date.isoformat(),
             )
             event["storyline_reviewed"] = (
                 (
@@ -22630,10 +22648,8 @@ def client_storyline(client_id):
         ),
         reverse=True
     )
-    page_start = (page - 1) * page_size
-    page_events = prepared_events[page_start:page_start + page_size]
     grouped_events = []
-    for event in page_events:
+    for event in prepared_events:
         if not grouped_events or grouped_events[-1]["heading"] != event["heading"]:
             grouped_events.append({"heading": event["heading"], "events": []})
         grouped_events[-1]["events"].append(event)
@@ -22646,9 +22662,16 @@ def client_storyline(client_id):
         grouped_events=grouped_events,
         filters=STORYLINE_FILTERS,
         selected_filter=selected_filter,
-        page=page,
-        page_count=page_count,
-        total=total,
+        selected_date=selected_date,
+        selected_date_display=(
+            f"{selected_date.strftime('%A, %B')} "
+            f"{selected_date.day}, {selected_date.year}"
+        ),
+        selected_date_iso=selected_date.isoformat(),
+        previous_date=(selected_date - timedelta(days=1)).isoformat(),
+        next_date=(selected_date + timedelta(days=1)).isoformat(),
+        total=len(prepared_events),
+        today=datetime.now(VANCOUVER_TIMEZONE).date(),
         management_storyline=management_storyline,
         behaviour_consultant_storyline=behaviour_consultant_storyline,
     )
@@ -29142,18 +29165,19 @@ def get_action_storyline_return_context(values):
     """Keep only validated, non-redirect storyline parameters for an Action."""
     storyline_client_id = values.get("storyline_client_id", type=int)
     storyline_filter = values.get("storyline_filter", "")
-    storyline_page = values.get("storyline_page", type=int)
+    storyline_date = _storyline_valid_date(
+        values.get("storyline_date", "")
+    )
     if (
         storyline_client_id is None
         or storyline_filter not in STORYLINE_FILTERS
-        or storyline_page is None
-        or storyline_page < 1
+        or storyline_date is None
     ):
         return None
     return {
         "storyline_client_id": storyline_client_id,
         "storyline_filter": storyline_filter,
-        "storyline_page": storyline_page,
+        "storyline_date": storyline_date.isoformat(),
     }
 
 

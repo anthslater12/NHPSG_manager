@@ -1675,7 +1675,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         response = self.client.post(
             f"/manager-review/activities/{activity_id}/management-note?"
             "storyline_client_id=1&storyline_filter=Activity&"
-            "storyline_page=2",
+            "storyline_date=2026-08-02",
             data={"note_text": "  Confirm activity staffing.  "}
         )
         self.assertEqual(response.status_code, 302)
@@ -1782,7 +1782,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         detail = self.client.get(
             f"/manager-review/activities/{activity_id}?"
             "storyline_client_id=1&storyline_filter=Activity&"
-            "storyline_page=2"
+            "storyline_date=2026-08-02"
         )
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Linked Actions", detail.data)
@@ -1793,7 +1793,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         form = self.client.get(
             f"/manager-review/activities/{activity_id}/action/new?"
             "storyline_client_id=1&storyline_filter=Activity&"
-            "storyline_page=2"
+            "storyline_date=2026-08-02"
         )
         self.assertEqual(form.status_code, 200)
         self.assertIn(b"Create Activity Action", form.data)

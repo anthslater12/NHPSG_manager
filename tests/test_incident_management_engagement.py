@@ -698,7 +698,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
             self.login(user_id)
             detail = self.client.get(
                 "/manager-review/incidents/41?"
-                "storyline_client_id=1&storyline_filter=Incident&storyline_page=2"
+                "storyline_client_id=1&storyline_filter=Incident&storyline_date=2026-08-02"
             )
             self.assertEqual(detail.status_code, 200)
             self.assertIn(b"Back to Management Review", detail.data)
@@ -709,7 +709,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         self.login(7)
         consultant_detail = self.client.get(
             "/manager-review/incidents/41?"
-            "storyline_client_id=1&storyline_filter=Incident&storyline_page=2"
+            "storyline_client_id=1&storyline_filter=Incident&storyline_date=2026-08-02"
         )
         self.assertEqual(consultant_detail.status_code, 200)
         self.assertNotIn(b"Back to Management Review", consultant_detail.data)
@@ -719,7 +719,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         self.login(1)
         support_detail = self.client.get(
             "/manager-review/incidents/41?"
-            "storyline_client_id=1&storyline_filter=Incident&storyline_page=2"
+            "storyline_client_id=1&storyline_filter=Incident&storyline_date=2026-08-02"
         )
         self.assertEqual(support_detail.status_code, 200)
         self.assertNotIn(b"Back to Management Review", support_detail.data)
@@ -837,7 +837,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
                 "note_text": "   ",
                 "storyline_client_id": "1",
                 "storyline_filter": "Incident",
-                "storyline_page": "1",
+                "storyline_date": "2026-08-02",
             }
         )
         self.assertEqual(blank.status_code, 302)
@@ -886,7 +886,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         )
 
         storyline = self.client.get(
-            "/client/1/storyline?filter=Incident&page=1"
+            "/client/1/storyline?filter=Incident"
         )
         self.assertEqual(storyline.status_code, 200)
         self.assertEqual(storyline.data.count(b"Incident created"), 1)
@@ -899,19 +899,19 @@ class IncidentManagementEngagementTests(unittest.TestCase):
                 "note_text": "Context note",
                 "storyline_client_id": "1",
                 "storyline_filter": "Incident",
-                "storyline_page": "2",
+                "storyline_date": "2026-08-02",
             }
         )
         self.assertEqual(response.status_code, 302)
         self.assertIn(b"storyline_client_id=1", response.data)
         self.assertIn(b"storyline_filter=Incident", response.data)
-        self.assertIn(b"storyline_page=2", response.data)
+        self.assertIn(b"storyline_date=2026-08-02", response.data)
 
     def test_management_can_create_linked_action_and_return_to_storyline_context(self):
         self.login(2)
         form = self.client.get(
             "/manager-review/incidents/41/action/new?"
-            "storyline_client_id=1&storyline_filter=Incident&storyline_page=1"
+            "storyline_client_id=1&storyline_filter=Incident&storyline_date=2026-08-02"
         )
         self.assertEqual(form.status_code, 200)
         self.assertIn(b"Create Incident Action", form.data)
@@ -927,7 +927,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
                 "due_date": "2026-08-10",
                 "storyline_client_id": "1",
                 "storyline_filter": "Incident",
-                "storyline_page": "1",
+                "storyline_date": "2026-08-02",
             }
         )
         self.assertEqual(response.status_code, 302)
@@ -983,7 +983,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
             data={
                 "storyline_client_id": "1",
                 "storyline_filter": "Incident",
-                "storyline_page": "1",
+                "storyline_date": "2026-08-02",
             }
         )
         self.assertEqual(response.status_code, 302)

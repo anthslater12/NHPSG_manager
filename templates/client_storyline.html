@@ -4,12 +4,13 @@
 <div class="card">
     <h2>{{ client.client_name }} — Storyline</h2>
     <p>Read-only client activity history.</p>
+    <p><strong>{{ selected_date_display }}</strong></p>
     <p>
         {% for filter_name in filters %}
             {% if filter_name == selected_filter %}
                 <strong>{{ filter_name }}</strong>
             {% else %}
-                <a href="{{ url_for('client_storyline', client_id=client.client_id, filter=filter_name, page=1) }}">{{ filter_name }}</a>
+                <a href="{{ url_for('client_storyline', client_id=client.client_id, filter=filter_name, date=selected_date_iso) }}">{{ filter_name }}</a>
             {% endif %}
             {% if not loop.last %} | {% endif %}
         {% endfor %}
@@ -20,7 +21,7 @@
     id="client-storyline"
     data-storyline-client-id="{{ client.client_id }}"
     data-storyline-filter="{{ selected_filter }}"
-    data-storyline-page="{{ page }}"
+    data-storyline-date="{{ selected_date_iso }}"
 >
 {% if grouped_events %}
     {% for group in grouped_events %}
@@ -61,9 +62,9 @@
         </div>
     {% endfor %}
 {% elif total == 0 and selected_filter == "All" %}
-    <div class="card"><p>No Storyline events have been recorded for this client.</p></div>
+    <div class="card"><p>No Storyline events have been recorded for this client on this date.</p></div>
 {% else %}
-    <div class="card"><p>No {{ selected_filter }} events match this filter.</p></div>
+    <div class="card"><p>No {{ selected_filter }} events match this filter for this date.</p></div>
 {% endif %}
 
 </div>
@@ -79,7 +80,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const currentContext = {
         clientId: storyline.dataset.storylineClientId,
         filter: storyline.dataset.storylineFilter,
-        page: storyline.dataset.storylinePage
+        date: storyline.dataset.storylineDate
     };
 
     document.querySelectorAll('.storyline-detail-link').forEach(function(link) {
@@ -93,7 +94,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 sessionStorage.setItem(positionKey, JSON.stringify({
                     clientId: currentContext.clientId,
                     filter: currentContext.filter,
-                    page: currentContext.page,
+                    date: currentContext.date,
                     activityId: eventId,
                     viewportTop: event.getBoundingClientRect().top
                 }));
@@ -115,7 +116,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     const contextMatches = saved.clientId === currentContext.clientId
         && saved.filter === currentContext.filter
-        && saved.page === currentContext.page
+        && saved.date === currentContext.date
         && typeof saved.activityId === 'string'
         && Number.isFinite(saved.viewportTop);
     const event = contextMatches
@@ -135,11 +136,13 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
-{% if page_count > 1 %}
 <div class="card">
-    {% if page > 1 %}<a href="{{ url_for('client_storyline', client_id=client.client_id, filter=selected_filter, page=page-1) }}">Newer Events</a>{% endif %}
-    {% if page > 1 and page < page_count %} | {% endif %}
-    {% if page < page_count %}<a href="{{ url_for('client_storyline', client_id=client.client_id, filter=selected_filter, page=page+1) }}">Older Events</a>{% endif %}
+    <a href="{{ url_for('client_storyline', client_id=client.client_id, filter=selected_filter, date=previous_date) }}">Previous Day</a>
+    | <strong>{{ selected_date_display }}</strong>
+    {% if selected_date < today %}
+        | <a href="{{ url_for('client_storyline', client_id=client.client_id, filter=selected_filter, date=next_date) }}">Next Day</a>
+    {% else %}
+        | <span>Next Day</span>
+    {% endif %}
 </div>
-{% endif %}
 {% endblock %}
