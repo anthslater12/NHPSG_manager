@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <p>
+        <a href="{{ url_for('worker_resources') }}">Back to Worker Resources</a>
+        |
+        <a href="{{ url_for('worker_resource_new') }}">Add Resource</a>
+    </p>
+
+    <h2>Manage Worker Resources</h2>
+
+    {% if resources %}
+        <div style="overflow-x: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Category</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Display Order</th>
+                        <th>Original Filename</th>
+                        <th>Uploaded By</th>
+                        <th>Created</th>
+                        <th>Updated</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for resource in resources %}
+                        <tr>
+                            <td>{{ resource['title'] }}</td>
+                            <td>{{ resource['category'] }}</td>
+                            <td>{{ resource['resource_type'] }}</td>
+                            <td>{{ 'Active' if resource['active'] else 'Inactive' }}</td>
+                            <td>{{ resource['display_order'] }}</td>
+                            <td>{{ resource['original_filename'] }}</td>
+                            <td>{{ resource['uploaded_by_name'] or ('User ' ~ resource['uploaded_by_user_id']) }}</td>
+                            <td>{{ resource['created_at_display'] }}</td>
+                            <td>{{ resource['updated_at_display'] }}</td>
+                            <td>
+                                <a href="{{ url_for('worker_resource_edit', resource_id=resource['resource_id']) }}">Edit</a>
+                                {% if resource['active'] %}
+                                    <form method="post" action="{{ url_for('worker_resource_deactivate', resource_id=resource['resource_id']) }}" style="display: inline;">
+                                        <button type="submit">Deactivate</button>
+                                    </form>
+                                {% else %}
+                                    <form method="post" action="{{ url_for('worker_resource_activate', resource_id=resource['resource_id']) }}" style="display: inline;">
+                                        <button type="submit">Activate</button>
+                                    </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <p>No worker resources have been created.</p>
+    {% endif %}
+</div>
+{% endblock %}

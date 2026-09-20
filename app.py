@@ -4,11 +4,13 @@
 
 from flask import (
     Flask,
+    abort,
     has_request_context,
     render_template,
     request,
     redirect,
     session,
+    send_file,
     url_for,
     flash
 )
@@ -20,11 +22,14 @@ from datetime import datetime, date, time as datetime_time, timedelta, timezone
 from statistics import median
 from zoneinfo import ZoneInfo
 import os
+import ntpath
+from pathlib import Path
 import time
 import re
 import secrets
 import add_leave_requests_table
 import add_sleep_events_note
+import add_worker_resources_table
 import mail_service
 
 app = Flask(__name__)
@@ -178,6 +183,15 @@ def inject_management_storyline_navigation():
             conn.close()
 
 DB_NAME = os.environ.get("NHPSG_DB_PATH", "nhpsg.db")
+
+WORKER_RESOURCE_STORAGE_PATH = os.environ.get(
+    "NHPSG_RESOURCE_STORAGE_PATH",
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data",
+        "worker_resources",
+    ),
+)
 
 VANCOUVER_TIMEZONE = ZoneInfo("America/Vancouver")
 
@@ -482,6 +496,7 @@ def get_db():
         conn.row_factory = sqlite3.Row
         add_leave_requests_table.migrate(conn)
         add_sleep_events_note.migrate(conn)
+        add_worker_resources_table.migrate(conn)
         return conn
 
     except Exception as error:
@@ -32167,6 +32182,859 @@ def checklist_item_new(template_id):
 # WORKER RESOURCES / LEAVE REQUESTS
 #####################################################################
 
+WORKER_RESOURCE_CATEGORIES = (
+    "Training",
+    "Policies and Procedures",
+    "Forms and Documents",
+    "Reference",
+)
+
+WORKER_RESOURCE_TYPES = (
+    "Video",
+    "Document",
+    "Image",
+)
+
+WORKER_RESOURCE_TITLE_MAX_LENGTH = 200
+WORKER_RESOURCE_DESCRIPTION_MAX_LENGTH = 5000
+WORKER_RESOURCE_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+
+WORKER_RESOURCE_ALLOWED_FILE_TYPES = {
+    "Video": {
+        ".mp4": "video/mp4",
+    },
+    "Document": {
+        ".pdf": "application/pdf",
+        ".doc": "application/msword",
+        ".docx": (
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
+        ".xls": "application/vnd.ms-excel",
+        ".xlsx": (
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        ".ppt": "application/vnd.ms-powerpoint",
+        ".pptx": (
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation"
+        ),
+        ".txt": "text/plain",
+    },
+    "Image": {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    },
+}
+
+
+def format_worker_resource_local_datetime(value):
+    """Format a stored UTC Worker Resource timestamp for management display."""
+    try:
+        local_value = parse_staff_notice_utc_datetime(value).astimezone(
+            VANCOUVER_TIMEZONE
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "Date/time unavailable"
+
+    hour = local_value.hour % 12 or 12
+    meridiem = "AM" if local_value.hour < 12 else "PM"
+    return (
+        f"{local_value.strftime('%b')} {local_value.day}, "
+        f"{local_value.year} {hour}:{local_value.minute:02d} {meridiem}"
+    )
+
+
+def _worker_resource_form_values(form=None):
+    if form is None:
+        form = {}
+    return {
+        "title": form.get("title", ""),
+        "description": form.get("description", ""),
+        "category": form.get("category", ""),
+        "resource_type": form.get("resource_type", ""),
+        "display_order": form.get("display_order", "0"),
+    }
+
+
+def _worker_resource_upload_size(upload):
+    stream = getattr(upload, "stream", None)
+    if stream is not None:
+        try:
+            current_position = stream.tell()
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(current_position)
+            return size
+        except (AttributeError, OSError, ValueError):
+            pass
+
+    content_length = getattr(upload, "content_length", None)
+    return content_length if content_length is not None else None
+
+
+def _worker_resource_validate_upload(upload, resource_type):
+    if upload is None or not upload.filename:
+        raise ValueError("Select a file to upload.")
+
+    original_filename = upload.filename
+    if not isinstance(original_filename, str):
+        raise ValueError("The uploaded filename is invalid.")
+    if (
+        not original_filename.strip()
+        or "\x00" in original_filename
+        or "/" in original_filename
+        or "\\" in original_filename
+        or os.path.isabs(original_filename)
+        or ntpath.isabs(original_filename)
+        or ntpath.splitdrive(original_filename)[0]
+        or ":" in original_filename
+        or original_filename in (".", "..")
+    ):
+        raise ValueError("The uploaded filename is invalid.")
+
+    allowed_types = WORKER_RESOURCE_ALLOWED_FILE_TYPES.get(resource_type)
+    if allowed_types is None:
+        raise ValueError("Select a valid resource type.")
+
+    extension = os.path.splitext(original_filename)[1].lower()
+    mime_type = allowed_types.get(extension)
+    if mime_type is None:
+        raise ValueError("The uploaded file type is not supported.")
+
+    size = _worker_resource_upload_size(upload)
+    if size is not None:
+        if size <= 0:
+            raise ValueError("The uploaded file cannot be empty.")
+        if size > WORKER_RESOURCE_MAX_UPLOAD_BYTES:
+            raise ValueError("The uploaded file is too large.")
+
+    return {
+        "original_filename": original_filename,
+        "extension": extension,
+        "mime_type": mime_type,
+        "file_size_bytes": size,
+    }
+
+
+def _worker_resource_validate_metadata(form):
+    title = form.get("title", "").strip()
+    description = form.get("description", "").strip()
+    category = form.get("category", "")
+    resource_type = form.get("resource_type", "")
+    display_order_value = form.get("display_order", "").strip()
+
+    if not title:
+        raise ValueError("Title is required.")
+    if len(title) > WORKER_RESOURCE_TITLE_MAX_LENGTH:
+        raise ValueError("Title is too long.")
+    if len(description) > WORKER_RESOURCE_DESCRIPTION_MAX_LENGTH:
+        raise ValueError("Description is too long.")
+    if category not in WORKER_RESOURCE_CATEGORIES:
+        raise ValueError("Select a valid category.")
+    if resource_type not in WORKER_RESOURCE_TYPES:
+        raise ValueError("Select a valid resource type.")
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", display_order_value):
+        raise ValueError("Display order must be a whole number of zero or greater.")
+
+    return {
+        "title": title,
+        "description": description or None,
+        "category": category,
+        "resource_type": resource_type,
+        "display_order": int(display_order_value),
+    }
+
+
+def _worker_resource_validate_form(form, upload):
+    values = _worker_resource_validate_metadata(form)
+    upload_values = _worker_resource_validate_upload(
+        upload,
+        values["resource_type"],
+    )
+    values.update(upload_values)
+    return values
+
+
+def _worker_resource_storage_root():
+    return Path(WORKER_RESOURCE_STORAGE_PATH).expanduser().resolve()
+
+
+def _worker_resource_allocate_path(extension):
+    storage_root = _worker_resource_storage_root()
+    storage_root.mkdir(parents=True, exist_ok=True)
+    if not storage_root.is_dir():
+        raise OSError("Worker Resource storage path is not a directory.")
+
+    for _ in range(10):
+        stored_filename = f"{secrets.token_hex(24)}{extension}"
+        stored_path = (storage_root / stored_filename).resolve()
+        if stored_path.parent != storage_root:
+            raise OSError("Generated Worker Resource path escaped storage root.")
+        try:
+            stored_path.touch(exist_ok=False)
+            return storage_root, stored_path, stored_filename
+        except FileExistsError:
+            continue
+
+    raise OSError("Could not allocate a unique Worker Resource filename.")
+
+
+def _worker_resource_cleanup_file(stored_path, resource_id=None):
+    if stored_path is None:
+        return
+    try:
+        stored_path.unlink(missing_ok=True)
+    except Exception:
+        if resource_id is None:
+            app.logger.exception(
+                "Worker Resource cleanup failed",
+            )
+        else:
+            app.logger.exception(
+                "Worker Resource cleanup failed for resource %s",
+                resource_id,
+            )
+
+
+def _worker_resource_updated_timestamp(previous=None):
+    timestamp = format_staff_notice_utc_datetime(get_application_now_utc())
+    if previous and timestamp == previous:
+        try:
+            timestamp = format_staff_notice_utc_datetime(
+                parse_staff_notice_utc_datetime(previous) + timedelta(seconds=1)
+            )
+        except (TypeError, ValueError):
+            pass
+    return timestamp
+
+
+def _worker_resource_category_order_sql(column="category"):
+    category_order = " ".join(
+        f"WHEN '{category.replace(chr(39), chr(39) * 2)}' THEN {index}"
+        for index, category in enumerate(WORKER_RESOURCE_CATEGORIES)
+    )
+    return (
+        f"CASE {column} {category_order} "
+        f"ELSE {len(WORKER_RESOURCE_CATEGORIES)} END"
+    )
+
+
+def _create_worker_resource(values, upload, uploaded_by_user_id):
+    stored_path = None
+    committed = False
+    conn = None
+    try:
+        _, stored_path, stored_filename = _worker_resource_allocate_path(
+            values["extension"]
+        )
+        stream = getattr(upload, "stream", None)
+        if stream is not None:
+            try:
+                stream.seek(0)
+            except (AttributeError, OSError, ValueError):
+                pass
+        upload.save(stored_path)
+        file_size_bytes = stored_path.stat().st_size
+        if file_size_bytes <= 0:
+            raise ValueError("The uploaded file cannot be empty.")
+        if file_size_bytes > WORKER_RESOURCE_MAX_UPLOAD_BYTES:
+            raise ValueError("The uploaded file is too large.")
+
+        created_at_utc = format_staff_notice_utc_datetime(
+            get_application_now_utc()
+        )
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute("""
+                INSERT INTO worker_resources
+                (
+                    title,
+                    description,
+                    category,
+                    resource_type,
+                    stored_filename,
+                    original_filename,
+                    mime_type,
+                    file_size_bytes,
+                    display_order,
+                    uploaded_by_user_id,
+                    created_at_utc,
+                    updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                values["title"],
+                values["description"],
+                values["category"],
+                values["resource_type"],
+                stored_filename,
+                values["original_filename"],
+                values["mime_type"],
+                file_size_bytes,
+                values["display_order"],
+                uploaded_by_user_id,
+                created_at_utc,
+                created_at_utc,
+            ))
+            conn.commit()
+            committed = True
+            resource_id = cursor.lastrowid
+        except BaseException:
+            try:
+                conn.rollback()
+            except BaseException:
+                pass
+            raise
+        finally:
+            conn.close()
+        return resource_id
+    except BaseException:
+        if not committed:
+            _worker_resource_cleanup_file(stored_path)
+        raise
+
+
+def _worker_resource_management_actor():
+    if "user_id" not in session:
+        return redirect(url_for("login")), None
+
+    conn = get_db()
+    try:
+        try:
+            actor = get_active_authenticated_user(conn, session["user_id"])
+        except PermissionError:
+            return ("Access denied", 403), None
+    finally:
+        conn.close()
+
+    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        return ("Access denied", 403), None
+    return None, actor
+
+
+def _worker_resource_management_access_response():
+    access_response, _ = _worker_resource_management_actor()
+    return access_response
+
+
+def _render_worker_resource_form(form_values, *, error=None, status_code=200):
+    return render_template(
+        "worker_resource_new.html",
+        form_values=form_values,
+        error=error,
+        categories=WORKER_RESOURCE_CATEGORIES,
+        resource_types=WORKER_RESOURCE_TYPES,
+    ), status_code
+
+
+@app.route("/worker-resources/manage/new", methods=["GET", "POST"])
+def worker_resource_new():
+    access_response = _worker_resource_management_access_response()
+    if access_response is not None:
+        return access_response
+
+    form_values = _worker_resource_form_values(request.form)
+    if request.method == "GET":
+        return _render_worker_resource_form(form_values)
+
+    try:
+        values = _worker_resource_validate_form(
+            request.form,
+            request.files.get("file"),
+        )
+    except ValueError as error:
+        return _render_worker_resource_form(
+            form_values,
+            error=str(error),
+            status_code=400,
+        )
+
+    try:
+        _create_worker_resource(
+            values,
+            request.files["file"],
+            session["user_id"],
+        )
+    except ValueError as error:
+        return _render_worker_resource_form(
+            form_values,
+            error=str(error),
+            status_code=400,
+        )
+    except Exception:
+        return _render_worker_resource_form(
+            form_values,
+            error=(
+                "The Worker Resource could not be saved. "
+                "No changes were made."
+            ),
+            status_code=500,
+        )
+
+    flash("Worker Resource uploaded successfully.")
+    return redirect(url_for("worker_resources"))
+
+
+def _worker_resource_edit_form_values(resource=None, form=None):
+    if form is not None:
+        return _worker_resource_form_values(form)
+    return {
+        "title": resource["title"],
+        "description": resource["description"] or "",
+        "category": resource["category"],
+        "resource_type": resource["resource_type"],
+        "display_order": str(resource["display_order"]),
+    }
+
+
+def _worker_resource_management_resource(resource_id):
+    access_response, _ = _worker_resource_management_actor()
+    if access_response is not None:
+        return access_response, None
+
+    conn = get_db()
+    try:
+        resource = conn.execute(
+            "SELECT * FROM worker_resources WHERE resource_id = ?",
+            (resource_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return None, resource
+
+
+def _worker_resource_validate_edit(form, upload, resource):
+    values = _worker_resource_validate_metadata(form)
+    replacement = None
+    if upload is not None and upload.filename:
+        replacement = _worker_resource_validate_upload(
+            upload,
+            values["resource_type"],
+        )
+        values.update(replacement)
+        return values, replacement
+
+    existing_extension = os.path.splitext(
+        str(resource["stored_filename"])
+    )[1].lower()
+    existing_type_files = WORKER_RESOURCE_ALLOWED_FILE_TYPES.get(
+        values["resource_type"],
+        {},
+    )
+    if existing_extension not in existing_type_files:
+        raise ValueError(
+            "The existing file is not compatible with the selected resource type. "
+            "Choose a replacement file."
+        )
+    return values, replacement
+
+
+def _update_worker_resource(resource, values, replacement):
+    new_stored_path = None
+    committed = False
+    conn = None
+    old_file_path = _worker_resource_file_path(resource)
+    try:
+        if replacement is not None:
+            _, new_stored_path, new_stored_filename = _worker_resource_allocate_path(
+                replacement["extension"]
+            )
+            stream = getattr(replacement.get("upload"), "stream", None)
+            if stream is not None:
+                try:
+                    stream.seek(0)
+                except (AttributeError, OSError, ValueError):
+                    pass
+            replacement["upload"].save(new_stored_path)
+            actual_size = new_stored_path.stat().st_size
+            if actual_size <= 0:
+                raise ValueError("The uploaded file cannot be empty.")
+            if actual_size > WORKER_RESOURCE_MAX_UPLOAD_BYTES:
+                raise ValueError("The uploaded file is too large.")
+            values["file_size_bytes"] = actual_size
+            values["stored_filename"] = new_stored_filename
+
+        updated_at_utc = _worker_resource_updated_timestamp(
+            resource["updated_at_utc"]
+        )
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if replacement is None:
+                cursor = conn.execute("""
+                    UPDATE worker_resources
+                    SET title = ?,
+                        description = ?,
+                        category = ?,
+                        resource_type = ?,
+                        display_order = ?,
+                        updated_at_utc = ?
+                    WHERE resource_id = ?
+                """, (
+                    values["title"],
+                    values["description"],
+                    values["category"],
+                    values["resource_type"],
+                    values["display_order"],
+                    updated_at_utc,
+                    resource["resource_id"],
+                ))
+            else:
+                cursor = conn.execute("""
+                    UPDATE worker_resources
+                    SET title = ?,
+                        description = ?,
+                        category = ?,
+                        resource_type = ?,
+                        stored_filename = ?,
+                        original_filename = ?,
+                        mime_type = ?,
+                        file_size_bytes = ?,
+                        display_order = ?,
+                        updated_at_utc = ?
+                    WHERE resource_id = ?
+                """, (
+                    values["title"],
+                    values["description"],
+                    values["category"],
+                    values["resource_type"],
+                    values["stored_filename"],
+                    values["original_filename"],
+                    values["mime_type"],
+                    values["file_size_bytes"],
+                    values["display_order"],
+                    updated_at_utc,
+                    resource["resource_id"],
+                ))
+            if cursor.rowcount != 1:
+                raise RuntimeError("Worker Resource no longer exists.")
+            conn.commit()
+            committed = True
+        except BaseException:
+            try:
+                conn.rollback()
+            except BaseException:
+                pass
+            raise
+        finally:
+            conn.close()
+
+        if replacement is not None:
+            _worker_resource_cleanup_file(
+                old_file_path,
+                resource_id=resource["resource_id"],
+            )
+    except BaseException:
+        if not committed:
+            _worker_resource_cleanup_file(new_stored_path)
+        raise
+
+
+def _worker_resource_render_edit(resource, form_values, *, error=None, status_code=200):
+    return render_template(
+        "worker_resource_edit.html",
+        resource=resource,
+        form_values=form_values,
+        error=error,
+        categories=WORKER_RESOURCE_CATEGORIES,
+        resource_types=WORKER_RESOURCE_TYPES,
+    ), status_code
+
+
+@app.route("/worker-resources/manage")
+def worker_resource_manage():
+    access_response, _ = _worker_resource_management_actor()
+    if access_response is not None:
+        return access_response
+
+    conn = get_db()
+    try:
+        resources = conn.execute(f"""
+            SELECT wr.*, u.full_name AS uploaded_by_name
+            FROM worker_resources wr
+            LEFT JOIN users u ON u.user_id = wr.uploaded_by_user_id
+            ORDER BY wr.active DESC,
+                     {_worker_resource_category_order_sql('wr.category')},
+                     wr.display_order,
+                     wr.title,
+                     wr.resource_id
+        """).fetchall()
+    finally:
+        conn.close()
+
+    resources = [
+        {
+            **dict(resource),
+            "created_at_display": format_worker_resource_local_datetime(
+                resource["created_at_utc"]
+            ),
+            "updated_at_display": format_worker_resource_local_datetime(
+                resource["updated_at_utc"]
+            ),
+        }
+        for resource in resources
+    ]
+
+    return render_template(
+        "worker_resource_manage.html",
+        resources=resources,
+    )
+
+
+@app.route(
+    "/worker-resources/manage/<int:resource_id>/edit",
+    methods=["GET", "POST"],
+)
+def worker_resource_edit(resource_id):
+    access_response, resource = _worker_resource_management_resource(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None:
+        return abort(404)
+
+    form_values = _worker_resource_edit_form_values(
+        resource,
+        request.form if request.method == "POST" else None,
+    )
+    if request.method == "GET":
+        return _worker_resource_render_edit(resource, form_values)
+
+    replacement_upload = request.files.get("file")
+    if replacement_upload is not None and not replacement_upload.filename:
+        replacement_upload = None
+    try:
+        values, replacement = _worker_resource_validate_edit(
+            request.form,
+            replacement_upload,
+            resource,
+        )
+        if replacement is not None:
+            replacement["upload"] = replacement_upload
+        _update_worker_resource(
+            resource,
+            values,
+            replacement,
+        )
+    except ValueError as error:
+        return _worker_resource_render_edit(
+            resource,
+            form_values,
+            error=str(error),
+            status_code=400,
+        )
+    except Exception:
+        return _worker_resource_render_edit(
+            resource,
+            form_values,
+            error=(
+                "The Worker Resource could not be updated. "
+                "No changes were made."
+            ),
+            status_code=500,
+        )
+
+    flash("Worker Resource updated successfully.")
+    return redirect(url_for("worker_resource_manage"))
+
+
+def _worker_resource_change_status(resource_id, active):
+    access_response, resource = _worker_resource_management_resource(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None:
+        return abort(404)
+    if active and _worker_resource_file_path(resource) is None:
+        return "The Worker Resource file is unavailable.", 400
+
+    updated_at_utc = _worker_resource_updated_timestamp(
+        resource["updated_at_utc"]
+    )
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE worker_resources SET active = ?, updated_at_utc = ? "
+            "WHERE resource_id = ?",
+            (1 if active else 0, updated_at_utc, resource_id),
+        )
+        conn.commit()
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    flash(
+        "Worker Resource activated successfully."
+        if active
+        else "Worker Resource deactivated successfully."
+    )
+    return redirect(url_for("worker_resource_manage"))
+
+
+@app.route(
+    "/worker-resources/manage/<int:resource_id>/activate",
+    methods=["POST"],
+)
+def worker_resource_activate(resource_id):
+    return _worker_resource_change_status(resource_id, True)
+
+
+@app.route(
+    "/worker-resources/manage/<int:resource_id>/deactivate",
+    methods=["POST"],
+)
+def worker_resource_deactivate(resource_id):
+    return _worker_resource_change_status(resource_id, False)
+
+
+def _worker_resource_active_access(resource_id):
+    if "user_id" not in session:
+        return redirect(url_for("login")), None
+
+    conn = get_db()
+    try:
+        try:
+            get_active_authenticated_user(conn, session["user_id"])
+        except PermissionError:
+            return ("Access denied", 403), None
+
+        resource = conn.execute("""
+            SELECT *
+            FROM worker_resources
+            WHERE resource_id = ?
+              AND active = 1
+        """, (resource_id,)).fetchone()
+    finally:
+        conn.close()
+
+    return None, resource
+
+
+def _worker_resource_file_path(resource):
+    stored_filename = resource["stored_filename"]
+    if (
+        not isinstance(stored_filename, str)
+        or not stored_filename
+        or "\x00" in stored_filename
+        or os.path.isabs(stored_filename)
+        or ntpath.isabs(stored_filename)
+        or ntpath.splitdrive(stored_filename)[0]
+    ):
+        return None
+
+    storage_root = _worker_resource_storage_root()
+    try:
+        candidate = (storage_root / stored_filename).resolve()
+        candidate.relative_to(storage_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _worker_resource_download_name(resource):
+    original_filename = resource["original_filename"]
+    if (
+        isinstance(original_filename, str)
+        and original_filename
+        and "\x00" not in original_filename
+        and "/" not in original_filename
+        and "\\" not in original_filename
+        and not os.path.isabs(original_filename)
+        and not ntpath.isabs(original_filename)
+        and not ntpath.splitdrive(original_filename)[0]
+    ):
+        return original_filename
+
+    extension = os.path.splitext(str(resource["stored_filename"]))[1].lower()
+    return f"worker-resource{extension}"
+
+
+def _worker_resource_file_response(resource, *, as_attachment):
+    file_path = _worker_resource_file_path(resource)
+    if file_path is None:
+        app.logger.warning(
+            "Worker Resource file is unavailable for resource %s",
+            resource["resource_id"],
+        )
+        return abort(404)
+
+    try:
+        return send_file(
+            str(file_path),
+            mimetype=resource["mime_type"],
+            as_attachment=as_attachment,
+            download_name=_worker_resource_download_name(resource),
+            conditional=True,
+            max_age=0,
+        )
+    except (FileNotFoundError, OSError):
+        app.logger.warning(
+            "Worker Resource file disappeared for resource %s",
+            resource["resource_id"],
+        )
+        return abort(404)
+
+
+@app.route("/worker-resources/<int:resource_id>/view")
+def worker_resource_view(resource_id):
+    access_response, resource = _worker_resource_active_access(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None or resource["resource_type"] not in WORKER_RESOURCE_TYPES:
+        return abort(404)
+    if _worker_resource_file_path(resource) is None:
+        app.logger.warning(
+            "Worker Resource file is unavailable for resource %s",
+            resource_id,
+        )
+        return abort(404)
+
+    return render_template(
+        "worker_resource_view.html",
+        resource=resource,
+        media_url=url_for(
+            "worker_resource_media",
+            resource_id=resource_id,
+        ),
+        download_url=url_for(
+            "worker_resource_download",
+            resource_id=resource_id,
+        ),
+    )
+
+
+@app.route("/worker-resources/<int:resource_id>/media")
+def worker_resource_media(resource_id):
+    access_response, resource = _worker_resource_active_access(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None or resource["resource_type"] not in WORKER_RESOURCE_TYPES:
+        return abort(404)
+    return _worker_resource_file_response(resource, as_attachment=False)
+
+
+@app.route("/worker-resources/<int:resource_id>/download")
+def worker_resource_download(resource_id):
+    access_response, resource = _worker_resource_active_access(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None or resource["resource_type"] not in WORKER_RESOURCE_TYPES:
+        return abort(404)
+    return _worker_resource_file_response(resource, as_attachment=True)
+
 def _leave_authenticated_actor(conn, user_id):
     get_active_authenticated_user(conn, user_id)
     return conn.execute("""
@@ -32371,12 +33239,36 @@ def worker_resources():
         return redirect(url_for("login"))
     conn = get_db()
     try:
-        _leave_authenticated_actor(conn, session["user_id"])
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        resources = conn.execute(f"""
+            SELECT *
+            FROM worker_resources
+            WHERE active = 1
+            ORDER BY {_worker_resource_category_order_sql()},
+                     display_order,
+                     title,
+                     resource_id
+        """).fetchall()
     except PermissionError:
         return "Access denied", 403
     finally:
         conn.close()
-    return render_template("worker_resources.html")
+
+    resources_by_category = {
+        category: [] for category in WORKER_RESOURCE_CATEGORIES
+    }
+    for resource in resources:
+        resources_by_category.setdefault(resource["category"], []).append(resource)
+
+    return render_template(
+        "worker_resources.html",
+        resource_categories=WORKER_RESOURCE_CATEGORIES,
+        resources_by_category=resources_by_category,
+        resource_count=len(resources),
+        can_manage_resources=(
+            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+        ),
+    )
 
 
 @app.route("/leave-requests")

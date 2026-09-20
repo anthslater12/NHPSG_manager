@@ -23,9 +23,46 @@
         <a href="{{ url_for('staff_notice_history') }}">Open Staff Notices</a>
     </div>
 
-    <div class="card">
-        <h3>Forms and Documents</h3>
-        <p>Future forms and documents will be added here.</p>
-    </div>
+</div>
+
+<div class="card">
+    <h3>Training &amp; Resources</h3>
+    <p>
+        Access training videos, forms, policies, procedures and other staff resources.
+    </p>
+
+    {% if can_manage_resources %}
+        <p>
+            <a href="{{ url_for('worker_resource_manage') }}">Manage Resources</a>
+            |
+            <a href="{{ url_for('worker_resource_new') }}">Add Resource</a>
+        </p>
+    {% endif %}
+
+    {% if resource_count == 0 %}
+        <p>No worker resources are currently available.</p>
+    {% else %}
+        {% for category in resource_categories %}
+            {% set category_resources = resources_by_category[category] %}
+            {% if category_resources %}
+                <section>
+                    <h4>{{ category }}</h4>
+                    <ul>
+                        {% for resource in category_resources %}
+                            <li>
+                                <a href="{{ url_for('worker_resource_view', resource_id=resource['resource_id']) }}">
+                                    {{ resource['title'] }}
+                                </a>
+                                <span>({{ resource['resource_type'] }})</span>
+                                {% if resource['description'] %}
+                                    <p>{{ resource['description'] }}</p>
+                                {% endif %}
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </section>
+            {% endif %}
+        {% endfor %}
+    {% endif %}
 </div>
 {% endblock %}
