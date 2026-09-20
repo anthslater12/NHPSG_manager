@@ -4,11 +4,13 @@
 
 from flask import (
     Flask,
+    abort,
     has_request_context,
     render_template,
     request,
     redirect,
     session,
+    send_file,
     url_for,
     flash
 )
@@ -32519,6 +32521,145 @@ def worker_resource_new():
     flash("Worker Resource uploaded successfully.")
     return redirect(url_for("worker_resources"))
 
+
+def _worker_resource_active_access(resource_id):
+    if "user_id" not in session:
+        return redirect(url_for("login")), None
+
+    conn = get_db()
+    try:
+        try:
+            get_active_authenticated_user(conn, session["user_id"])
+        except PermissionError:
+            return ("Access denied", 403), None
+
+        resource = conn.execute("""
+            SELECT *
+            FROM worker_resources
+            WHERE resource_id = ?
+              AND active = 1
+        """, (resource_id,)).fetchone()
+    finally:
+        conn.close()
+
+    return None, resource
+
+
+def _worker_resource_file_path(resource):
+    stored_filename = resource["stored_filename"]
+    if (
+        not isinstance(stored_filename, str)
+        or not stored_filename
+        or "\x00" in stored_filename
+        or os.path.isabs(stored_filename)
+        or ntpath.isabs(stored_filename)
+        or ntpath.splitdrive(stored_filename)[0]
+    ):
+        return None
+
+    storage_root = _worker_resource_storage_root()
+    try:
+        candidate = (storage_root / stored_filename).resolve()
+        candidate.relative_to(storage_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _worker_resource_download_name(resource):
+    original_filename = resource["original_filename"]
+    if (
+        isinstance(original_filename, str)
+        and original_filename
+        and "\x00" not in original_filename
+        and "/" not in original_filename
+        and "\\" not in original_filename
+        and not os.path.isabs(original_filename)
+        and not ntpath.isabs(original_filename)
+        and not ntpath.splitdrive(original_filename)[0]
+    ):
+        return original_filename
+
+    extension = os.path.splitext(str(resource["stored_filename"]))[1].lower()
+    return f"worker-resource{extension}"
+
+
+def _worker_resource_file_response(resource, *, as_attachment):
+    file_path = _worker_resource_file_path(resource)
+    if file_path is None:
+        app.logger.warning(
+            "Worker Resource file is unavailable for resource %s",
+            resource["resource_id"],
+        )
+        return abort(404)
+
+    try:
+        return send_file(
+            str(file_path),
+            mimetype=resource["mime_type"],
+            as_attachment=as_attachment,
+            download_name=_worker_resource_download_name(resource),
+            conditional=True,
+            max_age=0,
+        )
+    except (FileNotFoundError, OSError):
+        app.logger.warning(
+            "Worker Resource file disappeared for resource %s",
+            resource["resource_id"],
+        )
+        return abort(404)
+
+
+@app.route("/worker-resources/<int:resource_id>/view")
+def worker_resource_view(resource_id):
+    access_response, resource = _worker_resource_active_access(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None or resource["resource_type"] not in WORKER_RESOURCE_TYPES:
+        return abort(404)
+    if _worker_resource_file_path(resource) is None:
+        app.logger.warning(
+            "Worker Resource file is unavailable for resource %s",
+            resource_id,
+        )
+        return abort(404)
+
+    return render_template(
+        "worker_resource_view.html",
+        resource=resource,
+        media_url=url_for(
+            "worker_resource_media",
+            resource_id=resource_id,
+        ),
+        download_url=url_for(
+            "worker_resource_download",
+            resource_id=resource_id,
+        ),
+    )
+
+
+@app.route("/worker-resources/<int:resource_id>/media")
+def worker_resource_media(resource_id):
+    access_response, resource = _worker_resource_active_access(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None or resource["resource_type"] not in WORKER_RESOURCE_TYPES:
+        return abort(404)
+    return _worker_resource_file_response(resource, as_attachment=False)
+
+
+@app.route("/worker-resources/<int:resource_id>/download")
+def worker_resource_download(resource_id):
+    access_response, resource = _worker_resource_active_access(resource_id)
+    if access_response is not None:
+        return access_response
+    if resource is None or resource["resource_type"] not in WORKER_RESOURCE_TYPES:
+        return abort(404)
+    return _worker_resource_file_response(resource, as_attachment=True)
+
 def _leave_authenticated_actor(conn, user_id):
     get_active_authenticated_user(conn, user_id)
     return conn.execute("""
@@ -32723,12 +32864,40 @@ def worker_resources():
         return redirect(url_for("login"))
     conn = get_db()
     try:
-        _leave_authenticated_actor(conn, session["user_id"])
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        category_order = " ".join(
+            f"WHEN '{category.replace(chr(39), chr(39) * 2)}' THEN {index}"
+            for index, category in enumerate(WORKER_RESOURCE_CATEGORIES)
+        )
+        resources = conn.execute(f"""
+            SELECT *
+            FROM worker_resources
+            WHERE active = 1
+            ORDER BY CASE category {category_order} ELSE {len(WORKER_RESOURCE_CATEGORIES)} END,
+                     display_order,
+                     title,
+                     resource_id
+        """).fetchall()
     except PermissionError:
         return "Access denied", 403
     finally:
         conn.close()
-    return render_template("worker_resources.html")
+
+    resources_by_category = {
+        category: [] for category in WORKER_RESOURCE_CATEGORIES
+    }
+    for resource in resources:
+        resources_by_category.setdefault(resource["category"], []).append(resource)
+
+    return render_template(
+        "worker_resources.html",
+        resource_categories=WORKER_RESOURCE_CATEGORIES,
+        resources_by_category=resources_by_category,
+        resource_count=len(resources),
+        can_manage_resources=(
+            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+        ),
+    )
 
 
 @app.route("/leave-requests")

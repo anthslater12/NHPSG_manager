@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <p>
+        <a href="{{ url_for('worker_resources') }}">Back to Worker Resources</a>
+    </p>
+
+    <h2>{{ resource['title'] }}</h2>
+    <p><strong>Category:</strong> {{ resource['category'] }}</p>
+    <p><strong>Resource type:</strong> {{ resource['resource_type'] }}</p>
+
+    {% if resource['description'] %}
+        <p>{{ resource['description'] }}</p>
+    {% endif %}
+
+    {% if resource['resource_type'] == 'Video' %}
+        <video controls preload="metadata" style="max-width: 100%; width: 720px;">
+            <source src="{{ media_url }}" type="{{ resource['mime_type'] }}">
+            Your browser does not support embedded video playback.
+        </video>
+        <p>
+            <a href="{{ download_url }}">Download Video</a>
+        </p>
+    {% elif resource['resource_type'] == 'Image' %}
+        <p>
+            <img src="{{ media_url }}" alt="{{ resource['title'] }}" style="max-width: 100%; height: auto;">
+        </p>
+        <p>
+            <a href="{{ download_url }}">Download Image</a>
+        </p>
+    {% elif resource['resource_type'] == 'Document' %}
+        <p>
+            <a href="{{ media_url }}">Open Document</a>
+            |
+            <a href="{{ download_url }}">Download Document</a>
+        </p>
+    {% endif %}
+</div>
+{% endblock %}
