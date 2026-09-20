@@ -25,6 +25,7 @@ import re
 import secrets
 import add_leave_requests_table
 import add_sleep_events_note
+import add_worker_resources_table
 import mail_service
 
 app = Flask(__name__)
@@ -178,6 +179,15 @@ def inject_management_storyline_navigation():
             conn.close()
 
 DB_NAME = os.environ.get("NHPSG_DB_PATH", "nhpsg.db")
+
+WORKER_RESOURCE_STORAGE_PATH = os.environ.get(
+    "NHPSG_RESOURCE_STORAGE_PATH",
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data",
+        "worker_resources",
+    ),
+)
 
 VANCOUVER_TIMEZONE = ZoneInfo("America/Vancouver")
 
@@ -482,6 +492,7 @@ def get_db():
         conn.row_factory = sqlite3.Row
         add_leave_requests_table.migrate(conn)
         add_sleep_events_note.migrate(conn)
+        add_worker_resources_table.migrate(conn)
         return conn
 
     except Exception as error:

@@ -61,3 +61,6 @@ Thumbs.db
 *.db-wal
 *.sqlite
 *.sqlite3
+
+# Runtime-uploaded Worker Resource Library files
+data/worker_resources/

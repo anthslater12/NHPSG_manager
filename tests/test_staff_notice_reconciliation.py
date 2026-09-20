@@ -10,6 +10,7 @@ import app
 import add_leave_requests_table as leave_requests_schema
 import add_staff_notices_tables as staff_notice_schema
 import add_sleep_events_table as sleep_events_schema
+import add_worker_resources_table as worker_resources_schema
 
 
 class ReconciliationTrackingConnection:
@@ -205,6 +206,7 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 conn.execute(sql)
 
             leave_requests_schema.migrate(conn)
+            worker_resources_schema.migrate(conn)
 
             conn.executemany("""
                 INSERT INTO users (user_id, full_name, role, active)
