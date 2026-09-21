@@ -33757,6 +33757,10 @@ def client_grocery_list(client_id):
 
         shares = []
         eligible_users = []
+        email_recipients = []
+        can_manage_recipients = (
+            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+        )
         if access["can_manage_shares"]:
             shares = conn.execute("""
                 SELECT gls.share_id, gls.user_id, gls.permission,
@@ -33779,6 +33783,15 @@ def client_grocery_list(client_id):
                         AND gls.user_id = u.user_id
                   )
                 ORDER BY u.full_name, u.user_id
+            """, (grocery_list["grocery_list_id"],)).fetchall()
+        if can_manage_recipients:
+            email_recipients = conn.execute("""
+                SELECT recipient_id, display_name, email_address,
+                       created_by_user_id, created_at_utc,
+                       updated_by_user_id, updated_at_utc
+                FROM grocery_list_email_recipients
+                WHERE grocery_list_id = ?
+                ORDER BY recipient_id
             """, (grocery_list["grocery_list_id"],)).fetchall()
 
         conn.commit()
@@ -33809,8 +33822,10 @@ def client_grocery_list(client_id):
         sections=sections,
         shares=shares,
         eligible_users=eligible_users,
+        email_recipients=email_recipients,
         can_edit=access["can_edit"],
         can_manage_shares=access["can_manage_shares"],
+        can_manage_recipients=can_manage_recipients,
     )
 
 
@@ -33976,6 +33991,532 @@ def _grocery_list_content_context(conn, client_id, user_id):
 
 def _grocery_list_section_redirect(client_id):
     return redirect(url_for("client_grocery_list", client_id=client_id))
+
+
+def _build_grocery_list_email_subject(client_name):
+    """Return the deterministic subject for a Grocery List email."""
+    return f"Grocery List - {client_name}"
+
+
+def _render_grocery_list_email_body(client_name, sections):
+    """Render an immutable Grocery List snapshot as plain text."""
+    lines = ["Grocery List", client_name, ""]
+
+    if not sections:
+        lines.append("No sections have been added.")
+        return "\n".join(lines) + "\n"
+
+    for section in sections:
+        lines.append(section["name"])
+        items = section["items"]
+        if not items:
+            lines.append("  No items.")
+            lines.append("")
+            continue
+
+        for item in items:
+            item_parts = [item["item_name"]]
+            if item["stock_text"] not in (None, ""):
+                item_parts.append(f"Current: {item['stock_text']}")
+            if item["needed_text"] not in (None, ""):
+                item_parts.append(f"Needed: {item['needed_text']}")
+            if item["purchased"]:
+                item_parts.append("Purchased")
+            lines.append("- " + " | ".join(item_parts))
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _load_grocery_list_snapshot_sections(conn, snapshot_id):
+    """Load ordered sections and items from one immutable snapshot."""
+    sections = []
+    section_rows = conn.execute("""
+        SELECT snapshot_section_id, name, display_order
+        FROM grocery_list_snapshot_sections
+        WHERE snapshot_id = ?
+        ORDER BY display_order, snapshot_section_id
+    """, (snapshot_id,)).fetchall()
+    for section in section_rows:
+        section_data = dict(section)
+        section_data["items"] = conn.execute("""
+            SELECT snapshot_item_id, item_name, stock_text,
+                   needed_text, purchased, display_order
+            FROM grocery_list_snapshot_items
+            WHERE snapshot_section_id = ?
+            ORDER BY display_order, snapshot_item_id
+        """, (section["snapshot_section_id"],)).fetchall()
+        sections.append(section_data)
+    return sections
+
+
+def _grocery_list_recipient_form_values():
+    display_name = request.form.get("display_name", "").strip() or None
+    email_address = _normalize_user_email_address(
+        request.form.get("email_address")
+    )
+    if email_address is None:
+        raise ValueError("Email address is required.")
+    return display_name, email_address
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/email-preview",
+    methods=["POST"],
+)
+def grocery_list_email_preview(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor, client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        recipients = conn.execute("""
+            SELECT recipient_id, display_name, email_address
+            FROM grocery_list_email_recipients
+            WHERE grocery_list_id = ?
+            ORDER BY recipient_id
+        """, (grocery_list["grocery_list_id"],)).fetchall()
+        if not recipients:
+            conn.rollback()
+            flash("Add at least one email recipient before preparing a preview.")
+            return _grocery_list_section_redirect(client_id)
+
+        try:
+            snapshot_id = create_grocery_list_snapshot(
+                conn,
+                grocery_list["grocery_list_id"],
+                "EMAIL",
+                actor["user_id"],
+            )
+        except (sqlite3.Error, ValueError):
+            if conn.in_transaction:
+                conn.rollback()
+            app.logger.exception(
+                "Could not create Grocery List email snapshot for client %s",
+                client_id,
+            )
+            flash("The Grocery List email preview could not be prepared.")
+            return _grocery_list_section_redirect(client_id)
+
+        snapshot = conn.execute("""
+            SELECT snapshot_id, captured_by_user_id, captured_at_utc
+            FROM grocery_list_snapshots
+            WHERE snapshot_id = ?
+              AND grocery_list_id = ?
+              AND snapshot_kind = 'EMAIL'
+        """, (snapshot_id, grocery_list["grocery_list_id"])).fetchone()
+        if snapshot is None:
+            raise sqlite3.Error("Created EMAIL snapshot could not be loaded.")
+
+        sections = _load_grocery_list_snapshot_sections(conn, snapshot_id)
+
+        subject = _build_grocery_list_email_subject(client["client_name"])
+        body = _render_grocery_list_email_body(client["client_name"], sections)
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not load Grocery List email preview for client %s",
+            client_id,
+        )
+        flash("The Grocery List email preview could not be prepared.")
+        return _grocery_list_section_redirect(client_id)
+    finally:
+        conn.close()
+
+    return render_template(
+        "grocery_list_email_preview.html",
+        client=client,
+        grocery_list=grocery_list,
+        recipients=recipients,
+        snapshot=snapshot,
+        subject=subject,
+        body=body,
+    )
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/email-send/<int:snapshot_id>",
+    methods=["POST"],
+)
+def grocery_list_email_send(client_id, snapshot_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor, client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        snapshot = conn.execute("""
+            SELECT snapshot_id, grocery_list_id, snapshot_kind,
+                   week_start, captured_at_utc
+            FROM grocery_list_snapshots
+            WHERE snapshot_id = ?
+              AND grocery_list_id = ?
+              AND snapshot_kind = 'EMAIL'
+        """, (snapshot_id, grocery_list["grocery_list_id"])).fetchone()
+        if snapshot is None:
+            return "Email snapshot not found", 404
+
+        recipients = conn.execute("""
+            SELECT recipient_id, display_name, email_address
+            FROM grocery_list_email_recipients
+            WHERE grocery_list_id = ?
+            ORDER BY recipient_id
+        """, (grocery_list["grocery_list_id"],)).fetchall()
+        if not recipients:
+            flash("Add at least one email recipient before sending.")
+            return _grocery_list_section_redirect(client_id)
+
+        sections = _load_grocery_list_snapshot_sections(conn, snapshot_id)
+        subject = _build_grocery_list_email_subject(client["client_name"])
+        body = _render_grocery_list_email_body(client["client_name"], sections)
+
+        sent_count = 0
+        failed_count = 0
+        for recipient in recipients:
+            try:
+                mail_service.send_email(
+                    recipient["email_address"],
+                    subject,
+                    body,
+                )
+            except Exception:
+                failed_count += 1
+                app.logger.error(
+                    "Grocery List email delivery failed for client_id=%s "
+                    "snapshot_id=%s",
+                    client_id,
+                    snapshot_id,
+                )
+                try:
+                    log_activity(
+                        conn,
+                        "GROCERY_LIST",
+                        "grocery_list_email_failed",
+                        "Grocery List email failed",
+                        user_id=actor["user_id"],
+                        client_id=client_id,
+                        related_table="grocery_list_snapshots",
+                        related_id=snapshot_id,
+                        details=(
+                            f"Snapshot ID: {snapshot_id}\n"
+                            f"Recipient count: {len(recipients)}\n"
+                            f"Recipient ID: {recipient['recipient_id']}"
+                        ),
+                        success=0,
+                        storyline_visible=False,
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    app.logger.exception(
+                        "Could not record failed Grocery List email audit "
+                        "for snapshot %s",
+                        snapshot_id,
+                    )
+                continue
+
+            sent_count += 1
+            try:
+                log_activity(
+                    conn,
+                    "GROCERY_LIST",
+                    "grocery_list_email_sent",
+                    "Grocery List email sent",
+                    user_id=actor["user_id"],
+                    client_id=client_id,
+                    related_table="grocery_list_snapshots",
+                    related_id=snapshot_id,
+                    details=(
+                        f"Snapshot ID: {snapshot_id}\n"
+                        f"Recipient count: {len(recipients)}\n"
+                        f"Recipient ID: {recipient['recipient_id']}"
+                    ),
+                    success=1,
+                    storyline_visible=False,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                app.logger.exception(
+                    "Could not record successful Grocery List email audit "
+                    "for snapshot %s",
+                    snapshot_id,
+                )
+
+        if sent_count == len(recipients):
+            flash("Grocery List emailed successfully.")
+        elif sent_count:
+            flash(f"Grocery List emailed to {sent_count} recipient(s).")
+            flash(
+                f"Grocery List email failed for {failed_count} recipient(s)."
+            )
+        else:
+            flash("Grocery List email could not be sent.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        return "Access denied", 403
+    except ValueError:
+        return "Client not found", 404
+    except LookupError:
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        app.logger.exception(
+            "Could not load Grocery List email snapshot %s for client %s",
+            snapshot_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/email-recipients/new",
+    methods=["POST"],
+)
+def grocery_list_email_recipient_new(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor, _client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        try:
+            display_name, email_address = _grocery_list_recipient_form_values()
+        except ValueError as error:
+            conn.rollback()
+            flash(str(error))
+            return _grocery_list_section_redirect(client_id)
+
+        now_utc = format_staff_notice_utc_datetime(get_application_now_utc())
+        conn.execute("""
+            INSERT INTO grocery_list_email_recipients
+            (
+                grocery_list_id,
+                display_name,
+                email_address,
+                created_by_user_id,
+                created_at_utc,
+                updated_by_user_id,
+                updated_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            grocery_list["grocery_list_id"],
+            display_name,
+            email_address,
+            actor["user_id"],
+            now_utc,
+            actor["user_id"],
+            now_utc,
+        ))
+        conn.commit()
+        flash("Grocery List email recipient added.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        flash("That email address is already saved for this Grocery List.")
+        return _grocery_list_section_redirect(client_id)
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not add Grocery List email recipient for client %s",
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/email-recipients/<int:recipient_id>/edit",
+    methods=["POST"],
+)
+def grocery_list_email_recipient_edit(client_id, recipient_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor, _client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        recipient = conn.execute("""
+            SELECT recipient_id
+            FROM grocery_list_email_recipients
+            WHERE recipient_id = ?
+              AND grocery_list_id = ?
+        """, (recipient_id, grocery_list["grocery_list_id"])).fetchone()
+        if recipient is None:
+            conn.rollback()
+            return "Recipient not found", 404
+
+        try:
+            display_name, email_address = _grocery_list_recipient_form_values()
+        except ValueError as error:
+            conn.rollback()
+            flash(str(error))
+            return _grocery_list_section_redirect(client_id)
+
+        conn.execute("""
+            UPDATE grocery_list_email_recipients
+            SET display_name = ?,
+                email_address = ?,
+                updated_by_user_id = ?,
+                updated_at_utc = ?
+            WHERE recipient_id = ?
+              AND grocery_list_id = ?
+        """, (
+            display_name,
+            email_address,
+            actor["user_id"],
+            format_staff_notice_utc_datetime(get_application_now_utc()),
+            recipient_id,
+            grocery_list["grocery_list_id"],
+        ))
+        conn.commit()
+        flash("Grocery List email recipient updated.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        flash("That email address is already saved for this Grocery List.")
+        return _grocery_list_section_redirect(client_id)
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not update Grocery List email recipient %s for client %s",
+            recipient_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/email-recipients/<int:recipient_id>/delete",
+    methods=["POST"],
+)
+def grocery_list_email_recipient_delete(client_id, recipient_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _actor, _client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        recipient = conn.execute("""
+            SELECT recipient_id
+            FROM grocery_list_email_recipients
+            WHERE recipient_id = ?
+              AND grocery_list_id = ?
+        """, (recipient_id, grocery_list["grocery_list_id"])).fetchone()
+        if recipient is None:
+            conn.rollback()
+            return "Recipient not found", 404
+        if request.form.get("confirm") != "yes":
+            conn.rollback()
+            flash("You must explicitly confirm recipient removal.")
+            return _grocery_list_section_redirect(client_id)
+
+        deleted = conn.execute("""
+            DELETE FROM grocery_list_email_recipients
+            WHERE recipient_id = ?
+              AND grocery_list_id = ?
+        """, (recipient_id, grocery_list["grocery_list_id"]))
+        if deleted.rowcount != 1:
+            conn.rollback()
+            return "Recipient not found", 404
+        conn.commit()
+        flash("Grocery List email recipient removed.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not remove Grocery List email recipient %s for client %s",
+            recipient_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
 
 
 @app.route(

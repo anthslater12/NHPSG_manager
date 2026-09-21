@@ -109,6 +109,32 @@ class GroceryListsMigrationTests(unittest.TestCase):
             ),
         ).lastrowid
 
+    def insert_email_recipient(
+        self,
+        grocery_list_id,
+        display_name="Care Team",
+        email_address="care@example.com",
+        created_by_user_id=1,
+        created_at_utc="2026-09-20T12:00:00Z",
+        updated_by_user_id=1,
+        updated_at_utc="2026-09-20T12:00:00Z",
+    ):
+        return self.conn.execute(
+            "INSERT INTO grocery_list_email_recipients "
+            "(grocery_list_id, display_name, email_address, "
+            "created_by_user_id, created_at_utc, updated_by_user_id, "
+            "updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                grocery_list_id,
+                display_name,
+                email_address,
+                created_by_user_id,
+                created_at_utc,
+                updated_by_user_id,
+                updated_at_utc,
+            ),
+        ).lastrowid
+
     def assert_rejected(self, statement, parameters=()):
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute(statement, parameters)
@@ -180,6 +206,7 @@ class GroceryListsMigrationTests(unittest.TestCase):
                 "grocery_list_sections",
                 "grocery_list_items",
                 "grocery_list_shares",
+                "grocery_list_email_recipients",
                 "grocery_list_snapshots",
                 "grocery_list_snapshot_sections",
                 "grocery_list_snapshot_items",
@@ -619,6 +646,211 @@ class GroceryListsMigrationTests(unittest.TestCase):
         self.assert_rejected("DELETE FROM users WHERE user_id = 2")
         self.assert_rejected("DELETE FROM users WHERE user_id = 1")
 
+    def test_email_recipient_constraints_duplicates_and_timestamps(self):
+        first_list = self.insert_list()
+        second_list = self.insert_list(client_id=20)
+        first_recipient = self.insert_email_recipient(
+            first_list,
+            display_name=None,
+            email_address="care@example.com",
+            created_by_user_id=1,
+            updated_by_user_id=2,
+        )
+        second_recipient = self.insert_email_recipient(
+            first_list,
+            display_name="Family",
+            email_address="family@example.com",
+        )
+        other_list_recipient = self.insert_email_recipient(
+            second_list,
+            email_address="care@example.com",
+        )
+        self.conn.commit()
+
+        self.assertNotEqual(first_recipient, second_recipient)
+        self.assertNotEqual(first_recipient, other_list_recipient)
+        row = self.conn.execute(
+            "SELECT display_name, email_address, created_by_user_id, "
+            "created_at_utc, updated_by_user_id, updated_at_utc "
+            "FROM grocery_list_email_recipients WHERE recipient_id = ?",
+            (first_recipient,),
+        ).fetchone()
+        self.assertEqual(
+            tuple(row),
+            (
+                None,
+                "care@example.com",
+                1,
+                "2026-09-20T12:00:00Z",
+                2,
+                "2026-09-20T12:00:00Z",
+            ),
+        )
+
+        self.assert_rejected(
+            "INSERT INTO grocery_list_email_recipients "
+            "(grocery_list_id, email_address, created_by_user_id, "
+            "created_at_utc, updated_by_user_id, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                first_list,
+                "care@example.com",
+                1,
+                "2026-09-20T12:00:00Z",
+                1,
+                "2026-09-20T12:00:00Z",
+            ),
+        )
+        for invalid_email in (None, "", "   ", " care@example.com"):
+            self.assert_rejected(
+                "INSERT INTO grocery_list_email_recipients "
+                "(grocery_list_id, email_address, created_by_user_id, "
+                "created_at_utc, updated_by_user_id, updated_at_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    first_list,
+                    invalid_email,
+                    1,
+                    "2026-09-20T12:00:00Z",
+                    1,
+                    "2026-09-20T12:00:00Z",
+                ),
+            )
+        self.assert_rejected(
+            "INSERT INTO grocery_list_email_recipients "
+            "(grocery_list_id, email_address, created_by_user_id, "
+            "created_at_utc, updated_by_user_id, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                first_list,
+                "a" * 251 + "@x.com",
+                1,
+                "2026-09-20T12:00:00Z",
+                1,
+                "2026-09-20T12:00:00Z",
+            ),
+        )
+        self.assert_rejected(
+            "INSERT INTO grocery_list_email_recipients "
+            "(grocery_list_id, email_address, created_by_user_id, "
+            "created_at_utc, updated_by_user_id, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                999,
+                "missing-list@example.com",
+                1,
+                "2026-09-20T12:00:00Z",
+                1,
+                "2026-09-20T12:00:00Z",
+            ),
+        )
+        self.assert_rejected(
+            "INSERT INTO grocery_list_email_recipients "
+            "(grocery_list_id, email_address, created_by_user_id, "
+            "created_at_utc, updated_by_user_id, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                first_list,
+                "missing-creator@example.com",
+                999,
+                "2026-09-20T12:00:00Z",
+                1,
+                "2026-09-20T12:00:00Z",
+            ),
+        )
+        self.assert_rejected(
+            "INSERT INTO grocery_list_email_recipients "
+            "(grocery_list_id, email_address, created_by_user_id, "
+            "created_at_utc, updated_by_user_id, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                first_list,
+                "missing-updater@example.com",
+                1,
+                "2026-09-20T12:00:00Z",
+                999,
+                "2026-09-20T12:00:00Z",
+            ),
+        )
+
+    def test_email_recipient_cascade_user_restrictions_and_data_preservation(
+        self,
+    ):
+        list_id = self.insert_list()
+        section_id = self.insert_section(list_id)
+        item_id = self.insert_item(section_id)
+        share_id = self.insert_share(list_id)
+        snapshot_id = self.insert_snapshot(list_id)
+        snapshot_section_id = self.insert_snapshot_section(snapshot_id)
+        snapshot_item_id = self.insert_snapshot_item(snapshot_section_id)
+        self.conn.execute("INSERT INTO users VALUES (3, 'creator')")
+        self.conn.execute("INSERT INTO users VALUES (4, 'updater')")
+        recipient_id = self.insert_email_recipient(
+            list_id,
+            email_address="preserved@example.com",
+            created_by_user_id=3,
+            updated_by_user_id=4,
+        )
+        self.conn.commit()
+
+        self.assertFalse(migration.migrate(self.conn))
+        for table_name, key_name, key_value in (
+            ("grocery_lists", "grocery_list_id", list_id),
+            ("grocery_list_sections", "section_id", section_id),
+            ("grocery_list_items", "item_id", item_id),
+            ("grocery_list_shares", "share_id", share_id),
+            ("grocery_list_snapshots", "snapshot_id", snapshot_id),
+            (
+                "grocery_list_snapshot_sections",
+                "snapshot_section_id",
+                snapshot_section_id,
+            ),
+            (
+                "grocery_list_snapshot_items",
+                "snapshot_item_id",
+                snapshot_item_id,
+            ),
+            (
+                "grocery_list_email_recipients",
+                "recipient_id",
+                recipient_id,
+            ),
+        ):
+            self.assertIsNotNone(
+                self.conn.execute(
+                    f"SELECT 1 FROM {table_name} WHERE {key_name} = ?",
+                    (key_value,),
+                ).fetchone()
+            )
+
+        self.assert_rejected("DELETE FROM users WHERE user_id = 3")
+        self.assert_rejected("DELETE FROM users WHERE user_id = 4")
+
+        other_list = self.insert_list(client_id=20)
+        other_recipient = self.insert_email_recipient(
+            other_list,
+            email_address="cascade@example.com",
+        )
+        self.conn.commit()
+        self.conn.execute(
+            "DELETE FROM grocery_lists WHERE grocery_list_id = ?",
+            (other_list,),
+        )
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM grocery_list_email_recipients "
+                "WHERE recipient_id = ?",
+                (other_recipient,),
+            ).fetchone()
+        )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT 1 FROM grocery_list_email_recipients "
+                "WHERE recipient_id = ?",
+                (recipient_id,),
+            ).fetchone()
+        )
+
     def test_deleting_a_grocery_list_cascades_share_rows(self):
         list_id = self.insert_list()
         self.insert_share(list_id, user_id=2, permission="VIEW")
@@ -759,6 +991,7 @@ class GroceryListsMigrationTests(unittest.TestCase):
                 ).fetchone()
             )
             for table_name in (
+                "grocery_list_email_recipients",
                 "grocery_list_snapshots",
                 "grocery_list_snapshot_sections",
                 "grocery_list_snapshot_items",

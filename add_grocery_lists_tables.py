@@ -79,6 +79,31 @@ TABLE_SQL = {
             UNIQUE (grocery_list_id, user_id)
         )
     """,
+    "grocery_list_email_recipients": """
+        CREATE TABLE IF NOT EXISTS grocery_list_email_recipients (
+            recipient_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            grocery_list_id INTEGER NOT NULL,
+            display_name TEXT NULL,
+            email_address TEXT NOT NULL
+                CHECK (email_address = trim(email_address))
+                CHECK (length(email_address) > 0)
+                CHECK (length(email_address) <= 254),
+            created_by_user_id INTEGER NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            updated_by_user_id INTEGER NOT NULL,
+            updated_at_utc TEXT NOT NULL,
+            FOREIGN KEY (grocery_list_id)
+                REFERENCES grocery_lists(grocery_list_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (created_by_user_id)
+                REFERENCES users(user_id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (updated_by_user_id)
+                REFERENCES users(user_id)
+                ON DELETE RESTRICT,
+            UNIQUE (grocery_list_id, email_address)
+        )
+    """,
     "grocery_list_snapshots": """
         CREATE TABLE IF NOT EXISTS grocery_list_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +180,10 @@ INDEXES = (
         "grocery_list_shares(user_id)",
     ),
     (
+        "idx_grocery_list_email_recipients_list",
+        "grocery_list_email_recipients(grocery_list_id)",
+    ),
+    (
         "idx_grocery_list_snapshots_list_week",
         "grocery_list_snapshots(grocery_list_id, week_start)",
     ),
@@ -210,6 +239,16 @@ EXPECTED_COLUMNS = {
         "permission",
         "shared_by_user_id",
         "shared_at_utc",
+    },
+    "grocery_list_email_recipients": {
+        "recipient_id",
+        "grocery_list_id",
+        "display_name",
+        "email_address",
+        "created_by_user_id",
+        "created_at_utc",
+        "updated_by_user_id",
+        "updated_at_utc",
     },
     "grocery_list_snapshots": {
         "snapshot_id",
@@ -338,6 +377,26 @@ def _validate_existing_schema(conn):
             ("user_id", "users", "user_id", "RESTRICT"),
             ("shared_by_user_id", "users", "user_id", "RESTRICT"),
         },
+        "grocery_list_email_recipients": {
+            (
+                "grocery_list_id",
+                "grocery_lists",
+                "grocery_list_id",
+                "CASCADE",
+            ),
+            (
+                "created_by_user_id",
+                "users",
+                "user_id",
+                "RESTRICT",
+            ),
+            (
+                "updated_by_user_id",
+                "users",
+                "user_id",
+                "RESTRICT",
+            ),
+        },
         "grocery_list_snapshots": {
             (
                 "grocery_list_id",
@@ -383,6 +442,11 @@ def _validate_existing_schema(conn):
         "grocery_list_shares": (
             "permission in ('view', 'edit')",
         ),
+        "grocery_list_email_recipients": (
+            "email_address = trim(email_address)",
+            "length(email_address) > 0",
+            "length(email_address) <= 254",
+        ),
         "grocery_list_snapshots": (
             "snapshot_kind in ('weekly', 'email')",
             "snapshot_kind = 'weekly'",
@@ -405,6 +469,10 @@ def _validate_existing_schema(conn):
         "grocery_lists": ("client_id",),
         "grocery_list_sections": ("grocery_list_id", "name"),
         "grocery_list_shares": ("grocery_list_id", "user_id"),
+        "grocery_list_email_recipients": (
+            "grocery_list_id",
+            "email_address",
+        ),
     }
 
     for table_name, expected_columns in EXPECTED_COLUMNS.items():
@@ -461,6 +529,16 @@ def _validate_existing_schema(conn):
                 "permission",
                 "shared_by_user_id",
                 "shared_at_utc",
+            }
+        elif table_name == "grocery_list_email_recipients":
+            primary_key = "recipient_id"
+            required_not_null = {
+                "grocery_list_id",
+                "email_address",
+                "created_by_user_id",
+                "created_at_utc",
+                "updated_by_user_id",
+                "updated_at_utc",
             }
         elif table_name == "grocery_list_snapshots":
             primary_key = "snapshot_id"

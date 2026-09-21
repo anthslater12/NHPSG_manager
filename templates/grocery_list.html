@@ -21,6 +21,43 @@
         </form>
     {% endif %}
 
+    {% if can_manage_recipients %}
+    <h3>Email Recipients</h3>
+    {% if email_recipients %}
+        {% for recipient in email_recipients %}
+        <div>
+            {% if recipient.display_name %}
+                <strong>{{ recipient.display_name }}</strong>
+            {% endif %}
+            <span>{{ recipient.email_address }}</span>
+            <form method="post" action="{{ url_for('grocery_list_email_recipient_edit', client_id=client.client_id, recipient_id=recipient.recipient_id) }}">
+                <label for="recipient-name-{{ recipient.recipient_id }}">Display name</label>
+                <input id="recipient-name-{{ recipient.recipient_id }}" name="display_name" value="{{ recipient.display_name or '' }}">
+                <label for="recipient-email-{{ recipient.recipient_id }}">Email address</label>
+                <input id="recipient-email-{{ recipient.recipient_id }}" name="email_address" value="{{ recipient.email_address }}" required>
+                <button type="submit">Edit</button>
+            </form>
+            <form method="post" action="{{ url_for('grocery_list_email_recipient_delete', client_id=client.client_id, recipient_id=recipient.recipient_id) }}">
+                <input type="hidden" name="confirm" value="yes">
+                <button type="submit">Delete</button>
+            </form>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p>No email recipients have been added.</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('grocery_list_email_recipient_new', client_id=client.client_id) }}">
+        <label for="new-recipient-name">Display name</label>
+        <input id="new-recipient-name" name="display_name">
+        <label for="new-recipient-email">Email address</label>
+        <input id="new-recipient-email" name="email_address" required>
+        <button type="submit">Add Recipient</button>
+    </form>
+    <form method="post" action="{{ url_for('grocery_list_email_preview', client_id=client.client_id) }}">
+        <button type="submit">Preview Email</button>
+    </form>
+    {% endif %}
+
     {% if can_manage_shares %}
     <h3>Share Grocery List</h3>
     {% if eligible_users %}

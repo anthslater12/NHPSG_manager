@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Grocery List Email Preview</h2>
+    <p><strong>Client:</strong> {{ client.client_name }}</p>
+    <p><strong>Subject:</strong> {{ subject }}</p>
+
+    <p>This is a preview only. The email has not been sent.</p>
+
+    <h3>Recipients</h3>
+    <ul>
+        {% for recipient in recipients %}
+        <li>
+            {% if recipient.display_name %}{{ recipient.display_name }} — {% endif %}
+            {{ recipient.email_address }}
+        </li>
+        {% endfor %}
+    </ul>
+
+    <p><strong>Snapshot captured:</strong> {{ snapshot.captured_at_utc }}</p>
+
+    <h3>Email body</h3>
+    <pre>{{ body }}</pre>
+
+    <form method="post" action="{{ url_for('grocery_list_email_send', client_id=client.client_id, snapshot_id=snapshot.snapshot_id) }}">
+        <button type="submit">Send Grocery List</button>
+    </form>
+
+    <p>
+        <a href="{{ url_for('client_grocery_list', client_id=client.client_id) }}">
+            Back to Current Grocery List
+        </a>
+    </p>
+</div>
+
+{% endblock %}
