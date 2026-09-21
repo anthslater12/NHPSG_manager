@@ -11,6 +11,7 @@ import app
 import add_leave_requests_table as leave_requests_schema
 import add_staff_notices_tables as staff_notice_schema
 import add_worker_resources_table as worker_resources_schema
+import add_grocery_lists_tables as grocery_lists_schema
 
 
 STAFF_NOTICE_TABLES = (
@@ -197,6 +198,7 @@ class StaffNoticePublicationPreviewTests(unittest.TestCase):
 
             leave_requests_schema.migrate(conn)
             worker_resources_schema.migrate(conn)
+            grocery_lists_schema.migrate(conn)
 
             conn.executemany("""
                 INSERT INTO users (user_id, full_name, role, active)

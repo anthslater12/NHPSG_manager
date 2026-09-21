@@ -49,6 +49,12 @@
         Worker Resources
     </a>
 
+    {% if grocery_lists_navigation_allowed %}
+        <a href="{{ url_for('grocery_lists_index') }}">
+            Grocery Lists
+        </a>
+    {% endif %}
+
     <a href="{{ url_for('schedule_index') }}">
         Schedule
     </a>

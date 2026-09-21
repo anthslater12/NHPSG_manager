@@ -52,7 +52,15 @@
                     <span class="status-inactive">⚪ Inactive</span>
                 {% endif %}
             </td>
-            <td><a href="/client/edit/{{ client.client_id }}">Edit</a></td>
+            <td>
+                <a href="/client/edit/{{ client.client_id }}">Edit</a>
+                {% if client.active %}
+                    |
+                    <a href="{{ url_for('client_grocery_list', client_id=client.client_id) }}">
+                        Grocery List
+                    </a>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </table>

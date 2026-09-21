@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Grocery Lists</h2>
+
+    {% if grocery_lists %}
+    <table>
+        <tr>
+            <th>Client</th>
+            <th>Grocery List</th>
+            {% if not management %}<th>Access</th>{% endif %}
+        </tr>
+        {% for grocery_list in grocery_lists %}
+        <tr>
+            <td>{{ grocery_list.client_name }}</td>
+            <td>
+                <a href="{{ url_for('client_grocery_list', client_id=grocery_list.client_id) }}">
+                    {{ grocery_list.title }}
+                </a>
+            </td>
+            {% if not management %}<td>{{ grocery_list.permission }}</td>{% endif %}
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+        <p>No Grocery Lists are available.</p>
+    {% endif %}
+</div>
+
+{% endblock %}

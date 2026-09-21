@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Grocery List</h2>
+    <p><strong>Client:</strong> {{ client.client_name }}</p>
+    <p><strong>List:</strong> {{ grocery_list.title }}</p>
+    <p>
+        <a href="{{ url_for('client_grocery_list_history', client_id=client.client_id) }}">
+            View History
+        </a>
+    </p>
+
+    {% if can_edit %}
+        <h3>Add Section</h3>
+        <form method="post" action="{{ url_for('grocery_list_section_new', client_id=client.client_id) }}">
+            <label for="new-section-name">Section name</label>
+            <input id="new-section-name" name="name" required>
+            <button type="submit">Add Section</button>
+        </form>
+    {% endif %}
+
+    {% if can_manage_shares %}
+    <h3>Share Grocery List</h3>
+    {% if eligible_users %}
+    <form method="post" action="{{ url_for('grocery_list_share_new', client_id=client.client_id) }}">
+        <label for="share-user">User</label>
+        <select id="share-user" name="user_id" required>
+            <option value="">Select a Support Worker</option>
+            {% for user in eligible_users %}
+                <option value="{{ user.user_id }}">{{ user.full_name }}</option>
+            {% endfor %}
+        </select>
+        <label for="share-permission">Permission</label>
+        <select id="share-permission" name="permission" required>
+            <option value="VIEW">VIEW</option>
+            <option value="EDIT">EDIT</option>
+        </select>
+        <button type="submit">Share</button>
+    </form>
+    {% else %}
+        <p>No eligible Support Workers are available to share with.</p>
+    {% endif %}
+
+    <h4>Currently Shared</h4>
+    {% if shares %}
+        {% for share in shares %}
+        <div>
+            <strong>{{ share.full_name }}</strong>
+            <span>({{ share.role }})</span>
+            <span>{{ share.permission }}</span>
+            {% if not share.active or share.role != "Support Worker" %}
+                <span>(No longer eligible for permission changes)</span>
+            {% else %}
+                <form method="post" action="{{ url_for('grocery_list_share_permission', client_id=client.client_id, share_id=share.share_id) }}">
+                    <input type="hidden" name="permission" value="{% if share.permission == 'VIEW' %}EDIT{% else %}VIEW{% endif %}">
+                    <button type="submit">Change to {% if share.permission == "VIEW" %}EDIT{% else %}VIEW{% endif %}</button>
+                </form>
+            {% endif %}
+            <form method="post" action="{{ url_for('grocery_list_share_delete', client_id=client.client_id, share_id=share.share_id) }}">
+                <input type="hidden" name="confirm" value="yes">
+                <button type="submit">Remove</button>
+            </form>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p>No users are currently shared.</p>
+    {% endif %}
+    {% endif %}
+
+    {% if sections %}
+        {% for section in sections %}
+        <section>
+            <h3>{{ section.name }}</h3>
+
+            {% if can_edit %}
+                <form method="post" action="{{ url_for('grocery_list_item_new', client_id=client.client_id, section_id=section.section_id) }}">
+                    <label for="new-item-name-{{ section.section_id }}">Item</label>
+                    <input id="new-item-name-{{ section.section_id }}" name="item_name" required>
+                    <label for="new-item-stock-{{ section.section_id }}">Current Stock</label>
+                    <input id="new-item-stock-{{ section.section_id }}" name="stock_text">
+                    <label for="new-item-needed-{{ section.section_id }}">Amount Needed</label>
+                    <input id="new-item-needed-{{ section.section_id }}" name="needed_text">
+                    <button type="submit">Add Item</button>
+                </form>
+            {% endif %}
+
+            {% if can_edit %}
+                <form method="post" action="{{ url_for('grocery_list_section_rename', client_id=client.client_id, section_id=section.section_id) }}">
+                    <label for="section-name-{{ section.section_id }}">Rename section</label>
+                    <input id="section-name-{{ section.section_id }}" name="name" value="{{ section.name }}" required>
+                    <button type="submit">Rename</button>
+                </form>
+                <form method="post" action="{{ url_for('grocery_list_section_delete', client_id=client.client_id, section_id=section.section_id) }}">
+                    <input type="hidden" name="confirm" value="yes">
+                    <button type="submit">Delete</button>
+                </form>
+            {% endif %}
+
+            {% if section["items"] %}
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Item</th>
+                            <th>Current Stock</th>
+                            <th>Amount Needed</th>
+                            <th>Purchased</th>
+                            {% if can_edit %}<th>Actions</th>{% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for item in section["items"] %}
+                        <tr>
+                            <td>{{ item.item_name }}</td>
+                            <td>{{ item.stock_text or "—" }}</td>
+                            <td>{{ item.needed_text or "—" }}</td>
+                            <td>{% if item.purchased %}Yes{% else %}No{% endif %}</td>
+                            {% if can_edit %}
+                                <td>
+                                    <form method="post" action="{{ url_for('grocery_list_item_edit', client_id=client.client_id, item_id=item.item_id) }}">
+                                        <label for="edit-item-name-{{ item.item_id }}">Item</label>
+                                        <input id="edit-item-name-{{ item.item_id }}" name="item_name" value="{{ item.item_name }}" required>
+                                        <label for="edit-item-stock-{{ item.item_id }}">Current Stock</label>
+                                        <input id="edit-item-stock-{{ item.item_id }}" name="stock_text" value="{{ item.stock_text or '' }}">
+                                        <label for="edit-item-needed-{{ item.item_id }}">Amount Needed</label>
+                                        <input id="edit-item-needed-{{ item.item_id }}" name="needed_text" value="{{ item.needed_text or '' }}">
+                                        <button type="submit">Save</button>
+                                    </form>
+                                    <form method="post" action="{{ url_for('grocery_list_item_delete', client_id=client.client_id, item_id=item.item_id) }}">
+                                        <input type="hidden" name="confirm" value="yes">
+                                        <button type="submit">Delete</button>
+                                    </form>
+                                    <form method="post" action="{{ url_for('grocery_list_item_purchased', client_id=client.client_id, item_id=item.item_id) }}">
+                                        <input type="hidden" name="purchased" value="{% if item.purchased %}0{% else %}1{% endif %}">
+                                        <button type="submit">{% if item.purchased %}Mark Not Purchased{% else %}Mark Purchased{% endif %}</button>
+                                    </form>
+                                </td>
+                            {% endif %}
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+                <p>No items in this section.</p>
+            {% endif %}
+        </section>
+        {% endfor %}
+    {% else %}
+        <p>No sections have been added yet.</p>
+    {% endif %}
+</div>
+
+{% endblock %}

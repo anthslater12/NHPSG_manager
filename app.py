@@ -30,6 +30,7 @@ import secrets
 import add_leave_requests_table
 import add_sleep_events_note
 import add_worker_resources_table
+import add_grocery_lists_tables
 import mail_service
 
 app = Flask(__name__)
@@ -497,6 +498,7 @@ def get_db():
         add_leave_requests_table.migrate(conn)
         add_sleep_events_note.migrate(conn)
         add_worker_resources_table.migrate(conn)
+        add_grocery_lists_tables.migrate(conn)
         return conn
 
     except Exception as error:
@@ -1808,6 +1810,21 @@ def validate_active_behaviour_client(conn, client_id):
     """Return an active client or reject the request."""
     client = conn.execute("""
         SELECT client_id, active
+        FROM clients
+        WHERE client_id = ?
+          AND active = 1
+    """, (client_id,)).fetchone()
+
+    if client is None:
+        raise ValueError("An active client is required.")
+
+    return client
+
+
+def validate_active_grocery_list_client(conn, client_id):
+    """Return an active Grocery List client or reject the request."""
+    client = conn.execute("""
+        SELECT client_id, client_name
         FROM clients
         WHERE client_id = ?
           AND active = 1
@@ -7885,6 +7902,316 @@ STAFF_NOTICE_MANAGEMENT_ROLES = frozenset({
     "Program Manager",
     "Director"
 })
+
+
+def validate_grocery_list_management_authority(conn, user_id):
+    """Return an active user allowed to manage Grocery Lists."""
+    user = get_active_authenticated_user(conn, user_id)
+    if user["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to manage Grocery Lists."
+        )
+    return user
+
+
+def validate_grocery_list_access(conn, user_id, grocery_list_id):
+    """Return validated Grocery List access for an active database user."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
+        return {
+            "actor": actor,
+            "access_type": "management",
+            "permission": "EDIT",
+            "can_edit": True,
+            "can_manage_shares": True,
+        }
+
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Current user is not allowed to access Grocery Lists."
+        )
+
+    share = conn.execute("""
+        SELECT permission
+        FROM grocery_list_shares
+        WHERE grocery_list_id = ?
+          AND user_id = ?
+    """, (grocery_list_id, actor["user_id"])).fetchone()
+    if share is None or share["permission"] not in ("VIEW", "EDIT"):
+        raise PermissionError(
+            "Current user is not allowed to access Grocery Lists."
+        )
+
+    return {
+        "actor": actor,
+        "access_type": "share",
+        "permission": share["permission"],
+        "can_edit": share["permission"] == "EDIT",
+        "can_manage_shares": False,
+    }
+
+
+def create_grocery_list_snapshot(
+    conn,
+    grocery_list_id,
+    snapshot_kind,
+    captured_by_user_id,
+    week_start=None,
+):
+    """Copy one current Grocery List into an immutable snapshot."""
+    if snapshot_kind not in ("WEEKLY", "EMAIL"):
+        raise ValueError("Snapshot kind must be WEEKLY or EMAIL.")
+
+    if snapshot_kind == "WEEKLY":
+        if not isinstance(week_start, str) or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}", week_start
+        ):
+            raise ValueError("WEEKLY snapshots require a YYYY-MM-DD week_start.")
+        try:
+            parsed_week_start = date.fromisoformat(week_start)
+        except ValueError as error:
+            raise ValueError(
+                "WEEKLY snapshots require a valid YYYY-MM-DD week_start."
+            ) from error
+        if parsed_week_start.isoformat() != week_start:
+            raise ValueError(
+                "WEEKLY snapshots require a canonical YYYY-MM-DD week_start."
+            )
+    elif week_start is not None:
+        raise ValueError("EMAIL snapshots cannot have a week_start.")
+
+    started_transaction = not conn.in_transaction
+    savepoint = "grocery_list_snapshot_creation"
+    if started_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    else:
+        conn.execute(f"SAVEPOINT {savepoint}")
+
+    try:
+        grocery_list = conn.execute(
+            "SELECT grocery_list_id FROM grocery_lists "
+            "WHERE grocery_list_id = ?",
+            (grocery_list_id,),
+        ).fetchone()
+        if grocery_list is None:
+            raise ValueError("Grocery List not found.")
+
+        capturing_user = conn.execute(
+            "SELECT user_id FROM users WHERE user_id = ?",
+            (captured_by_user_id,),
+        ).fetchone()
+        if capturing_user is None:
+            raise ValueError("Capturing user not found.")
+
+        if snapshot_kind == "WEEKLY":
+            duplicate = conn.execute(
+                "SELECT 1 FROM grocery_list_snapshots "
+                "WHERE grocery_list_id = ? "
+                "AND snapshot_kind = 'WEEKLY' "
+                "AND week_start = ?",
+                (grocery_list_id, week_start),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(
+                    "A WEEKLY snapshot already exists for this Grocery List "
+                    "and week."
+                )
+
+        captured_at_utc = format_staff_notice_utc_datetime(
+            get_application_now_utc()
+        )
+        snapshot_id = conn.execute(
+            """
+            INSERT INTO grocery_list_snapshots
+            (
+                grocery_list_id,
+                snapshot_kind,
+                week_start,
+                captured_by_user_id,
+                captured_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                grocery_list_id,
+                snapshot_kind,
+                week_start,
+                captured_by_user_id,
+                captured_at_utc,
+            ),
+        ).lastrowid
+
+        sections = conn.execute(
+            """
+            SELECT section_id, name, display_order
+            FROM grocery_list_sections
+            WHERE grocery_list_id = ?
+            ORDER BY display_order, section_id
+            """,
+            (grocery_list_id,),
+        ).fetchall()
+        for section in sections:
+            snapshot_section_id = conn.execute(
+                """
+                INSERT INTO grocery_list_snapshot_sections
+                (snapshot_id, name, display_order)
+                VALUES (?, ?, ?)
+                """,
+                (snapshot_id, section["name"], section["display_order"]),
+            ).lastrowid
+
+            items = conn.execute(
+                """
+                SELECT item_name, stock_text, needed_text,
+                       purchased, display_order
+                FROM grocery_list_items
+                WHERE section_id = ?
+                ORDER BY display_order, item_id
+                """,
+                (section["section_id"],),
+            ).fetchall()
+            for item in items:
+                conn.execute(
+                    """
+                    INSERT INTO grocery_list_snapshot_items
+                    (
+                        snapshot_section_id,
+                        item_name,
+                        stock_text,
+                        needed_text,
+                        purchased,
+                        display_order
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_section_id,
+                        item["item_name"],
+                        item["stock_text"],
+                        item["needed_text"],
+                        item["purchased"],
+                        item["display_order"],
+                    ),
+                )
+
+        if started_transaction:
+            conn.commit()
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return snapshot_id
+    except sqlite3.IntegrityError as error:
+        if started_transaction:
+            if conn.in_transaction:
+                conn.rollback()
+        else:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except sqlite3.Error:
+                pass
+        if (
+            snapshot_kind == "WEEKLY"
+            and "grocery_list_snapshots.grocery_list_id" in str(error)
+        ):
+            raise ValueError(
+                "A WEEKLY snapshot already exists for this Grocery List "
+                "and week."
+            ) from error
+        raise
+    except BaseException:
+        if started_transaction:
+            if conn.in_transaction:
+                conn.rollback()
+        else:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except sqlite3.Error:
+                pass
+        raise
+
+
+def ensure_grocery_list_weekly_snapshot(
+    conn,
+    grocery_list_id,
+    captured_by_user_id,
+    now_utc=None,
+):
+    """Ensure one weekly baseline exists for the current Vancouver week."""
+    if now_utc is None:
+        now_utc = get_application_now_utc()
+    elif isinstance(now_utc, str):
+        now_utc = parse_staff_notice_utc_datetime(now_utc)
+    elif not isinstance(now_utc, datetime):
+        raise ValueError("now_utc must be a UTC datetime or ISO-8601 string.")
+
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        raise ValueError("now_utc must include a UTC offset.")
+
+    week_start = (
+        now_utc.astimezone(VANCOUVER_TIMEZONE).date()
+        - timedelta(days=now_utc.astimezone(VANCOUVER_TIMEZONE).weekday())
+    ).isoformat()
+    existing = conn.execute(
+        "SELECT snapshot_id FROM grocery_list_snapshots "
+        "WHERE grocery_list_id = ? "
+        "AND snapshot_kind = 'WEEKLY' "
+        "AND week_start = ?",
+        (grocery_list_id, week_start),
+    ).fetchone()
+    if existing is not None:
+        return existing["snapshot_id"]
+
+    return create_grocery_list_snapshot(
+        conn,
+        grocery_list_id,
+        "WEEKLY",
+        captured_by_user_id,
+        week_start=week_start,
+    )
+
+
+@app.template_filter("format_history_week_start")
+def format_history_week_start(value):
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return value
+    return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
+
+
+@app.context_processor
+def inject_grocery_list_navigation():
+    """Expose shared Grocery List navigation for eligible Support Workers."""
+    if session.get("user_id") is None:
+        return {"grocery_lists_navigation_allowed": False}
+
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.row_factory = sqlite3.Row
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        if actor[1] != "Support Worker":
+            return {"grocery_lists_navigation_allowed": False}
+
+        share = conn.execute("""
+            SELECT 1
+            FROM grocery_list_shares AS gls
+            JOIN grocery_lists AS gl
+              ON gl.grocery_list_id = gls.grocery_list_id
+            JOIN clients AS c
+              ON c.client_id = gl.client_id
+            WHERE gls.user_id = ?
+              AND gls.permission IN ('VIEW', 'EDIT')
+              AND c.active = 1
+            LIMIT 1
+        """, (actor[0],)).fetchone()
+        return {"grocery_lists_navigation_allowed": share is not None}
+    except (PermissionError, RuntimeError, sqlite3.Error):
+        return {"grocery_lists_navigation_allowed": False}
+    finally:
+        if conn is not None:
+            conn.close()
 
 SHIFT_AUTO_SIGN_ON_ROLES = frozenset({
     "Support Worker"
@@ -33296,6 +33623,1172 @@ def worker_resources():
             actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
         ),
     )
+
+
+@app.route("/grocery-lists")
+def grocery_lists_index():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        if actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
+            grocery_lists = conn.execute("""
+                SELECT gl.grocery_list_id, gl.client_id, gl.title,
+                       c.client_name, 'Management' AS permission
+                FROM grocery_lists AS gl
+                JOIN clients AS c ON c.client_id = gl.client_id
+                WHERE c.active = 1
+                ORDER BY c.client_name, gl.title, gl.grocery_list_id
+            """).fetchall()
+        elif actor["role"] == "Support Worker":
+            grocery_lists = conn.execute("""
+                SELECT gl.grocery_list_id, gl.client_id, gl.title,
+                       c.client_name, gls.permission
+                FROM grocery_list_shares AS gls
+                JOIN grocery_lists AS gl
+                  ON gl.grocery_list_id = gls.grocery_list_id
+                JOIN clients AS c
+                  ON c.client_id = gl.client_id
+                WHERE gls.user_id = ?
+                  AND gls.permission IN ('VIEW', 'EDIT')
+                  AND c.active = 1
+                ORDER BY c.client_name, gl.title, gl.grocery_list_id
+            """, (actor["user_id"],)).fetchall()
+        else:
+            return "Access denied", 403
+    except PermissionError:
+        return "Access denied", 403
+    except sqlite3.Error:
+        app.logger.exception("Could not load accessible Grocery Lists")
+        return "Database error", 503
+    finally:
+        conn.close()
+
+    return render_template(
+        "grocery_lists.html",
+        grocery_lists=grocery_lists,
+        management=(actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES),
+    )
+
+
+@app.route("/client/<int:client_id>/grocery-list")
+def client_grocery_list(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        client = validate_active_grocery_list_client(conn, client_id)
+
+        grocery_list = conn.execute("""
+            SELECT *
+            FROM grocery_lists
+            WHERE client_id = ?
+        """, (client_id,)).fetchone()
+
+        if grocery_list is None:
+            actor = validate_grocery_list_management_authority(
+                conn,
+                session["user_id"]
+            )
+            now_utc = format_staff_notice_utc_datetime(
+                get_application_now_utc()
+            )
+            try:
+                conn.execute("""
+                    INSERT INTO grocery_lists
+                    (
+                        client_id,
+                        title,
+                        created_by_user_id,
+                        created_at_utc,
+                        updated_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    client_id,
+                    "Grocery List",
+                    actor["user_id"],
+                    now_utc,
+                    now_utc,
+                ))
+            except sqlite3.IntegrityError:
+                grocery_list = conn.execute("""
+                    SELECT *
+                    FROM grocery_lists
+                    WHERE client_id = ?
+                """, (client_id,)).fetchone()
+                if grocery_list is None:
+                    raise
+            else:
+                grocery_list = conn.execute("""
+                    SELECT *
+                    FROM grocery_lists
+                    WHERE client_id = ?
+                """, (client_id,)).fetchone()
+
+        access = validate_grocery_list_access(
+            conn,
+            session["user_id"],
+            grocery_list["grocery_list_id"],
+        )
+        actor = access["actor"]
+
+        sections = []
+        section_rows = conn.execute("""
+            SELECT section_id, grocery_list_id, name, display_order
+            FROM grocery_list_sections
+            WHERE grocery_list_id = ?
+            ORDER BY display_order, section_id
+        """, (grocery_list["grocery_list_id"],)).fetchall()
+        for section in section_rows:
+            section_data = dict(section)
+            section_data["items"] = conn.execute("""
+                SELECT item_id, section_id, item_name, stock_text,
+                       needed_text, purchased, display_order
+                FROM grocery_list_items
+                WHERE section_id = ?
+                ORDER BY display_order, item_id
+            """, (section["section_id"],)).fetchall()
+            sections.append(section_data)
+
+        shares = []
+        eligible_users = []
+        if access["can_manage_shares"]:
+            shares = conn.execute("""
+                SELECT gls.share_id, gls.user_id, gls.permission,
+                       gls.shared_by_user_id, gls.shared_at_utc,
+                       u.full_name, u.role, u.active
+                FROM grocery_list_shares AS gls
+                JOIN users AS u ON u.user_id = gls.user_id
+                WHERE gls.grocery_list_id = ?
+                ORDER BY u.full_name, gls.share_id
+            """, (grocery_list["grocery_list_id"],)).fetchall()
+            eligible_users = conn.execute("""
+                SELECT u.user_id, u.full_name, u.role
+                FROM users AS u
+                WHERE u.active = 1
+                  AND u.role = 'Support Worker'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM grocery_list_shares AS gls
+                      WHERE gls.grocery_list_id = ?
+                        AND gls.user_id = u.user_id
+                  )
+                ORDER BY u.full_name, u.user_id
+            """, (grocery_list["grocery_list_id"],)).fetchall()
+
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not load Grocery List for client %s",
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+    return render_template(
+        "grocery_list.html",
+        actor=actor,
+        client=client,
+        grocery_list=grocery_list,
+        sections=sections,
+        shares=shares,
+        eligible_users=eligible_users,
+        can_edit=access["can_edit"],
+        can_manage_shares=access["can_manage_shares"],
+    )
+
+
+@app.route("/client/<int:client_id>/grocery-list/history")
+def client_grocery_list_history(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        _actor, client, grocery_list, _access = _grocery_list_access_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        snapshots = conn.execute("""
+            SELECT snapshot_id, week_start, captured_at_utc
+            FROM grocery_list_snapshots
+            WHERE grocery_list_id = ?
+              AND snapshot_kind = 'WEEKLY'
+            ORDER BY week_start DESC, snapshot_id DESC
+        """, (grocery_list["grocery_list_id"],)).fetchall()
+    except PermissionError:
+        return "Access denied", 403
+    except ValueError:
+        return "Client not found", 404
+    except LookupError:
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        app.logger.exception(
+            "Could not load Grocery List history for client %s",
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+    return render_template(
+        "grocery_list_history.html",
+        client=client,
+        grocery_list=grocery_list,
+        snapshots=snapshots,
+    )
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/history/<int:snapshot_id>"
+)
+def client_grocery_list_history_detail(client_id, snapshot_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        _actor, client, grocery_list, _access = _grocery_list_access_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        snapshot = conn.execute("""
+            SELECT snapshot_id, grocery_list_id, snapshot_kind,
+                   week_start, captured_by_user_id, captured_at_utc
+            FROM grocery_list_snapshots
+            WHERE snapshot_id = ?
+              AND grocery_list_id = ?
+              AND snapshot_kind = 'WEEKLY'
+        """, (snapshot_id, grocery_list["grocery_list_id"])).fetchone()
+        if snapshot is None:
+            return "Snapshot not found", 404
+
+        sections = []
+        section_rows = conn.execute("""
+            SELECT snapshot_section_id, snapshot_id, name, display_order
+            FROM grocery_list_snapshot_sections
+            WHERE snapshot_id = ?
+            ORDER BY display_order, snapshot_section_id
+        """, (snapshot_id,)).fetchall()
+        for section in section_rows:
+            section_data = dict(section)
+            section_data["items"] = conn.execute("""
+                SELECT snapshot_item_id, snapshot_section_id, item_name,
+                       stock_text, needed_text, purchased, display_order
+                FROM grocery_list_snapshot_items
+                WHERE snapshot_section_id = ?
+                ORDER BY display_order, snapshot_item_id
+            """, (section["snapshot_section_id"],)).fetchall()
+            sections.append(section_data)
+    except PermissionError:
+        return "Access denied", 403
+    except ValueError:
+        return "Client not found", 404
+    except LookupError:
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        app.logger.exception(
+            "Could not load Grocery List snapshot %s for client %s",
+            snapshot_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+    return render_template(
+        "grocery_list_history_detail.html",
+        client=client,
+        grocery_list=grocery_list,
+        snapshot=snapshot,
+        sections=sections,
+    )
+
+
+def _grocery_list_management_context(conn, client_id, user_id):
+    actor = validate_grocery_list_management_authority(conn, user_id)
+    client = validate_active_grocery_list_client(conn, client_id)
+    grocery_list = conn.execute("""
+        SELECT *
+        FROM grocery_lists
+        WHERE client_id = ?
+    """, (client_id,)).fetchone()
+    if grocery_list is None:
+        raise LookupError("Grocery List not found.")
+    return actor, client, grocery_list
+
+
+def _grocery_list_access_context(conn, client_id, user_id):
+    client = validate_active_grocery_list_client(conn, client_id)
+    grocery_list = conn.execute("""
+        SELECT *
+        FROM grocery_lists
+        WHERE client_id = ?
+    """, (client_id,)).fetchone()
+    if grocery_list is None:
+        raise LookupError("Grocery List not found.")
+    access = validate_grocery_list_access(
+        conn,
+        user_id,
+        grocery_list["grocery_list_id"],
+    )
+    return access["actor"], client, grocery_list, access
+
+
+def _grocery_list_content_context(conn, client_id, user_id):
+    client = validate_active_grocery_list_client(conn, client_id)
+    grocery_list = conn.execute("""
+        SELECT *
+        FROM grocery_lists
+        WHERE client_id = ?
+    """, (client_id,)).fetchone()
+    if grocery_list is None:
+        raise LookupError("Grocery List not found.")
+    access = validate_grocery_list_access(
+        conn,
+        user_id,
+        grocery_list["grocery_list_id"],
+    )
+    if not access["can_edit"]:
+        raise PermissionError(
+            "Current user is not allowed to edit Grocery Lists."
+        )
+    return access["actor"], client, grocery_list, access
+
+
+def _grocery_list_section_redirect(client_id):
+    return redirect(url_for("client_grocery_list", client_id=client_id))
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/shares/new",
+    methods=["POST"],
+)
+def grocery_list_share_new(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor, _client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        recipient_id = request.form.get("user_id", type=int)
+        permission = request.form.get("permission")
+        recipient = None
+        if recipient_id is not None:
+            recipient = conn.execute("""
+                SELECT user_id, role, active
+                FROM users
+                WHERE user_id = ?
+            """, (recipient_id,)).fetchone()
+        if (
+            recipient is None
+            or recipient["active"] != 1
+            or recipient["role"] != "Support Worker"
+        ):
+            conn.rollback()
+            flash("Select an active Support Worker to share with.")
+            return _grocery_list_section_redirect(client_id)
+        if permission not in ("VIEW", "EDIT"):
+            conn.rollback()
+            flash("Select a valid share permission.")
+            return _grocery_list_section_redirect(client_id)
+        existing = conn.execute("""
+            SELECT 1
+            FROM grocery_list_shares
+            WHERE grocery_list_id = ?
+              AND user_id = ?
+        """, (grocery_list["grocery_list_id"], recipient_id)).fetchone()
+        if existing is not None:
+            conn.rollback()
+            flash("That user already has a share for this Grocery List.")
+            return _grocery_list_section_redirect(client_id)
+
+        shared_at_utc = format_staff_notice_utc_datetime(
+            get_application_now_utc()
+        )
+        conn.execute("""
+            INSERT INTO grocery_list_shares
+            (
+                grocery_list_id,
+                user_id,
+                permission,
+                shared_by_user_id,
+                shared_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            grocery_list["grocery_list_id"],
+            recipient_id,
+            permission,
+            actor["user_id"],
+            shared_at_utc,
+        ))
+        conn.commit()
+        flash("Grocery List share added.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        flash("That user already has a share for this Grocery List.")
+        return _grocery_list_section_redirect(client_id)
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not add Grocery List share for client %s",
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/shares/<int:share_id>/permission",
+    methods=["POST"],
+)
+def grocery_list_share_permission(client_id, share_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _actor, _client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        share = conn.execute("""
+            SELECT gls.share_id, gls.user_id, u.role, u.active
+            FROM grocery_list_shares AS gls
+            JOIN users AS u ON u.user_id = gls.user_id
+            WHERE gls.share_id = ?
+              AND gls.grocery_list_id = ?
+        """, (share_id, grocery_list["grocery_list_id"])).fetchone()
+        if share is None:
+            conn.rollback()
+            return "Share not found", 404
+
+        permission = request.form.get("permission")
+        if permission not in ("VIEW", "EDIT"):
+            conn.rollback()
+            flash("Select a valid share permission.")
+            return _grocery_list_section_redirect(client_id)
+        if share["active"] != 1 or share["role"] != "Support Worker":
+            conn.rollback()
+            flash("That user is no longer eligible for share changes.")
+            return _grocery_list_section_redirect(client_id)
+
+        updated = conn.execute("""
+            UPDATE grocery_list_shares
+            SET permission = ?
+            WHERE share_id = ?
+              AND grocery_list_id = ?
+        """, (permission, share_id, grocery_list["grocery_list_id"]))
+        if updated.rowcount != 1:
+            conn.rollback()
+            return "Share not found", 404
+        conn.commit()
+        flash("Grocery List share updated.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not update Grocery List share %s for client %s",
+            share_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/shares/<int:share_id>/delete",
+    methods=["POST"],
+)
+def grocery_list_share_delete(client_id, share_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _actor, _client, grocery_list = _grocery_list_management_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        share = conn.execute("""
+            SELECT share_id
+            FROM grocery_list_shares
+            WHERE share_id = ?
+              AND grocery_list_id = ?
+        """, (share_id, grocery_list["grocery_list_id"])).fetchone()
+        if share is None:
+            conn.rollback()
+            return "Share not found", 404
+        if request.form.get("confirm") != "yes":
+            conn.rollback()
+            flash("You must explicitly confirm share removal.")
+            return _grocery_list_section_redirect(client_id)
+
+        deleted = conn.execute("""
+            DELETE FROM grocery_list_shares
+            WHERE share_id = ?
+              AND grocery_list_id = ?
+        """, (share_id, grocery_list["grocery_list_id"]))
+        if deleted.rowcount != 1:
+            conn.rollback()
+            return "Share not found", 404
+        conn.commit()
+        flash("Grocery List share removed.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not remove Grocery List share %s for client %s",
+            share_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/sections/<int:section_id>/items/new",
+    methods=["POST"],
+)
+def grocery_list_item_new(client_id, section_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor, _client, grocery_list, _access = _grocery_list_content_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        section = conn.execute("""
+            SELECT section_id
+            FROM grocery_list_sections
+            WHERE section_id = ?
+              AND grocery_list_id = ?
+        """, (section_id, grocery_list["grocery_list_id"])).fetchone()
+        if section is None:
+            conn.rollback()
+            return "Section not found", 404
+
+        item_name = request.form.get("item_name", "").strip()
+        if not item_name:
+            conn.rollback()
+            flash("Item name is required.")
+            return _grocery_list_section_redirect(client_id)
+        stock_text = request.form.get("stock_text", "").strip() or None
+        needed_text = request.form.get("needed_text", "").strip() or None
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            actor["user_id"],
+        )
+        next_order = conn.execute("""
+            SELECT COALESCE(MAX(display_order), -1) + 1
+            FROM grocery_list_items
+            WHERE section_id = ?
+        """, (section_id,)).fetchone()[0]
+        now_utc = format_staff_notice_utc_datetime(
+            get_application_now_utc()
+        )
+        conn.execute("""
+            INSERT INTO grocery_list_items
+            (
+                section_id,
+                item_name,
+                stock_text,
+                needed_text,
+                purchased,
+                display_order,
+                created_at_utc,
+                updated_at_utc,
+                updated_by_user_id
+            )
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)
+        """, (
+            section_id,
+            item_name,
+            stock_text,
+            needed_text,
+            next_order,
+            now_utc,
+            now_utc,
+            actor["user_id"],
+        ))
+        conn.commit()
+        flash("Item added.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not add Grocery List item for client %s",
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/items/<int:item_id>/edit",
+    methods=["POST"],
+)
+def grocery_list_item_edit(client_id, item_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor, _client, grocery_list, _access = _grocery_list_content_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        item = conn.execute("""
+            SELECT i.item_id, i.section_id
+            FROM grocery_list_items AS i
+            JOIN grocery_list_sections AS s
+              ON s.section_id = i.section_id
+            WHERE i.item_id = ?
+              AND s.grocery_list_id = ?
+        """, (item_id, grocery_list["grocery_list_id"])).fetchone()
+        if item is None:
+            conn.rollback()
+            return "Item not found", 404
+
+        item_name = request.form.get("item_name", "").strip()
+        if not item_name:
+            conn.rollback()
+            flash("Item name is required.")
+            return _grocery_list_section_redirect(client_id)
+        stock_text = request.form.get("stock_text", "").strip() or None
+        needed_text = request.form.get("needed_text", "").strip() or None
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            actor["user_id"],
+        )
+        updated_at_utc = format_staff_notice_utc_datetime(
+            get_application_now_utc()
+        )
+        updated = conn.execute("""
+            UPDATE grocery_list_items
+            SET item_name = ?,
+                stock_text = ?,
+                needed_text = ?,
+                updated_at_utc = ?,
+                updated_by_user_id = ?
+            WHERE item_id = ?
+              AND section_id = ?
+        """, (
+            item_name,
+            stock_text,
+            needed_text,
+            updated_at_utc,
+            actor["user_id"],
+            item_id,
+            item["section_id"],
+        ))
+        if updated.rowcount != 1:
+            conn.rollback()
+            return "Item not found", 404
+        conn.commit()
+        flash("Item updated.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not edit Grocery List item %s for client %s",
+            item_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/items/<int:item_id>/purchased",
+    methods=["POST"],
+)
+def grocery_list_item_purchased(client_id, item_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor, _client, grocery_list, _access = _grocery_list_content_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        item = conn.execute("""
+            SELECT i.item_id, i.section_id
+            FROM grocery_list_items AS i
+            JOIN grocery_list_sections AS s
+              ON s.section_id = i.section_id
+            WHERE i.item_id = ?
+              AND s.grocery_list_id = ?
+        """, (item_id, grocery_list["grocery_list_id"])).fetchone()
+        if item is None:
+            conn.rollback()
+            return "Item not found", 404
+
+        purchased_value = request.form.get("purchased")
+        if purchased_value not in ("0", "1"):
+            conn.rollback()
+            return "Invalid purchased value", 400
+
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            actor["user_id"],
+        )
+        updated_at_utc = format_staff_notice_utc_datetime(
+            get_application_now_utc()
+        )
+        updated = conn.execute("""
+            UPDATE grocery_list_items
+            SET purchased = ?,
+                updated_at_utc = ?,
+                updated_by_user_id = ?
+            WHERE item_id = ?
+              AND section_id = ?
+        """, (
+            int(purchased_value),
+            updated_at_utc,
+            actor["user_id"],
+            item_id,
+            item["section_id"],
+        ))
+        if updated.rowcount != 1:
+            conn.rollback()
+            return "Item not found", 404
+        conn.commit()
+        flash(
+            "Item marked purchased."
+            if purchased_value == "1"
+            else "Item marked not purchased."
+        )
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not update purchased state for Grocery List item %s "
+            "for client %s",
+            item_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/items/<int:item_id>/delete",
+    methods=["POST"],
+)
+def grocery_list_item_delete(client_id, item_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _actor, _client, grocery_list, _access = _grocery_list_content_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        item = conn.execute("""
+            SELECT i.item_id
+            FROM grocery_list_items AS i
+            JOIN grocery_list_sections AS s
+              ON s.section_id = i.section_id
+            WHERE i.item_id = ?
+              AND s.grocery_list_id = ?
+        """, (item_id, grocery_list["grocery_list_id"])).fetchone()
+        if item is None:
+            conn.rollback()
+            return "Item not found", 404
+
+        if request.form.get("confirm") != "yes":
+            conn.rollback()
+            flash("You must explicitly confirm item deletion.")
+            return _grocery_list_section_redirect(client_id)
+
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            _actor["user_id"],
+        )
+        deleted = conn.execute("""
+            DELETE FROM grocery_list_items
+            WHERE item_id = ?
+        """, (item_id,))
+        if deleted.rowcount != 1:
+            conn.rollback()
+            return "Item not found", 404
+        conn.commit()
+        flash("Item deleted.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not delete Grocery List item %s for client %s",
+            item_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/sections/new",
+    methods=["POST"],
+)
+def grocery_list_section_new(client_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _actor, _client, grocery_list, _access = _grocery_list_content_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        name = request.form.get("name", "").strip()
+        if not name:
+            conn.rollback()
+            flash("Section name is required.")
+            return _grocery_list_section_redirect(client_id)
+
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            _actor["user_id"],
+        )
+        next_order = conn.execute("""
+            SELECT COALESCE(MAX(display_order), -1) + 1
+            FROM grocery_list_sections
+            WHERE grocery_list_id = ?
+        """, (grocery_list["grocery_list_id"],)).fetchone()[0]
+        conn.execute("""
+            INSERT INTO grocery_list_sections
+            (grocery_list_id, name, display_order)
+            VALUES (?, ?, ?)
+        """, (grocery_list["grocery_list_id"], name, next_order))
+        conn.commit()
+        flash("Section added.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        flash("That section name already exists.")
+        return _grocery_list_section_redirect(client_id)
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not add Grocery List section for client %s",
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/sections/<int:section_id>/rename",
+    methods=["POST"],
+)
+def grocery_list_section_rename(client_id, section_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _actor, _client, grocery_list, _access = _grocery_list_content_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        section = conn.execute("""
+            SELECT section_id, name, display_order
+            FROM grocery_list_sections
+            WHERE section_id = ?
+              AND grocery_list_id = ?
+        """, (section_id, grocery_list["grocery_list_id"])).fetchone()
+        if section is None:
+            conn.rollback()
+            return "Section not found", 404
+
+        name = request.form.get("name", "").strip()
+        if not name:
+            conn.rollback()
+            flash("Section name is required.")
+            return _grocery_list_section_redirect(client_id)
+
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            _actor["user_id"],
+        )
+        updated = conn.execute("""
+            UPDATE grocery_list_sections
+            SET name = ?
+            WHERE section_id = ?
+              AND grocery_list_id = ?
+        """, (name, section_id, grocery_list["grocery_list_id"]))
+        if updated.rowcount != 1:
+            conn.rollback()
+            return "Section not found", 404
+        conn.commit()
+        flash("Section renamed.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.IntegrityError:
+        if conn.in_transaction:
+            conn.rollback()
+        flash("That section name already exists.")
+        return _grocery_list_section_redirect(client_id)
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not rename Grocery List section %s for client %s",
+            section_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
+
+
+@app.route(
+    "/client/<int:client_id>/grocery-list/sections/<int:section_id>/delete",
+    methods=["POST"],
+)
+def grocery_list_section_delete(client_id, section_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _actor, _client, grocery_list, _access = _grocery_list_content_context(
+            conn,
+            client_id,
+            session["user_id"],
+        )
+        section = conn.execute("""
+            SELECT section_id
+            FROM grocery_list_sections
+            WHERE section_id = ?
+              AND grocery_list_id = ?
+        """, (section_id, grocery_list["grocery_list_id"])).fetchone()
+        if section is None:
+            conn.rollback()
+            return "Section not found", 404
+
+        if request.form.get("confirm") != "yes":
+            conn.rollback()
+            flash("You must explicitly confirm section deletion.")
+            return _grocery_list_section_redirect(client_id)
+
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            _actor["user_id"],
+        )
+        deleted = conn.execute("""
+            DELETE FROM grocery_list_sections
+            WHERE section_id = ?
+              AND grocery_list_id = ?
+        """, (section_id, grocery_list["grocery_list_id"]))
+        if deleted.rowcount != 1:
+            conn.rollback()
+            return "Section not found", 404
+        conn.commit()
+        flash("Section deleted.")
+        return _grocery_list_section_redirect(client_id)
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ValueError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Client not found", 404
+    except LookupError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Grocery List not found", 404
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not delete Grocery List section %s for client %s",
+            section_id,
+            client_id,
+        )
+        return "Database error", 503
+    finally:
+        conn.close()
 
 
 @app.route("/leave-requests")

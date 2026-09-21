@@ -4,6 +4,7 @@ import add_behaviour_occurrences_table
 import add_schedule_tables
 import add_schedule_staff_order
 import add_leave_requests_table
+import add_grocery_lists_tables
 
 conn = sqlite3.connect("nhpsg.db")
 cur = conn.cursor()
@@ -92,6 +93,7 @@ add_behaviour_occurrences_table.migrate(conn)
 add_schedule_tables.migrate(conn)
 add_schedule_staff_order.migrate(conn)
 add_leave_requests_table.migrate(conn)
+add_grocery_lists_tables.migrate(conn)
 
 conn.commit()
 conn.close()

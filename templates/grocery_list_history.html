@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Grocery List History</h2>
+    <p><strong>Client:</strong> {{ client.client_name }}</p>
+    <p><strong>List:</strong> {{ grocery_list.title }}</p>
+
+    {% if snapshots %}
+    <ul>
+        {% for snapshot in snapshots %}
+        <li>
+            <a href="{{ url_for('client_grocery_list_history_detail', client_id=client.client_id, snapshot_id=snapshot.snapshot_id) }}">
+                Week of {{ snapshot.week_start | format_history_week_start }}
+            </a>
+            <span>({{ snapshot.captured_at_utc }})</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+        <p>No weekly Grocery List history is available.</p>
+    {% endif %}
+
+    <p>
+        <a href="{{ url_for('client_grocery_list', client_id=client.client_id) }}">
+            Back to Current Grocery List
+        </a>
+    </p>
+</div>
+
+{% endblock %}
