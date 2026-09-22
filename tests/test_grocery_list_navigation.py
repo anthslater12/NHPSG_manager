@@ -109,12 +109,27 @@ class GroceryListNavigationTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def activate_only_client(self, client_id):
+        conn = self.connect()
+        conn.execute(
+            "UPDATE clients SET active = CASE WHEN client_id = ? "
+            "THEN 1 ELSE 0 END",
+            (client_id,),
+        )
+        conn.commit()
+        conn.close()
+
     def test_management_roles_discover_active_client_grocery_lists(self):
         for user_id in (1, 2, 3):
             with self.subTest(user_id=user_id):
                 self.login(user_id)
                 response = self.client.get("/clients?status=active")
                 self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.data.count(b'href="/grocery-list"'),
+                    1,
+                )
+                self.assertIn(b"Grocery List", response.data)
                 self.assertIn(b"/client/10/grocery-list", response.data)
                 self.assertNotIn(b"/client/30/grocery-list", response.data)
 
@@ -139,7 +154,11 @@ class GroceryListNavigationTests(unittest.TestCase):
         self.login(5)
         response = self.client.get("/worker-resources")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"/grocery-lists", response.data)
+        self.assertEqual(
+            response.data.count(b'href="/grocery-list"'),
+            1,
+        )
+        self.assertIn(b"Grocery List", response.data)
 
         response = self.client.get("/grocery-lists")
         self.assertEqual(response.status_code, 200)
@@ -165,7 +184,7 @@ class GroceryListNavigationTests(unittest.TestCase):
         self.login(5)
         response = self.client.get("/worker-resources")
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(b"/grocery-lists", response.data)
+        self.assertNotIn(b'href="/grocery-list"', response.data)
 
     def test_behaviour_consultant_with_manual_share_has_no_discovery(self):
         list_id = self.create_list(10)
@@ -173,7 +192,7 @@ class GroceryListNavigationTests(unittest.TestCase):
         self.login(4)
         response = self.client.get("/worker-resources")
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(b"/grocery-lists", response.data)
+        self.assertNotIn(b'href="/grocery-list"', response.data)
         self.assertEqual(self.client.get("/grocery-lists").status_code, 403)
 
     def test_removed_share_and_invalid_permission_disappear_from_discovery(self):
@@ -217,7 +236,113 @@ class GroceryListNavigationTests(unittest.TestCase):
         conn.close()
         response = self.client.get("/worker-resources")
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(b"/grocery-lists", response.data)
+        self.assertNotIn(b'href="/grocery-list"', response.data)
+
+    def test_one_active_client_redirects_without_hard_coded_client_details(self):
+        conn = self.connect()
+        conn.execute("UPDATE clients SET active = 0")
+        conn.execute(
+            "INSERT INTO clients (client_id, client_name, active) "
+            "VALUES (42, 'Different Active Client', 1)"
+        )
+        conn.commit()
+        conn.close()
+
+        list_id = self.create_list(42, "Different Client Grocery List")
+
+        self.login(1)
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/client/42/grocery-list")
+        self.assertNotIn(b"Neville", response.data)
+        self.assertNotIn(b"client_id=1", response.data)
+        self.assertIsNotNone(list_id)
+
+    def test_multiple_active_clients_fall_back_to_grocery_lists_index(self):
+        self.create_list(10)
+        self.login(1)
+
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/grocery-lists")
+
+    def test_direct_navigation_preserves_shared_worker_access(self):
+        list_id = self.create_list(10)
+        self.share(list_id, user_id=5, permission="VIEW")
+        self.activate_only_client(10)
+
+        self.login(5)
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/client/10/grocery-list")
+
+    def test_behaviour_consultant_cannot_use_direct_navigation(self):
+        self.create_list(10)
+        self.activate_only_client(10)
+        self.login(4)
+
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_unshared_support_worker_cannot_use_direct_navigation(self):
+        self.create_list(10)
+        self.activate_only_client(10)
+        self.login(5)
+
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_inactive_user_cannot_use_direct_navigation(self):
+        self.login(6)
+
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_unauthenticated_user_is_redirected_to_login(self):
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login", response.headers["Location"])
+
+    def test_edit_share_reaches_the_single_active_client_grocery_list(self):
+        list_id = self.create_list(10)
+        self.share(list_id, user_id=5, permission="EDIT")
+        self.activate_only_client(10)
+        self.login(5)
+
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/client/10/grocery-list")
+
+    def test_share_for_different_client_does_not_grant_direct_access(self):
+        shared_list = self.create_list(10)
+        self.create_list(20)
+        self.share(shared_list, user_id=5, permission="VIEW")
+        self.activate_only_client(20)
+        self.login(5)
+
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_zero_active_clients_fall_back_to_grocery_lists_index(self):
+        conn = self.connect()
+        conn.execute("UPDATE clients SET active = 0")
+        conn.commit()
+        conn.close()
+        self.login(1)
+
+        response = self.client.get("/grocery-list")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/grocery-lists")
 
     def test_shared_direct_route_authorization_and_no_shift_dependencies(self):
         shared_list = self.create_list(10)

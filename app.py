@@ -8191,7 +8191,9 @@ def inject_grocery_list_navigation():
         conn = sqlite3.connect(DB_NAME)
         conn.row_factory = sqlite3.Row
         actor = get_active_authenticated_user(conn, session["user_id"])
-        if actor[1] != "Support Worker":
+        if actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES:
+            return {"grocery_lists_navigation_allowed": True}
+        if actor["role"] != "Support Worker":
             return {"grocery_lists_navigation_allowed": False}
 
         share = conn.execute("""
@@ -8205,7 +8207,7 @@ def inject_grocery_list_navigation():
               AND gls.permission IN ('VIEW', 'EDIT')
               AND c.active = 1
             LIMIT 1
-        """, (actor[0],)).fetchone()
+        """, (actor["user_id"],)).fetchone()
         return {"grocery_lists_navigation_allowed": share is not None}
     except (PermissionError, RuntimeError, sqlite3.Error):
         return {"grocery_lists_navigation_allowed": False}
@@ -33623,6 +33625,53 @@ def worker_resources():
             actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
         ),
     )
+
+
+@app.route("/grocery-list")
+def grocery_list_navigation():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        if (
+            actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES
+            and actor["role"] != "Support Worker"
+        ):
+            return "Access denied", 403
+
+        active_clients = conn.execute("""
+            SELECT client_id
+            FROM clients
+            WHERE active = 1
+            ORDER BY client_id
+        """).fetchall()
+        if len(active_clients) != 1:
+            return redirect(url_for("grocery_lists_index"))
+
+        client_id = active_clients[0]["client_id"]
+        try:
+            _actor, _client, _grocery_list, _access = (
+                _grocery_list_access_context(
+                    conn,
+                    client_id,
+                    session["user_id"],
+                )
+            )
+        except LookupError:
+            return redirect(url_for("grocery_lists_index"))
+
+        return redirect(
+            url_for("client_grocery_list", client_id=client_id)
+        )
+    except PermissionError:
+        return "Access denied", 403
+    except sqlite3.Error:
+        app.logger.exception("Could not resolve Grocery List navigation")
+        return "Database error", 503
+    finally:
+        conn.close()
 
 
 @app.route("/grocery-lists")
