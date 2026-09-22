@@ -49,12 +49,6 @@
         Worker Resources
     </a>
 
-    {% if grocery_lists_navigation_allowed %}
-        <a href="{{ url_for('grocery_list_navigation') }}">
-            Grocery List
-        </a>
-    {% endif %}
-
     <a href="{{ url_for('schedule_index') }}">
         Schedule
     </a>
@@ -144,6 +138,12 @@
     <a href="{{ url_for('my_actions') }}">
         My Actions
     </a>
+
+    {% if grocery_lists_navigation_allowed %}
+        <a href="{{ url_for('grocery_list_navigation') }}">
+            Grocery List
+        </a>
+    {% endif %}
 
     <a href="{{ url_for('logout') }}">
         Logout

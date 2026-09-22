@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -119,16 +120,26 @@ class GroceryListNavigationTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def assert_grocery_link_is_immediately_before_logout(self, response):
+        self.assertEqual(
+            response.data.count(b'href="/grocery-list"'),
+            1,
+        )
+        self.assertRegex(
+            response.data,
+            re.compile(
+                rb'<a href="/grocery-list">\s*Grocery List\s*</a>'
+                rb'\s*<a href="/logout">\s*Logout\s*</a>'
+            ),
+        )
+
     def test_management_roles_discover_active_client_grocery_lists(self):
         for user_id in (1, 2, 3):
             with self.subTest(user_id=user_id):
                 self.login(user_id)
                 response = self.client.get("/clients?status=active")
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(
-                    response.data.count(b'href="/grocery-list"'),
-                    1,
-                )
+                self.assert_grocery_link_is_immediately_before_logout(response)
                 self.assertIn(b"Grocery List", response.data)
                 self.assertIn(b"/client/10/grocery-list", response.data)
                 self.assertNotIn(b"/client/30/grocery-list", response.data)
@@ -154,10 +165,7 @@ class GroceryListNavigationTests(unittest.TestCase):
         self.login(5)
         response = self.client.get("/worker-resources")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.data.count(b'href="/grocery-list"'),
-            1,
-        )
+        self.assert_grocery_link_is_immediately_before_logout(response)
         self.assertIn(b"Grocery List", response.data)
 
         response = self.client.get("/grocery-lists")

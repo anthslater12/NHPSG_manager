@@ -1706,6 +1706,10 @@ td,th{
     font-weight: bold;
 }
 
+.grocery-needed-low {
+    background: #fff8d6;
+}
+
 .grocery-item-actions {
     white-space: normal;
 }

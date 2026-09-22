@@ -224,6 +224,57 @@ class GroceryListRouteTests(unittest.TestCase):
         self.assertIn(b"Not Purchased", body)
         self.assertIn("—".encode(), body)
 
+    def test_amount_needed_highlight_uses_only_non_blank_text(self):
+        self.seed_content()
+        conn = self.connect()
+        grocery_list_id = conn.execute(
+            "SELECT grocery_list_id FROM grocery_lists WHERE client_id = 10"
+        ).fetchone()[0]
+        section_id = conn.execute(
+            "SELECT section_id FROM grocery_list_sections "
+            "WHERE grocery_list_id = ? ORDER BY display_order LIMIT 1",
+            (grocery_list_id,),
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO grocery_list_items
+            (section_id, item_name, stock_text, needed_text, purchased,
+             display_order, created_at_utc, updated_at_utc,
+             updated_by_user_id)
+            VALUES (?, 'Needs Purchase', 'Available', '  2 bags  ', 0, 30,
+                    '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
+                   (?, 'Blank Needed', 'Available', NULL, 0, 40,
+                    '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
+                   (?, 'Whitespace Needed', 'Available', '   ', 0, 50,
+                    '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2)
+            """,
+            (section_id, section_id, section_id),
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(2)
+        response = self.client.get("/client/10/grocery-list")
+        self.assertEqual(response.status_code, 200)
+        body = response.data
+
+        self.assertRegex(
+            body,
+            rb'<td class="grocery-needed-low">  2 bags  </td>',
+        )
+        self.assertNotRegex(
+            body,
+            rb'<td class="grocery-needed-low">\s*'
+            + "—".encode()
+            + rb'\s*</td>',
+        )
+        self.assertNotRegex(
+            body,
+            rb'<td class="grocery-needed-low">\s*</td>',
+        )
+        self.assertIn(b"<td>   </td>", body)
+        self.assertIn(b"Whitespace Needed", body)
+
     def test_other_clients_list_data_is_not_returned(self):
         conn = self.connect()
         conn.execute("""
