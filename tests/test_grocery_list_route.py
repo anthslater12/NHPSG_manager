@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -260,20 +261,43 @@ class GroceryListRouteTests(unittest.TestCase):
 
         self.assertRegex(
             body,
-            rb'<td class="grocery-needed-low">  2 bags  </td>',
+            re.compile(
+                rb'<tr class="grocery-needed-row">\s*'
+                rb'<td>Needs Purchase</td>.*?'
+                rb'<td>  2 bags  </td>.*?</tr>',
+                re.DOTALL,
+            ),
+        )
+        self.assertRegex(
+            body,
+            re.compile(
+                rb'<tr class="grocery-needed-row">\s*'
+                rb'<td>Second Item</td>.*?'
+                rb'<span class="grocery-purchased-state">\s*'
+                rb'Purchased\s*</span>.*?</tr>',
+                re.DOTALL,
+            ),
         )
         self.assertNotRegex(
             body,
-            rb'<td class="grocery-needed-low">\s*'
-            + "—".encode()
-            + rb'\s*</td>',
+            rb'<tr class="grocery-needed-row">\s*<td>Blank Needed</td>',
+        )
+        self.assertIn(
+            b"<td>" + "—".encode() + b"</td>",
+            body,
         )
         self.assertNotRegex(
             body,
-            rb'<td class="grocery-needed-low">\s*</td>',
+            rb'<tr class="grocery-needed-row">\s*<td>Whitespace Needed</td>',
         )
-        self.assertIn(b"<td>   </td>", body)
-        self.assertIn(b"Whitespace Needed", body)
+        self.assertRegex(
+            body,
+            re.compile(
+                rb'<tr>\s*<td>Whitespace Needed</td>.*?'
+                rb'<td>   </td>.*?</tr>',
+                re.DOTALL,
+            ),
+        )
 
     def test_other_clients_list_data_is_not_returned(self):
         conn = self.connect()

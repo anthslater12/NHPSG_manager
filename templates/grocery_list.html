@@ -233,10 +233,10 @@
                                 </thead>
                                 <tbody>
                                     {% for item in section["items"] %}
-                                        <tr>
+                                        <tr{% if item.needed_text and item.needed_text.strip() %} class="grocery-needed-row"{% endif %}>
                                             <td>{{ item.item_name }}</td>
                                             <td>{% if item.stock_text %}{{ item.stock_text }}{% else %}—{% endif %}</td>
-                                            <td{% if item.needed_text and item.needed_text.strip() %} class="grocery-needed-low"{% endif %}>{% if item.needed_text %}{{ item.needed_text }}{% else %}—{% endif %}</td>
+                                            <td>{% if item.needed_text %}{{ item.needed_text }}{% else %}—{% endif %}</td>
                                             <td>
                                                 <span class="grocery-purchased-state">
                                                     {% if item.purchased %}Purchased{% else %}Not Purchased{% endif %}

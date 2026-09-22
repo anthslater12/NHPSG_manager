@@ -1706,7 +1706,7 @@ td,th{
     font-weight: bold;
 }
 
-.grocery-needed-low {
+.grocery-items-table .grocery-needed-row {
     background: #fff8d6;
 }
 
