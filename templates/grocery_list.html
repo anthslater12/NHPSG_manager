@@ -2,191 +2,319 @@
 
 {% block content %}
 
-<div class="card">
-    <h2>Grocery List</h2>
-    <p><strong>Client:</strong> {{ client.client_name }}</p>
-    <p><strong>List:</strong> {{ grocery_list.title }}</p>
-    <p>
-        <a href="{{ url_for('client_grocery_list_history', client_id=client.client_id) }}">
-            View History
-        </a>
-    </p>
+<div class="card grocery-list-page">
+    <header class="grocery-list-header">
+        <h2>
+            Grocery List
+            <span class="grocery-list-client">&mdash; {{ client.client_name }}</span>
+        </h2>
 
-    {% if can_edit %}
-        <h3>Add Section</h3>
-        <form method="post" action="{{ url_for('grocery_list_section_new', client_id=client.client_id) }}">
-            <label for="new-section-name">Section name</label>
-            <input id="new-section-name" name="name" required>
-            <button type="submit">Add Section</button>
-        </form>
-    {% endif %}
+        <nav class="grocery-list-actions" aria-label="Grocery List actions">
+            <a class="grocery-secondary-action"
+               href="{{ url_for('client_grocery_list_history', client_id=client.client_id) }}">
+                History
+            </a>
 
-    {% if can_manage_recipients %}
-    <h3>Email Recipients</h3>
-    {% if email_recipients %}
-        {% for recipient in email_recipients %}
-        <div>
-            {% if recipient.display_name %}
-                <strong>{{ recipient.display_name }}</strong>
+            {% if can_manage_recipients %}
+                <details class="grocery-management-panel">
+                    <summary>Email</summary>
+                    <div class="grocery-management-content">
+                        <h3>Email Recipients</h3>
+                        {% if email_recipients %}
+                            <div class="grocery-management-list">
+                                {% for recipient in email_recipients %}
+                                    <div class="grocery-management-row">
+                                        <div class="grocery-recipient-summary">
+                                            {% if recipient.display_name %}
+                                                <strong>{{ recipient.display_name }}</strong>
+                                            {% endif %}
+                                            <span>{{ recipient.email_address }}</span>
+                                        </div>
+                                        <form class="grocery-inline-form"
+                                              method="post"
+                                              action="{{ url_for('grocery_list_email_recipient_edit', client_id=client.client_id, recipient_id=recipient.recipient_id) }}">
+                                            <div class="grocery-field">
+                                                <label for="recipient-name-{{ recipient.recipient_id }}">
+                                                    Display name
+                                                </label>
+                                                <input id="recipient-name-{{ recipient.recipient_id }}"
+                                                       name="display_name"
+                                                       value="{{ recipient.display_name or '' }}">
+                                            </div>
+                                            <div class="grocery-field">
+                                                <label for="recipient-email-{{ recipient.recipient_id }}">
+                                                    Email address
+                                                </label>
+                                                <input id="recipient-email-{{ recipient.recipient_id }}"
+                                                       name="email_address"
+                                                       value="{{ recipient.email_address }}"
+                                                       required>
+                                            </div>
+                                            <button class="grocery-compact-button" type="submit">
+                                                Edit
+                                            </button>
+                                        </form>
+                                        <form class="inline-form"
+                                              method="post"
+                                              action="{{ url_for('grocery_list_email_recipient_delete', client_id=client.client_id, recipient_id=recipient.recipient_id) }}">
+                                            <input type="hidden" name="confirm" value="yes">
+                                            <button class="grocery-compact-button" type="submit">
+                                                Delete
+                                            </button>
+                                        </form>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <p>No email recipients have been added.</p>
+                        {% endif %}
+
+                        <form class="grocery-inline-form grocery-new-record-form"
+                              method="post"
+                              action="{{ url_for('grocery_list_email_recipient_new', client_id=client.client_id) }}">
+                            <div class="grocery-field">
+                                <label for="new-recipient-name">Display name</label>
+                                <input id="new-recipient-name" name="display_name">
+                            </div>
+                            <div class="grocery-field">
+                                <label for="new-recipient-email">Email address</label>
+                                <input id="new-recipient-email" name="email_address" required>
+                            </div>
+                            <button class="grocery-compact-button" type="submit">
+                                Add Recipient
+                            </button>
+                        </form>
+                        <form method="post"
+                              action="{{ url_for('grocery_list_email_preview', client_id=client.client_id) }}">
+                            <button class="grocery-compact-button" type="submit">
+                                Preview Email
+                            </button>
+                        </form>
+                    </div>
+                </details>
             {% endif %}
-            <span>{{ recipient.email_address }}</span>
-            <form method="post" action="{{ url_for('grocery_list_email_recipient_edit', client_id=client.client_id, recipient_id=recipient.recipient_id) }}">
-                <label for="recipient-name-{{ recipient.recipient_id }}">Display name</label>
-                <input id="recipient-name-{{ recipient.recipient_id }}" name="display_name" value="{{ recipient.display_name or '' }}">
-                <label for="recipient-email-{{ recipient.recipient_id }}">Email address</label>
-                <input id="recipient-email-{{ recipient.recipient_id }}" name="email_address" value="{{ recipient.email_address }}" required>
-                <button type="submit">Edit</button>
-            </form>
-            <form method="post" action="{{ url_for('grocery_list_email_recipient_delete', client_id=client.client_id, recipient_id=recipient.recipient_id) }}">
-                <input type="hidden" name="confirm" value="yes">
-                <button type="submit">Delete</button>
-            </form>
-        </div>
-        {% endfor %}
-    {% else %}
-        <p>No email recipients have been added.</p>
-    {% endif %}
-    <form method="post" action="{{ url_for('grocery_list_email_recipient_new', client_id=client.client_id) }}">
-        <label for="new-recipient-name">Display name</label>
-        <input id="new-recipient-name" name="display_name">
-        <label for="new-recipient-email">Email address</label>
-        <input id="new-recipient-email" name="email_address" required>
-        <button type="submit">Add Recipient</button>
-    </form>
-    <form method="post" action="{{ url_for('grocery_list_email_preview', client_id=client.client_id) }}">
-        <button type="submit">Preview Email</button>
-    </form>
-    {% endif %}
 
-    {% if can_manage_shares %}
-    <h3>Share Grocery List</h3>
-    {% if eligible_users %}
-    <form method="post" action="{{ url_for('grocery_list_share_new', client_id=client.client_id) }}">
-        <label for="share-user">User</label>
-        <select id="share-user" name="user_id" required>
-            <option value="">Select a Support Worker</option>
-            {% for user in eligible_users %}
-                <option value="{{ user.user_id }}">{{ user.full_name }}</option>
-            {% endfor %}
-        </select>
-        <label for="share-permission">Permission</label>
-        <select id="share-permission" name="permission" required>
-            <option value="VIEW">VIEW</option>
-            <option value="EDIT">EDIT</option>
-        </select>
-        <button type="submit">Share</button>
-    </form>
-    {% else %}
-        <p>No eligible Support Workers are available to share with.</p>
-    {% endif %}
+            {% if can_manage_shares %}
+                <details class="grocery-management-panel">
+                    <summary>Sharing</summary>
+                    <div class="grocery-management-content">
+                        <h3>Share Grocery List</h3>
+                        {% if eligible_users %}
+                            <form class="grocery-inline-form"
+                                  method="post"
+                                  action="{{ url_for('grocery_list_share_new', client_id=client.client_id) }}">
+                                <div class="grocery-field">
+                                    <label for="share-user">Support Worker</label>
+                                    <select id="share-user" name="user_id" required>
+                                        <option value="">Select a Support Worker</option>
+                                        {% for user in eligible_users %}
+                                            <option value="{{ user.user_id }}">{{ user.full_name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="grocery-field grocery-permission-field">
+                                    <label for="share-permission">Permission</label>
+                                    <select id="share-permission" name="permission" required>
+                                        <option value="VIEW">VIEW</option>
+                                        <option value="EDIT">EDIT</option>
+                                    </select>
+                                </div>
+                                <button class="grocery-compact-button" type="submit">Share</button>
+                            </form>
+                        {% else %}
+                            <p>No eligible Support Workers are available to share with.</p>
+                        {% endif %}
 
-    <h4>Currently Shared</h4>
-    {% if shares %}
-        {% for share in shares %}
-        <div>
-            <strong>{{ share.full_name }}</strong>
-            <span>({{ share.role }})</span>
-            <span>{{ share.permission }}</span>
-            {% if not share.active or share.role != "Support Worker" %}
-                <span>(No longer eligible for permission changes)</span>
-            {% else %}
-                <form method="post" action="{{ url_for('grocery_list_share_permission', client_id=client.client_id, share_id=share.share_id) }}">
-                    <input type="hidden" name="permission" value="{% if share.permission == 'VIEW' %}EDIT{% else %}VIEW{% endif %}">
-                    <button type="submit">Change to {% if share.permission == "VIEW" %}EDIT{% else %}VIEW{% endif %}</button>
-                </form>
+                        <h4>Currently Shared</h4>
+                        {% if shares %}
+                            <div class="grocery-management-list">
+                                {% for share in shares %}
+                                    <div class="grocery-management-row">
+                                        <div class="grocery-share-summary">
+                                            <strong>{{ share.full_name }}</strong>
+                                            <span>{{ share.role }}</span>
+                                            <span>{{ share.permission }}</span>
+                                            {% if not share.active or share.role != "Support Worker" %}
+                                                <span>(No longer eligible for permission changes)</span>
+                                            {% endif %}
+                                        </div>
+                                        {% if share.active and share.role == "Support Worker" %}
+                                            <form class="inline-form"
+                                                  method="post"
+                                                  action="{{ url_for('grocery_list_share_permission', client_id=client.client_id, share_id=share.share_id) }}">
+                                                <input type="hidden" name="permission" value="{% if share.permission == 'VIEW' %}EDIT{% else %}VIEW{% endif %}">
+                                                <button class="grocery-compact-button" type="submit">
+                                                    Change to {% if share.permission == "VIEW" %}EDIT{% else %}VIEW{% endif %}
+                                                </button>
+                                            </form>
+                                        {% endif %}
+                                        <form class="inline-form"
+                                              method="post"
+                                              action="{{ url_for('grocery_list_share_delete', client_id=client.client_id, share_id=share.share_id) }}">
+                                            <input type="hidden" name="confirm" value="yes">
+                                            <button class="grocery-compact-button" type="submit">Remove</button>
+                                        </form>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <p>No users are currently shared.</p>
+                        {% endif %}
+                    </div>
+                </details>
             {% endif %}
-            <form method="post" action="{{ url_for('grocery_list_share_delete', client_id=client.client_id, share_id=share.share_id) }}">
-                <input type="hidden" name="confirm" value="yes">
-                <button type="submit">Remove</button>
-            </form>
-        </div>
-        {% endfor %}
-    {% else %}
-        <p>No users are currently shared.</p>
-    {% endif %}
-    {% endif %}
+        </nav>
+    </header>
 
     {% if sections %}
-        {% for section in sections %}
-        <section>
-            <h3>{{ section.name }}</h3>
+        <div class="grocery-section-list">
+            {% for section in sections %}
+                <section class="grocery-section-card">
+                    <header class="grocery-section-header">
+                        <h3>{{ section.name }}</h3>
+                        {% if can_edit %}
+                            <div class="grocery-section-actions">
+                                <form class="grocery-inline-form"
+                                      method="post"
+                                      action="{{ url_for('grocery_list_section_rename', client_id=client.client_id, section_id=section.section_id) }}">
+                                    <label class="grocery-visually-hidden"
+                                           for="section-name-{{ section.section_id }}">
+                                        Rename section
+                                    </label>
+                                    <input id="section-name-{{ section.section_id }}"
+                                           name="name"
+                                           value="{{ section.name }}"
+                                           required>
+                                    <button class="grocery-compact-button" type="submit">Rename</button>
+                                </form>
+                                <form class="inline-form"
+                                      method="post"
+                                      action="{{ url_for('grocery_list_section_delete', client_id=client.client_id, section_id=section.section_id) }}">
+                                    <input type="hidden" name="confirm" value="yes">
+                                    <button class="grocery-compact-button" type="submit">Delete</button>
+                                </form>
+                            </div>
+                        {% endif %}
+                    </header>
 
-            {% if can_edit %}
-                <form method="post" action="{{ url_for('grocery_list_item_new', client_id=client.client_id, section_id=section.section_id) }}">
-                    <label for="new-item-name-{{ section.section_id }}">Item</label>
-                    <input id="new-item-name-{{ section.section_id }}" name="item_name" required>
-                    <label for="new-item-stock-{{ section.section_id }}">Current Stock</label>
-                    <input id="new-item-stock-{{ section.section_id }}" name="stock_text">
-                    <label for="new-item-needed-{{ section.section_id }}">Amount Needed</label>
-                    <input id="new-item-needed-{{ section.section_id }}" name="needed_text">
-                    <button type="submit">Add Item</button>
-                </form>
-            {% endif %}
+                    {% if can_edit %}
+                        <form class="grocery-inline-form grocery-item-entry"
+                              method="post"
+                              action="{{ url_for('grocery_list_item_new', client_id=client.client_id, section_id=section.section_id) }}">
+                            <div class="grocery-field grocery-item-name-field">
+                                <label for="new-item-name-{{ section.section_id }}">Item</label>
+                                <input id="new-item-name-{{ section.section_id }}"
+                                       name="item_name"
+                                       required>
+                            </div>
+                            <div class="grocery-field">
+                                <label for="new-item-stock-{{ section.section_id }}">Current Stock</label>
+                                <input id="new-item-stock-{{ section.section_id }}" name="stock_text">
+                            </div>
+                            <div class="grocery-field">
+                                <label for="new-item-needed-{{ section.section_id }}">Amount Needed</label>
+                                <input id="new-item-needed-{{ section.section_id }}" name="needed_text">
+                            </div>
+                            <button class="grocery-compact-button" type="submit">Add Item</button>
+                        </form>
+                    {% endif %}
 
-            {% if can_edit %}
-                <form method="post" action="{{ url_for('grocery_list_section_rename', client_id=client.client_id, section_id=section.section_id) }}">
-                    <label for="section-name-{{ section.section_id }}">Rename section</label>
-                    <input id="section-name-{{ section.section_id }}" name="name" value="{{ section.name }}" required>
-                    <button type="submit">Rename</button>
-                </form>
-                <form method="post" action="{{ url_for('grocery_list_section_delete', client_id=client.client_id, section_id=section.section_id) }}">
-                    <input type="hidden" name="confirm" value="yes">
-                    <button type="submit">Delete</button>
-                </form>
-            {% endif %}
-
-            {% if section["items"] %}
-            <div class="table-scroll">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Item</th>
-                            <th>Current Stock</th>
-                            <th>Amount Needed</th>
-                            <th>Purchased</th>
-                            {% if can_edit %}<th>Actions</th>{% endif %}
-                        </tr>
-                    </thead>
-                    <tbody>
-                    {% for item in section["items"] %}
-                        <tr>
-                            <td>{{ item.item_name }}</td>
-                            <td>{{ item.stock_text or "—" }}</td>
-                            <td>{{ item.needed_text or "—" }}</td>
-                            <td>{% if item.purchased %}Yes{% else %}No{% endif %}</td>
-                            {% if can_edit %}
-                                <td>
-                                    <form method="post" action="{{ url_for('grocery_list_item_edit', client_id=client.client_id, item_id=item.item_id) }}">
-                                        <label for="edit-item-name-{{ item.item_id }}">Item</label>
-                                        <input id="edit-item-name-{{ item.item_id }}" name="item_name" value="{{ item.item_name }}" required>
-                                        <label for="edit-item-stock-{{ item.item_id }}">Current Stock</label>
-                                        <input id="edit-item-stock-{{ item.item_id }}" name="stock_text" value="{{ item.stock_text or '' }}">
-                                        <label for="edit-item-needed-{{ item.item_id }}">Amount Needed</label>
-                                        <input id="edit-item-needed-{{ item.item_id }}" name="needed_text" value="{{ item.needed_text or '' }}">
-                                        <button type="submit">Save</button>
-                                    </form>
-                                    <form method="post" action="{{ url_for('grocery_list_item_delete', client_id=client.client_id, item_id=item.item_id) }}">
-                                        <input type="hidden" name="confirm" value="yes">
-                                        <button type="submit">Delete</button>
-                                    </form>
-                                    <form method="post" action="{{ url_for('grocery_list_item_purchased', client_id=client.client_id, item_id=item.item_id) }}">
-                                        <input type="hidden" name="purchased" value="{% if item.purchased %}0{% else %}1{% endif %}">
-                                        <button type="submit">{% if item.purchased %}Mark Not Purchased{% else %}Mark Purchased{% endif %}</button>
-                                    </form>
-                                </td>
-                            {% endif %}
-                        </tr>
-                    {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-            {% else %}
-                <p>No items in this section.</p>
-            {% endif %}
-        </section>
-        {% endfor %}
+                    {% if section["items"] %}
+                        <div class="table-scroll grocery-table-scroll">
+                            <table class="grocery-items-table">
+                                <thead>
+                                    <tr>
+                                        <th scope="col">Item</th>
+                                        <th scope="col">Current Stock</th>
+                                        <th scope="col">Amount Needed</th>
+                                        <th scope="col">Purchased</th>
+                                        {% if can_edit %}<th scope="col">Actions</th>{% endif %}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for item in section["items"] %}
+                                        <tr>
+                                            <td>{{ item.item_name }}</td>
+                                            <td>{% if item.stock_text %}{{ item.stock_text }}{% else %}—{% endif %}</td>
+                                            <td>{% if item.needed_text %}{{ item.needed_text }}{% else %}—{% endif %}</td>
+                                            <td>
+                                                <span class="grocery-purchased-state">
+                                                    {% if item.purchased %}Purchased{% else %}Not Purchased{% endif %}
+                                                </span>
+                                            </td>
+                                            {% if can_edit %}
+                                                <td class="grocery-item-actions">
+                                                    <details class="grocery-item-edit">
+                                                        <summary>Edit</summary>
+                                                        <form class="grocery-inline-form"
+                                                              method="post"
+                                                              action="{{ url_for('grocery_list_item_edit', client_id=client.client_id, item_id=item.item_id) }}">
+                                                            <div class="grocery-field">
+                                                                <label for="edit-item-name-{{ item.item_id }}">Item</label>
+                                                                <input id="edit-item-name-{{ item.item_id }}"
+                                                                       name="item_name"
+                                                                       value="{{ item.item_name }}"
+                                                                       required>
+                                                            </div>
+                                                            <div class="grocery-field">
+                                                                <label for="edit-item-stock-{{ item.item_id }}">Current Stock</label>
+                                                                <input id="edit-item-stock-{{ item.item_id }}"
+                                                                       name="stock_text"
+                                                                       value="{{ item.stock_text or '' }}">
+                                                            </div>
+                                                            <div class="grocery-field">
+                                                                <label for="edit-item-needed-{{ item.item_id }}">Amount Needed</label>
+                                                                <input id="edit-item-needed-{{ item.item_id }}"
+                                                                       name="needed_text"
+                                                                       value="{{ item.needed_text or '' }}">
+                                                            </div>
+                                                            <button class="grocery-compact-button" type="submit">Save</button>
+                                                        </form>
+                                                    </details>
+                                                    <form class="inline-form"
+                                                          method="post"
+                                                          action="{{ url_for('grocery_list_item_delete', client_id=client.client_id, item_id=item.item_id) }}">
+                                                        <input type="hidden" name="confirm" value="yes">
+                                                        <button class="grocery-compact-button" type="submit">Delete</button>
+                                                    </form>
+                                                    <form class="inline-form"
+                                                          method="post"
+                                                          action="{{ url_for('grocery_list_item_purchased', client_id=client.client_id, item_id=item.item_id) }}">
+                                                        <input type="hidden" name="purchased" value="{% if item.purchased %}0{% else %}1{% endif %}">
+                                                        <button class="grocery-compact-button" type="submit">
+                                                            {% if item.purchased %}Mark Not Purchased{% else %}Mark Purchased{% endif %}
+                                                        </button>
+                                                    </form>
+                                                </td>
+                                            {% endif %}
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    {% else %}
+                        <p class="grocery-empty-state">No items in this section.</p>
+                    {% endif %}
+                </section>
+            {% endfor %}
+        </div>
     {% else %}
-        <p>No sections have been added yet.</p>
+        <p class="grocery-empty-state">No sections have been added yet.</p>
+    {% endif %}
+
+    {% if can_edit %}
+        <section class="grocery-add-section">
+            <h3>Add Section</h3>
+            <form class="grocery-inline-form"
+                  method="post"
+                  action="{{ url_for('grocery_list_section_new', client_id=client.client_id) }}">
+                <div class="grocery-field">
+                    <label for="new-section-name">New section</label>
+                    <input id="new-section-name" name="name" required>
+                </div>
+                <button class="grocery-compact-button" type="submit">Add Section</button>
+            </form>
+        </section>
     {% endif %}
 </div>
 

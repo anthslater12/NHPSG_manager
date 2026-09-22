@@ -220,8 +220,8 @@ class GroceryListRouteTests(unittest.TestCase):
         self.assertIn(b"Amount Needed", body)
         self.assertIn(b"Full", body)
         self.assertIn(b"Two", body)
-        self.assertIn(b"Yes", body)
-        self.assertIn(b"No", body)
+        self.assertIn(b"Purchased", body)
+        self.assertIn(b"Not Purchased", body)
         self.assertIn("—".encode(), body)
 
     def test_other_clients_list_data_is_not_returned(self):
