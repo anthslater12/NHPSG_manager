@@ -570,6 +570,31 @@ def parse_behaviour_utc(value):
     return parsed.replace(tzinfo=timezone.utc)
 
 
+def format_utc_database_datetime_display(value):
+    """Format canonical or legacy UTC database timestamps locally."""
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        elif isinstance(value, str) and value.strip():
+            normalized = value.strip()
+            if normalized.endswith("Z"):
+                parsed = parse_behaviour_utc(normalized)
+            else:
+                parsed = datetime.strptime(
+                    normalized, "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc)
+        else:
+            raise ValueError("A UTC database timestamp is required.")
+
+        return parsed.astimezone(VANCOUVER_TIMEZONE).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "Date/time unavailable"
+
+
 def get_behaviour_operational_day(vancouver_datetime):
     """Return the named operational day for an aware Vancouver instant."""
     local_datetime = _require_vancouver_datetime(vancouver_datetime)
@@ -24327,6 +24352,11 @@ def shift_notes():
 
         ORDER BY sn.created_at DESC
     """).fetchall()
+    notes = [dict(note) for note in notes]
+    for note in notes:
+        note["created_at_display"] = format_utc_database_datetime_display(
+            note["created_at"]
+        )
 
     reviews = conn.execute("""
         SELECT
@@ -24418,6 +24448,11 @@ def shift_note_review_detail(note_id):
     if entry is None:
         conn.close()
         return "Shift note not found", 404
+
+    entry = dict(entry)
+    entry["created_at_display"] = format_utc_database_datetime_display(
+        entry["created_at"]
+    )
 
     reviews = conn.execute("""
         SELECT
@@ -26082,6 +26117,11 @@ def behaviour_review_detail(occurrence_id):
         occurrence["occurred_at_utc"]
     )
     occurrence["local_time"] = local_time.strftime("%Y-%m-%d %H:%M")
+    occurrence["voided_at_display"] = (
+        format_utc_database_datetime_display(occurrence["voided_at_utc"])
+        if occurrence["voided_at_utc"]
+        else None
+    )
     occurrence["week_monday"] = get_behaviour_operational_week_start(
         local_time
     ).isoformat()
@@ -27704,6 +27744,11 @@ def care_review_list():
             s.shift_date DESC,
             cte.completed_at DESC
     """).fetchall()
+    care_entries = [dict(entry) for entry in care_entries]
+    for entry in care_entries:
+        entry["completed_at_display"] = format_utc_database_datetime_display(
+            entry["completed_at"]
+        )
 
     reviews = conn.execute("""
         SELECT
@@ -27944,6 +27989,11 @@ def housekeeping_review_list():
             s.shift_date DESC,
             hte.completed_at DESC
     """).fetchall()
+    housekeeping_entries = [dict(entry) for entry in housekeeping_entries]
+    for entry in housekeeping_entries:
+        entry["completed_at_display"] = format_utc_database_datetime_display(
+            entry["completed_at"]
+        )
 
     reviews = conn.execute("""
         SELECT
@@ -28067,6 +28117,11 @@ def housekeeping_review_detail(entry_id):
     if entry is None:
         conn.close()
         return "Housekeeping task entry not found", 404
+
+    entry = dict(entry)
+    entry["completed_at_display"] = format_utc_database_datetime_display(
+        entry["completed_at"]
+    )
 
     reviews = conn.execute("""
         SELECT
@@ -28924,6 +28979,11 @@ def care_review_detail(entry_id):
     if entry is None:
         conn.close()
         return "Care task entry not found", 404
+
+    entry = dict(entry)
+    entry["completed_at_display"] = format_utc_database_datetime_display(
+        entry["completed_at"]
+    )
 
     reviews = conn.execute("""
         SELECT

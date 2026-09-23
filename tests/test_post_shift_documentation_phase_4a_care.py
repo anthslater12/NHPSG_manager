@@ -32,6 +32,7 @@ class PostShiftDocumentationPhase4ACareTests(unittest.TestCase):
             PRAGMA foreign_keys = ON;
             CREATE TABLE users (
                 user_id INTEGER PRIMARY KEY,
+                full_name TEXT,
                 role TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1
             );
@@ -58,6 +59,7 @@ class PostShiftDocumentationPhase4ACareTests(unittest.TestCase):
                 actual_end_at_utc TEXT,
                 sign_on_at TEXT,
                 sign_off_at TEXT,
+                actual_end_time TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 start_checklist_completed INTEGER NOT NULL DEFAULT 0,
                 end_checklist_completed INTEGER NOT NULL DEFAULT 0
@@ -66,10 +68,15 @@ class PostShiftDocumentationPhase4ACareTests(unittest.TestCase):
                 care_task_id INTEGER PRIMARY KEY,
                 task_name TEXT NOT NULL,
                 instructions TEXT,
+                category_id INTEGER,
                 active INTEGER NOT NULL DEFAULT 1,
                 occurs TEXT NOT NULL,
                 comment_required_attempted INTEGER NOT NULL DEFAULT 0,
                 comment_required_not_completed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE care_task_categories (
+                category_id INTEGER PRIMARY KEY,
+                category_name TEXT
             );
             CREATE TABLE shift_care_task_entries (
                 entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +117,37 @@ class PostShiftDocumentationPhase4ACareTests(unittest.TestCase):
                 success INTEGER,
                 storyline_visible INTEGER NOT NULL DEFAULT 0,
                 event_datetime TEXT
+            );
+            CREATE TABLE acknowledgements (
+                acknowledgement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT,
+                source_id INTEGER,
+                user_id INTEGER,
+                acknowledged_at TEXT,
+                acknowledgement_type TEXT,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE management_notes (
+                management_note_id INTEGER PRIMARY KEY,
+                source_table TEXT,
+                source_id INTEGER,
+                note_text TEXT,
+                visibility TEXT,
+                created_by_user_id INTEGER,
+                created_at TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                shared_at TEXT,
+                shared_by_user_id INTEGER
+            );
+            CREATE TABLE action_items (
+                action_id INTEGER PRIMARY KEY,
+                title TEXT,
+                status TEXT,
+                priority TEXT,
+                assigned_to_user_id INTEGER,
+                created_at TEXT,
+                source_table TEXT,
+                source_id INTEGER
             );
         """)
         conn.executemany(
@@ -221,6 +259,42 @@ class PostShiftDocumentationPhase4ACareTests(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         try:
             return [dict(row) for row in conn.execute(sql, parameters)]
+        finally:
+            conn.close()
+
+    def insert_entry(
+        self,
+        entry_id=1,
+        shift_id=10,
+        task_id=1,
+        completed_by_user_id=1,
+        outcome="Completed",
+        comment="Original",
+        completed_at=None
+    ):
+        conn = sqlite3.connect(self.database_path)
+        try:
+            if completed_at is None:
+                conn.execute("""
+                    INSERT INTO shift_care_task_entries
+                        (entry_id, shift_id, care_task_id, outcome,
+                         comment, completed_by_user_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    entry_id, shift_id, task_id, outcome, comment,
+                    completed_by_user_id
+                ))
+            else:
+                conn.execute("""
+                    INSERT INTO shift_care_task_entries
+                        (entry_id, shift_id, care_task_id, outcome,
+                         comment, completed_by_user_id, completed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    entry_id, shift_id, task_id, outcome, comment,
+                    completed_by_user_id, completed_at
+                ))
+            conn.commit()
         finally:
             conn.close()
 
@@ -595,6 +669,26 @@ class PostShiftDocumentationPhase4ACareTests(unittest.TestCase):
             ),
             before_assignment
         )
+
+    def test_management_review_list_formats_completed_at_as_vancouver_time(self):
+        raw_utc = "2026-08-07 02:00:00"
+        local_display = "2026-08-06 19:00"
+        self.insert_entry(completed_at=raw_utc)
+        self.assertEqual(
+            self.rows("SELECT completed_at FROM shift_care_task_entries"),
+            [{"completed_at": raw_utc}]
+        )
+
+        self.login(user_id=3, role="Program Manager")
+        listing = self.client.get("/manager-review/care")
+        detail = self.client.get("/manager-review/care/1")
+
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(local_display.encode(), listing.data)
+        self.assertIn(local_display.encode(), detail.data)
+        self.assertNotIn(raw_utc.encode(), listing.data)
+        self.assertNotIn(raw_utc.encode(), detail.data)
 
 
 if __name__ == "__main__":

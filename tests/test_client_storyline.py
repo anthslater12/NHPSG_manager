@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 import app
 import add_behaviour_occurrences_table as behaviour_migration
@@ -71,10 +72,22 @@ class ClientStorylineTests(unittest.TestCase):
                 note_id INTEGER PRIMARY KEY, client_id INTEGER
             );
             CREATE TABLE shift_care_task_entries (
-                entry_id INTEGER PRIMARY KEY, shift_id INTEGER
+                entry_id INTEGER PRIMARY KEY,
+                shift_id INTEGER,
+                care_task_id INTEGER,
+                outcome TEXT,
+                comment TEXT,
+                completed_by_user_id INTEGER,
+                completed_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE shift_housekeeping_task_entries (
-                entry_id INTEGER PRIMARY KEY, shift_id INTEGER
+                entry_id INTEGER PRIMARY KEY,
+                shift_id INTEGER,
+                housekeeping_task_id INTEGER,
+                outcome TEXT,
+                comment TEXT,
+                completed_by_user_id INTEGER,
+                completed_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE incident_reports (
                 incident_id INTEGER PRIMARY KEY, client_id INTEGER NOT NULL,
@@ -150,6 +163,14 @@ class ClientStorylineTests(unittest.TestCase):
     def login(self, user_id=1, role="Support Worker"):
         with self.client.session_transaction() as session:
             session.update(user_id=user_id, role=role, full_name="Test User")
+
+    def rows(self, sql, parameters=()):
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(row) for row in conn.execute(sql, parameters)]
+        finally:
+            conn.close()
 
     def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when=None, user_id=1, details=None, event_datetime=None, related_table=None, related_id=None):
         if when is None:
@@ -317,17 +338,29 @@ class ClientStorylineTests(unittest.TestCase):
             "VALUES (12, 10)"
         )
         conn.execute("INSERT INTO shift_notes VALUES (13, 1)")
-        conn.execute("INSERT INTO shift_care_task_entries VALUES (14, 10)")
-        conn.execute("INSERT INTO shift_care_task_entries VALUES (16, 10)")
-        conn.execute("INSERT INTO shift_care_task_entries VALUES (17, 10)")
         conn.execute(
-            "INSERT INTO shift_housekeeping_task_entries VALUES (15, 10)"
+            "INSERT INTO shift_care_task_entries (entry_id, shift_id) "
+            "VALUES (14, 10)"
         )
         conn.execute(
-            "INSERT INTO shift_housekeeping_task_entries VALUES (18, 10)"
+            "INSERT INTO shift_care_task_entries (entry_id, shift_id) "
+            "VALUES (16, 10)"
         )
         conn.execute(
-            "INSERT INTO shift_housekeeping_task_entries VALUES (19, 10)"
+            "INSERT INTO shift_care_task_entries (entry_id, shift_id) "
+            "VALUES (17, 10)"
+        )
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries "
+            "(entry_id, shift_id) VALUES (15, 10)"
+        )
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries "
+            "(entry_id, shift_id) VALUES (18, 10)"
+        )
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries "
+            "(entry_id, shift_id) VALUES (19, 10)"
         )
         conn.commit()
         conn.close()
@@ -379,11 +412,13 @@ class ClientStorylineTests(unittest.TestCase):
     def test_attempted_and_not_completed_controls_validate_source_and_review_state(self):
         conn = sqlite3.connect(self.path)
         conn.executemany(
-            "INSERT INTO shift_care_task_entries VALUES (?, ?)",
+            "INSERT INTO shift_care_task_entries (entry_id, shift_id) "
+            "VALUES (?, ?)",
             [(31, 10), (32, 10), (33, 20)],
         )
         conn.executemany(
-            "INSERT INTO shift_housekeeping_task_entries VALUES (?, ?)",
+            "INSERT INTO shift_housekeeping_task_entries "
+            "(entry_id, shift_id) VALUES (?, ?)",
             [(41, 10), (42, 10), (43, 20)],
         )
         conn.commit()
@@ -471,9 +506,13 @@ class ClientStorylineTests(unittest.TestCase):
 
     def test_care_and_housekeeping_review_status_uses_operational_source(self):
         conn = sqlite3.connect(self.path)
-        conn.execute("INSERT INTO shift_care_task_entries VALUES (21, 10)")
         conn.execute(
-            "INSERT INTO shift_housekeeping_task_entries VALUES (22, 10)"
+            "INSERT INTO shift_care_task_entries (entry_id, shift_id) "
+            "VALUES (21, 10)"
+        )
+        conn.execute(
+            "INSERT INTO shift_housekeeping_task_entries "
+            "(entry_id, shift_id) VALUES (22, 10)"
         )
         conn.commit()
         conn.close()
@@ -2062,6 +2101,401 @@ class ClientStorylineTests(unittest.TestCase):
         page = self.client.get("/manager-review/behaviour/43").data
         self.assertIn(b"Voided", page)
         self.assertIn(b"Mark as Reviewed", page)
+
+    def prepare_timestamp_review_tables(self, shift_date=None):
+        shift_date = shift_date or self.today
+        shift_date_text = (
+            shift_date.isoformat()
+            if hasattr(shift_date, "isoformat")
+            else str(shift_date)
+        )
+        conn = sqlite3.connect(self.path)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS care_tasks (
+                care_task_id INTEGER PRIMARY KEY,
+                task_name TEXT,
+                instructions TEXT,
+                category_id INTEGER,
+                active INTEGER NOT NULL DEFAULT 1,
+                occurs TEXT NOT NULL DEFAULT 'Evening',
+                comment_required_attempted INTEGER NOT NULL DEFAULT 0,
+                comment_required_not_completed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS care_task_categories (
+                category_id INTEGER PRIMARY KEY,
+                category_name TEXT
+            );
+            CREATE TABLE IF NOT EXISTS housekeeping_tasks (
+                housekeeping_task_id INTEGER PRIMARY KEY,
+                task_name TEXT,
+                instructions TEXT,
+                category_id INTEGER,
+                active INTEGER NOT NULL DEFAULT 1,
+                occurs TEXT NOT NULL DEFAULT 'Evening',
+                comment_required_attempted INTEGER NOT NULL DEFAULT 0,
+                comment_required_not_completed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS housekeeping_task_categories (
+                category_id INTEGER PRIMARY KEY,
+                category_name TEXT
+            );
+        """)
+        for table, columns in (
+            (
+                "shift_staff",
+                (("actual_end_time", "TEXT"),)
+            ),
+            (
+                "shift_care_task_entries",
+                (
+                    ("care_task_id", "INTEGER"),
+                    ("outcome", "TEXT"),
+                    ("comment", "TEXT"),
+                    ("completed_by_user_id", "INTEGER"),
+                    ("completed_at", "TEXT")
+                )
+            ),
+            (
+                "shift_housekeeping_task_entries",
+                (
+                    ("housekeeping_task_id", "INTEGER"),
+                    ("outcome", "TEXT"),
+                    ("comment", "TEXT"),
+                    ("completed_by_user_id", "INTEGER"),
+                    ("completed_at", "TEXT")
+                )
+            ),
+            (
+                "shift_notes",
+                (
+                    ("shift_date", "TEXT"),
+                    ("shift_type", "TEXT"),
+                    ("user_id", "INTEGER"),
+                    ("follow_up_required", "INTEGER"),
+                    ("created_at", "TEXT"),
+                    ("note_text", "TEXT")
+                )
+            )
+        ):
+            existing = {
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            for column, definition in columns:
+                if column not in existing:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN "
+                        f"{column} {definition}"
+                    )
+
+        conn.execute(
+            "UPDATE shifts SET shift_date = ?, shift_type = ? "
+            "WHERE shift_id = 10",
+            (shift_date_text, "Evening")
+        )
+        conn.execute(
+            "UPDATE shift_staff SET actual_start_time = ?, sign_on_at = ? "
+            "WHERE shift_staff_id = 100",
+            ("07:00", f"{shift_date_text}T07:00:00Z")
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO care_task_categories "
+            "(category_id, category_name) VALUES (1, 'Care')"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO care_tasks "
+            "(care_task_id, task_name, instructions, category_id, active, "
+            "occurs, comment_required_attempted, "
+            "comment_required_not_completed) "
+            "VALUES (1, 'Medication check', 'Confirm medication.', 1, 1, "
+            "'Evening', 0, 0)"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO housekeeping_task_categories "
+            "(category_id, category_name) VALUES (1, 'Housekeeping')"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO housekeeping_tasks "
+            "(housekeeping_task_id, task_name, instructions, category_id, "
+            "active, occurs, comment_required_attempted, "
+            "comment_required_not_completed) "
+            "VALUES (1, 'Kitchen reset', 'Reset the kitchen.', 1, 1, "
+            "'Evening', 0, 0)"
+        )
+        conn.commit()
+        conn.close()
+
+    def install_deterministic_completion_timestamp_triggers(
+        self,
+        entry_table,
+        activity_type,
+    ):
+        """Make the temporary workflow database clock deterministic."""
+        trigger_suffix = entry_table.replace("shift_", "").replace("_", "")
+        entry_trigger = f"test_{trigger_suffix}_completed_at"
+        activity_trigger = f"test_{trigger_suffix}_activity_datetime"
+        conn = sqlite3.connect(self.path)
+        conn.executescript(f"""
+            CREATE TRIGGER {entry_trigger}
+            AFTER INSERT ON {entry_table}
+            WHEN NEW.completed_at IS NOT NULL
+            BEGIN
+                UPDATE {entry_table}
+                SET completed_at = '2026-08-07 02:00:00'
+                WHERE entry_id = NEW.entry_id;
+            END;
+
+            CREATE TRIGGER {activity_trigger}
+            AFTER INSERT ON activity_log
+            WHEN NEW.activity_type = '{activity_type}'
+                 AND NEW.related_table = '{entry_table}'
+            BEGIN
+                UPDATE activity_log
+                SET activity_datetime = '2026-08-06 19:00:00'
+                WHERE activity_id = NEW.activity_id;
+            END;
+        """)
+        conn.commit()
+        conn.close()
+
+    def completion_timestamps(self):
+        local = datetime(
+            self.today.year,
+            self.today.month,
+            self.today.day,
+            19,
+            0,
+            tzinfo=app.VANCOUVER_TIMEZONE
+        )
+        raw_utc = local.astimezone(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        return local.strftime("%Y-%m-%d %H:%M"), raw_utc
+
+    def test_legacy_utc_display_helper_is_vancouver_and_dst_aware(self):
+        self.assertEqual(
+            app.format_utc_database_datetime_display(
+                "2026-07-15 02:00:00"
+            ),
+            "2026-07-14 19:00"
+        )
+        self.assertEqual(
+            app.format_utc_database_datetime_display(
+                "2026-01-15 02:00:00"
+            ),
+            "2026-01-14 18:00"
+        )
+        self.assertEqual(
+            app.format_utc_database_datetime_display(None),
+            "Date/time unavailable"
+        )
+        self.assertEqual(
+            app.format_utc_database_datetime_display("not-a-timestamp"),
+            "Date/time unavailable"
+        )
+
+    def assert_normal_task_completion_timestamp_consistency(
+        self,
+        record_url,
+        detail_url,
+        entry_table,
+        activity_type,
+        filter_name,
+        task_field,
+    ):
+        workflow_date = "2026-08-07"
+        self.prepare_timestamp_review_tables(workflow_date)
+        self.install_deterministic_completion_timestamp_triggers(
+            entry_table,
+            activity_type,
+        )
+        self.login(1, "Support Worker")
+        frozen_context_now = datetime(
+            2026,
+            8,
+            7,
+            19,
+            0,
+            tzinfo=timezone.utc
+        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=frozen_context_now
+        ):
+            response = self.client.post(
+                record_url,
+                data={"status": "Completed", "comment": "Done"}
+            )
+        self.assertEqual(response.status_code, 302)
+
+        entry = self.rows(
+            f"SELECT * FROM {entry_table} WHERE {task_field} = 1"
+        )[0]
+        event = self.rows(
+            "SELECT * FROM activity_log WHERE activity_type = ?",
+            (activity_type,)
+        )[0]
+        self.assertIsNotNone(entry["completed_at"])
+        self.assertEqual(
+            entry["completed_at"],
+            "2026-08-07 02:00:00"
+        )
+        self.assertEqual(event["related_table"], entry_table)
+        self.assertEqual(event["related_id"], entry["entry_id"])
+        self.assertEqual(
+            event["activity_datetime"],
+            "2026-08-06 19:00:00"
+        )
+
+        expected_display = app.format_utc_database_datetime_display(
+            entry["completed_at"]
+        )
+        event_display = event["activity_datetime"][:16]
+        self.assertEqual(expected_display, "2026-08-06 19:00")
+        self.assertEqual(event_display, expected_display)
+
+        self.login(2, "Program Manager")
+        storyline = self.client.get(
+            "/client/1/storyline"
+            f"?filter={filter_name}&date={event_display[:10]}"
+        )
+        detail = self.client.get(detail_url)
+        self.assertEqual(storyline.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(expected_display[-5:].encode(), storyline.data)
+        self.assertIn(expected_display.encode(), detail.data)
+        self.assertNotIn(entry["completed_at"].encode(), detail.data)
+
+    def test_housekeeping_normal_completion_drives_storyline_and_detail_time(self):
+        self.assert_normal_task_completion_timestamp_consistency(
+            "/shift/10/housekeeping-task/1/record",
+            "/manager-review/housekeeping/1",
+            "shift_housekeeping_task_entries",
+            "housekeeping_task_completed",
+            "Housekeeping",
+            "housekeeping_task_id",
+        )
+
+    def test_care_normal_completion_drives_storyline_and_detail_time(self):
+        self.assert_normal_task_completion_timestamp_consistency(
+            "/shift/10/care-task/1/record",
+            "/manager-review/care/1",
+            "shift_care_task_entries",
+            "care_task_completed",
+            "Care",
+            "care_task_id",
+        )
+
+    def test_housekeeping_storyline_and_detail_use_same_local_completion_time(self):
+        self.prepare_timestamp_review_tables()
+        local_display, raw_utc = self.completion_timestamps()
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT OR REPLACE INTO shift_housekeeping_task_entries "
+            "(entry_id, shift_id, housekeeping_task_id, outcome, comment, "
+            "completed_by_user_id, completed_at) "
+            "VALUES (701, 10, 1, 'Completed', 'Done', 1, ?)",
+            (raw_utc,)
+        )
+        conn.commit()
+        conn.close()
+        self.add_event(
+            "housekeeping_task_completed",
+            "Kitchen reset - Completed",
+            when=f"{self.today} 19:00:00",
+            related_table="shift_housekeeping_task_entries",
+            related_id=701
+        )
+        self.login(2, "Program Manager")
+
+        storyline = self.client.get(
+            f"/client/1/storyline?filter=Housekeeping&date={self.today}"
+        )
+        detail = self.client.get(
+            "/manager-review/housekeeping/701"
+        )
+        self.assertEqual(storyline.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"19:00", storyline.data)
+        self.assertIn(local_display.encode(), detail.data)
+        self.assertNotIn(raw_utc.encode(), detail.data)
+
+    def test_care_storyline_and_detail_use_same_local_completion_time(self):
+        self.prepare_timestamp_review_tables()
+        local_display, raw_utc = self.completion_timestamps()
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT OR REPLACE INTO shift_care_task_entries "
+            "(entry_id, shift_id, care_task_id, outcome, comment, "
+            "completed_by_user_id, completed_at) "
+            "VALUES (702, 10, 1, 'Completed', 'Done', 1, ?)",
+            (raw_utc,)
+        )
+        conn.commit()
+        conn.close()
+        self.add_event(
+            "care_task_completed",
+            "Medication check - Completed",
+            when=f"{self.today} 19:00:00",
+            related_table="shift_care_task_entries",
+            related_id=702
+        )
+        self.login(2, "Program Manager")
+
+        storyline = self.client.get(
+            f"/client/1/storyline?filter=Care&date={self.today}"
+        )
+        detail = self.client.get("/manager-review/care/702")
+        self.assertEqual(storyline.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"19:00", storyline.data)
+        self.assertIn(local_display.encode(), detail.data)
+        self.assertNotIn(raw_utc.encode(), detail.data)
+
+    def test_behaviour_voided_at_is_rendered_in_vancouver_time(self):
+        occurrence_id = 703
+        self.add_behaviour_occurrence(occurrence_id, status="Voided")
+        conn = sqlite3.connect(self.path)
+        raw_utc = conn.execute(
+            "SELECT voided_at_utc FROM behaviour_occurrences "
+            "WHERE behaviour_occurrence_id = ?",
+            (occurrence_id,)
+        ).fetchone()[0]
+        conn.close()
+        expected = app.behaviour_utc_to_vancouver(raw_utc).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        self.login(2, "Program Manager")
+        page = self.client.get(
+            f"/manager-review/behaviour/{occurrence_id}"
+        )
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(expected.encode(), page.data)
+        self.assertNotIn(raw_utc.encode(), page.data)
+
+    def test_staff_note_created_at_is_rendered_in_vancouver_time(self):
+        self.prepare_timestamp_review_tables()
+        local_display, raw_utc = self.completion_timestamps()
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO shift_notes "
+            "(note_id, client_id, shift_date, shift_type, user_id, "
+            "follow_up_required, created_at, note_text) "
+            "VALUES (704, 1, ?, 'Evening', 1, 0, ?, 'Staff note')",
+            (self.today.isoformat(), raw_utc)
+        )
+        conn.commit()
+        conn.close()
+        self.login(2, "Program Manager")
+        listing = self.client.get("/shift-notes")
+        detail = self.client.get("/manager-review/shift-notes/704")
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(local_display.encode(), listing.data)
+        self.assertIn(local_display.encode(), detail.data)
+        self.assertNotIn(raw_utc.encode(), listing.data)
+        self.assertNotIn(raw_utc.encode(), detail.data)
 
 
 if __name__ == "__main__":
