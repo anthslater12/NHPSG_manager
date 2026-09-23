@@ -20353,6 +20353,212 @@ def get_management_inbox(current_user_id):
         "recent_activity_list": [dict(r) for r in recent_activity_list]
     }
 
+FORGOTTEN_SIGN_OFF_FALLBACK_END_TIMES = {
+    "Day": "15:00",
+    "Afternoon": "23:00",
+    "Overnight": "07:00",
+}
+
+
+def _forgotten_signoff_table_columns(conn, table_name):
+    return {
+        row[1]
+        for row in conn.execute(
+            f"PRAGMA table_info({table_name})"
+        ).fetchall()
+    }
+
+
+def _forgotten_signoff_schedule_maps(
+    conn,
+    schedule_columns,
+    staff_columns,
+):
+    """Bulk-load authoritative schedule times for alert resolution.
+
+    Published schedule rows are the worker-facing operational source. Older
+    databases without a status column retain the previous compatibility
+    behavior and use their available schedule rows.
+    """
+    required_schedule_columns = {
+        "schedule_shift_id",
+        "client_id",
+        "shift_date",
+        "shift_type",
+        "planned_start_time",
+        "planned_end_time",
+    }
+    if not required_schedule_columns.issubset(schedule_columns):
+        return {}, {}
+
+    status_clause = "WHERE status = 'Published'" if "status" in schedule_columns else ""
+    schedule_rows = conn.execute(
+        f"""
+        SELECT schedule_shift_id, client_id, shift_date, shift_type,
+               planned_start_time, planned_end_time
+        FROM schedule_shifts
+        {status_clause}
+        ORDER BY schedule_shift_id DESC
+        """
+    ).fetchall()
+
+    parent_by_key = {}
+    for row in schedule_rows:
+        key = (row["client_id"], row["shift_date"], row["shift_type"])
+        # Highest ID wins if legacy data contains duplicate authoritative rows.
+        parent_by_key.setdefault(key, row)
+
+    required_staff_columns = {
+        "schedule_shift_id",
+        "user_id",
+        "planned_start_time",
+        "planned_end_time",
+    }
+    if not required_staff_columns.issubset(staff_columns):
+        return parent_by_key, {}
+
+    if "status" in schedule_columns:
+        staff_status_clause = "WHERE ss.status = 'Published'"
+    else:
+        staff_status_clause = ""
+    staff_order = (
+        "st.schedule_staff_id DESC"
+        if "schedule_staff_id" in staff_columns
+        else "st.rowid DESC"
+    )
+    staff_rows = conn.execute(
+        f"""
+        SELECT st.schedule_shift_id, st.user_id,
+               st.planned_start_time, st.planned_end_time
+        FROM schedule_staff AS st
+        JOIN schedule_shifts AS ss
+          ON ss.schedule_shift_id = st.schedule_shift_id
+        {staff_status_clause}
+        ORDER BY {staff_order}
+        """
+    ).fetchall()
+
+    worker_by_key = {}
+    for row in staff_rows:
+        key = (row["schedule_shift_id"], row["user_id"])
+        worker_by_key.setdefault(key, row)
+
+    return parent_by_key, worker_by_key
+
+
+def _forgotten_signoff_first_nonblank(*values):
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _forgotten_signoff_resolve_local_end(local_date, local_clock):
+    """Resolve a Vancouver end time only when it has one safe instant."""
+    local_naive = datetime.combine(local_date, local_clock)
+    candidates = []
+    for fold in (0, 1):
+        candidate = local_naive.replace(
+            tzinfo=VANCOUVER_TIMEZONE,
+            fold=fold,
+        )
+        round_trip = (
+            candidate.astimezone(timezone.utc)
+            .astimezone(VANCOUVER_TIMEZONE)
+        )
+        if round_trip.replace(tzinfo=None) == local_naive:
+            candidates.append(candidate)
+
+    if not candidates:
+        raise ValueError("Local shift end does not exist in Vancouver.")
+    if len({candidate.utcoffset() for candidate in candidates}) > 1:
+        raise ValueError("Local shift end is ambiguous in Vancouver.")
+    return candidates[0]
+
+
+def _forgotten_signoff_effective_end_utc(
+    assignment,
+    parent_by_key,
+    worker_by_key,
+):
+    """Resolve one active assignment's planned end as a UTC instant."""
+    try:
+        shift_date = datetime.strptime(
+            assignment["shift_date"],
+            "%Y-%m-%d"
+        ).date()
+    except (TypeError, ValueError):
+        return None
+
+    schedule_times = {}
+    parent = parent_by_key.get((
+        assignment.get("client_id"),
+        assignment["shift_date"],
+        assignment["shift_type"],
+    ))
+    if parent is not None:
+        schedule_times.update({
+            "parent_start_time": parent["planned_start_time"],
+            "parent_end_time": parent["planned_end_time"],
+        })
+        worker = worker_by_key.get((
+            parent["schedule_shift_id"],
+            assignment.get("user_id"),
+        ))
+        if worker is not None:
+            schedule_times.update({
+                "worker_start_time": worker["planned_start_time"],
+                "worker_end_time": worker["planned_end_time"],
+            })
+    start_value = _forgotten_signoff_first_nonblank(
+        schedule_times.get("worker_start_time"),
+        schedule_times.get("parent_start_time"),
+        assignment.get("scheduled_start_time"),
+    )
+    end_values = (
+        schedule_times.get("worker_end_time"),
+        schedule_times.get("parent_end_time"),
+        assignment.get("scheduled_end_time"),
+        FORGOTTEN_SIGN_OFF_FALLBACK_END_TIMES.get(assignment["shift_type"]),
+    )
+
+    if end_values[-1] is None:
+        return None
+
+    start_clock = None
+    if start_value:
+        try:
+            start_clock = _parse_staff_notice_shift_clock(
+                start_value,
+                "Effective planned shift start",
+            )
+        except ValueError:
+            start_clock = None
+
+    for end_value in end_values:
+        if not isinstance(end_value, str) or not end_value.strip():
+            continue
+        try:
+            end_clock = _parse_staff_notice_shift_clock(
+                end_value.strip(),
+                "Effective planned shift end",
+            )
+            end_date = shift_date
+            if assignment["shift_type"] == "Overnight" or (
+                start_clock is not None and end_clock <= start_clock
+            ):
+                end_date += timedelta(days=1)
+            local_end = _forgotten_signoff_resolve_local_end(
+                end_date,
+                end_clock,
+            )
+        except ValueError:
+            continue
+        return local_end.astimezone(timezone.utc)
+
+    return None
+
+
 def get_manager_alerts():
 
     alerts = []
@@ -20362,12 +20568,34 @@ def get_manager_alerts():
     #
     # Forgotten Sign Offs
     #
-    forgotten = conn.execute("""
+    shift_staff_columns = _forgotten_signoff_table_columns(conn, "shift_staff")
+    shift_columns = _forgotten_signoff_table_columns(conn, "shifts")
+    schedule_columns = _forgotten_signoff_table_columns(conn, "schedule_shifts")
+    schedule_staff_columns = _forgotten_signoff_table_columns(conn, "schedule_staff")
+
+    def optional_column(table_alias, columns, column_name, alias):
+        if column_name in columns:
+            return f"{table_alias}.{column_name} AS {alias}"
+        return f"NULL AS {alias}"
+
+    forgotten_where = "WHERE ss.active = 1"
+    if "status" in shift_columns:
+        forgotten_where += " AND (s.status = 'Open' OR s.status IS NULL)"
+
+    forgotten = conn.execute(f"""
         SELECT
             ss.shift_staff_id,
+            ss.user_id,
             u.full_name,
             s.shift_date,
-            s.shift_type
+            s.shift_type,
+            {optional_column('s', shift_columns, 'status', 'shift_status')},
+            {optional_column('s', shift_columns, 'client_id', 'client_id')},
+            {optional_column('s', shift_columns, 'scheduled_start_time', 'scheduled_start_time')},
+            {optional_column('s', shift_columns, 'scheduled_end_time', 'scheduled_end_time')},
+            {optional_column('s', shift_columns, 'actual_end_at_utc', 'shift_actual_end_at_utc')},
+            {optional_column('ss', shift_staff_columns, 'actual_end_at_utc', 'actual_end_at_utc')},
+            {optional_column('ss', shift_staff_columns, 'sign_off_at', 'sign_off_at')}
         FROM shift_staff ss
 
         JOIN users u
@@ -20376,13 +20604,38 @@ def get_manager_alerts():
         JOIN shifts s
             ON ss.shift_id = s.shift_id
 
-        WHERE ss.active = 1
-          AND s.shift_date < date('now')
+        {forgotten_where}
 
         ORDER BY s.shift_date
     """).fetchall()
 
+    now_utc = parse_staff_notice_utc_datetime(get_application_now_utc())
+    parent_by_key, worker_by_key = _forgotten_signoff_schedule_maps(
+        conn,
+        schedule_columns,
+        schedule_staff_columns,
+    )
+
     for row in forgotten:
+        assignment = dict(row)
+        if (
+            assignment["shift_status"] is not None
+            and assignment["shift_status"] != "Open"
+        ):
+            continue
+        if (
+            assignment["shift_actual_end_at_utc"] is not None
+            or assignment["actual_end_at_utc"] is not None
+            or assignment["sign_off_at"] is not None
+        ):
+            continue
+        effective_end_utc = _forgotten_signoff_effective_end_utc(
+            assignment,
+            parent_by_key,
+            worker_by_key,
+        )
+        if effective_end_utc is None or now_utc <= effective_end_utc:
+            continue
         alerts.append({
             "level": "danger",
             "title": "Forgotten Sign Off",
