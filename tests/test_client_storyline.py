@@ -2102,6 +2102,37 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertIn(b"Voided", page)
         self.assertIn(b"Mark as Reviewed", page)
 
+    def test_behaviour_recorded_at_displays_vancouver_time_without_mutating_utc(self):
+        occurrence_id = 50
+        raw_utc = "2026-07-15T02:00:00Z"
+        local_display = "2026-07-14 19:00"
+        self.add_behaviour_occurrence(occurrence_id)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE behaviour_occurrences SET recorded_at_utc = ? "
+            "WHERE behaviour_occurrence_id = ?",
+            (raw_utc, occurrence_id)
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(2, "Program Manager")
+        response = self.client.get(
+            f"/manager-review/behaviour/{occurrence_id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(local_display.encode(), response.data)
+        self.assertNotIn(raw_utc.encode(), response.data)
+        conn = sqlite3.connect(self.path)
+        stored = conn.execute(
+            "SELECT recorded_at_utc FROM behaviour_occurrences "
+            "WHERE behaviour_occurrence_id = ?",
+            (occurrence_id,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(stored, raw_utc)
+
     def prepare_timestamp_review_tables(self, shift_date=None):
         shift_date = shift_date or self.today
         shift_date_text = (

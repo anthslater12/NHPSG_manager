@@ -28,7 +28,7 @@
         <tr><th>Recorded By</th><td>{{ occurrence.recorder_name }}</td></tr>
         <tr><th>Record Format</th><td>{{ occurrence.record_format }}</td></tr>
         <tr><th>Status</th><td>{{ occurrence.status }}</td></tr>
-        <tr><th>Recorded At</th><td>{{ occurrence.recorded_at_utc }}</td></tr>
+        <tr><th>Recorded At</th><td>{{ occurrence.recorded_at_display }}</td></tr>
         {% if occurrence.status == 'Voided' %}
             <tr><th>Voided By</th><td>{{ occurrence.voided_by_name }}</td></tr>
             <tr><th>Voided At</th><td>{{ occurrence.voided_at_display }}</td></tr>

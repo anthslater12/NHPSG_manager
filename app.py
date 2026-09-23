@@ -26122,6 +26122,9 @@ def behaviour_review_detail(occurrence_id):
         if occurrence["voided_at_utc"]
         else None
     )
+    occurrence["recorded_at_display"] = (
+        format_utc_database_datetime_display(occurrence["recorded_at_utc"])
+    )
     occurrence["week_monday"] = get_behaviour_operational_week_start(
         local_time
     ).isoformat()
