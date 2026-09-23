@@ -42,7 +42,7 @@
                     <td>{% if entry.ls_selected %}Yes{% else %}No{% endif %}</td>
                     <td>{{ entry.activity_description }}</td>
                     <td>{{ entry.recorded_by_name }}</td>
-                    <td>{{ entry.created_at }}</td>
+                    <td>{{ entry.created_at_display }}</td>
                     <td>{{ entry.status }}</td>
                     <td>
                         {% if reviews_by_activity.get(entry.shift_activity_id) %}

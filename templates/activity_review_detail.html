@@ -42,7 +42,7 @@
         <tr><th>LS</th><td>{% if entry.ls_selected %}Yes{% else %}No{% endif %}</td></tr>
         <tr><th>Description</th><td>{{ entry.activity_description }}</td></tr>
         <tr><th>Staff Member</th><td>{{ entry.recorded_by_name }}</td></tr>
-        <tr><th>Created</th><td>{{ entry.created_at }}</td></tr>
+        <tr><th>Created</th><td>{{ entry.created_at_display }}</td></tr>
     </table>
 
     <h3>Reviews</h3>

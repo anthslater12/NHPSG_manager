@@ -26798,6 +26798,11 @@ def activity_review_list():
     reviews_by_activity = {}
     reviewed_by_current_user = set()
     reviewable_activity_ids = set()
+    entries = [dict(entry) for entry in entries]
+    for entry in entries:
+        entry["created_at_display"] = format_utc_database_datetime_display(
+            entry["created_at"]
+        )
     for review in reviews:
         activity_id = review["shift_activity_id"]
         reviews_by_activity.setdefault(activity_id, []).append(review)
@@ -26843,6 +26848,10 @@ def activity_review_detail(activity_id):
         """, (activity_id,)).fetchone()
         if entry is None:
             return "Activity not found", 404
+        entry = dict(entry)
+        entry["created_at_display"] = format_utc_database_datetime_display(
+            entry["created_at"]
+        )
 
         reviews = conn.execute("""
             SELECT

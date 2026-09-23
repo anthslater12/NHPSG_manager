@@ -1477,6 +1477,38 @@ class ShiftActivitiesTests(unittest.TestCase):
             for audit in review_audits
         ))
 
+    def test_activity_created_at_is_rendered_in_vancouver_time(self):
+        activity_id = self.insert_activity()
+        raw_utc = "2026-07-15 02:00:00"
+        local_display = "2026-07-14 19:00"
+        conn = sqlite3.connect(self.database_path)
+        conn.execute(
+            "UPDATE shift_activities SET created_at = ? "
+            "WHERE shift_activity_id = ?",
+            (raw_utc, activity_id)
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(7, "Program Manager")
+        listing = self.client.get("/manager-review/activities")
+        detail = self.client.get(
+            f"/manager-review/activities/{activity_id}"
+        )
+
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(local_display.encode(), listing.data)
+        self.assertIn(local_display.encode(), detail.data)
+        self.assertNotIn(raw_utc.encode(), listing.data)
+        self.assertNotIn(raw_utc.encode(), detail.data)
+        stored = self.rows(
+            "SELECT created_at FROM shift_activities "
+            "WHERE shift_activity_id = ?",
+            (activity_id,)
+        )[0]["created_at"]
+        self.assertEqual(stored, raw_utc)
+
     def test_in_progress_activity_is_visible_but_not_reviewable(self):
         activity_id = self.insert_in_progress_activity()
         self.login(6, "Admin")
