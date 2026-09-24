@@ -1187,6 +1187,8 @@ class ClientStorylineTests(unittest.TestCase):
             "duration_until_calm_minutes": "12",
             "calming_description": "Moved to a quiet area",
             "additional_notes": "Final current details",
+            "setting_events_present": "1",
+            "setting_event_option_ids": "1",
         })
         self.assertEqual(complete.status_code, 302)
 

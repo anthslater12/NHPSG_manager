@@ -10,6 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import add_behaviour_occurrences_table as migration
+import add_behaviour_setting_events_tables as setting_event_migration
 import app
 
 
@@ -83,6 +84,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
             (3, 11, 1, '08:00', NULL, '2026-08-03T15:00:00Z', NULL, 1);
         """)
         migration.migrate(conn)
+        setting_event_migration.migrate(conn)
         conn.close()
         self.client = app.app.test_client()
 
@@ -101,8 +103,15 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
                 session[app.DOCUMENTATION_CONTEXT_SESSION_KEY] = shift_id
 
     def abc_payload(self, token="A" * 43, **overrides):
+        conn = sqlite3.connect(self.path)
+        setting_event_option_id = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_setting_event_options WHERE code = 'HUNGER'"
+        ).fetchone()[0]
+        conn.close()
         payload = {
             "record_format": "ABC",
+            "setting_event_option_ids": str(setting_event_option_id),
             "occurrence_local": (
                 datetime.now(app.VANCOUVER_TIMEZONE) - timedelta(minutes=2)
             ).strftime("%Y-%m-%dT%H:%M"),
@@ -150,6 +159,16 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
             ).fetchone()
         conn.close()
         return row
+
+    def setting_event_option_id(self, code):
+        conn = sqlite3.connect(self.path)
+        option_id = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_setting_event_options WHERE code = ?",
+            (code,),
+        ).fetchone()[0]
+        conn.close()
+        return option_id
 
     def activity_types(self):
         conn = sqlite3.connect(self.path)
@@ -233,6 +252,204 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
         self.assertIn("additional_notes", details)
         self.assertIn("None", details)
         self.assertIn("'Follow-up details'", details)
+
+    def test_setting_event_edit_replaces_selections_transactionally(self):
+        self.create_in_progress()
+        edit_url = "/shift/10/behaviour/1/edit"
+        update = self.in_progress_payload(
+            token="not-accepted-by-edit-route",
+            expected_version="1",
+            occurrence_local=app.behaviour_utc_to_vancouver(
+                self.row()["occurred_at_utc"]
+            ).strftime("%Y-%m-%dT%H:%M"),
+        )
+        update.pop("lifecycle_action")
+        update.pop("submission_token")
+        update["action"] = "save"
+        update["setting_events_present"] = "1"
+        update["setting_event_option_ids"] = str(
+            self.setting_event_option_id("THIRST")
+        )
+
+        response = self.client.post(edit_url, data=update)
+
+        self.assertEqual(response.status_code, 302)
+        occurrence = self.row()
+        self.assertEqual(occurrence["version_number"], 2)
+        conn = sqlite3.connect(self.path)
+        selections = conn.execute(
+            "SELECT setting_event_option_id, other_text "
+            "FROM behaviour_occurrence_setting_events "
+            "WHERE behaviour_occurrence_id = 1"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(
+            selections,
+            [(self.setting_event_option_id("THIRST"), None)],
+        )
+
+    def test_absent_setting_event_marker_preserves_existing_edit_selections(self):
+        self.create_in_progress()
+        edit_url = "/shift/10/behaviour/1/edit"
+        update = self.in_progress_payload(
+            expected_version="1", additional_notes="Legacy edit"
+        )
+        update.pop("lifecycle_action")
+        update.pop("submission_token")
+        update.pop("setting_event_option_ids")
+        update["action"] = "save"
+
+        response = self.client.post(edit_url, data=update)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.row()["version_number"], 2)
+        conn = sqlite3.connect(self.path)
+        selections = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_occurrence_setting_events "
+            "WHERE behaviour_occurrence_id = 1"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(selections, [(self.setting_event_option_id("HUNGER"),)])
+
+    def test_present_zero_setting_events_clears_in_progress_draft(self):
+        self.create_in_progress()
+        edit_url = "/shift/10/behaviour/1/edit"
+        update = self.in_progress_payload(expected_version="1")
+        update.pop("lifecycle_action")
+        update.pop("submission_token")
+        update.pop("setting_event_option_ids")
+        update.update({"action": "save", "setting_events_present": "1"})
+
+        response = self.client.post(edit_url, data=update)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.row()["status"], "In Progress")
+        self.assertEqual(self.row()["version_number"], 2)
+        conn = sqlite3.connect(self.path)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM behaviour_occurrence_setting_events "
+            "WHERE behaviour_occurrence_id = 1"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+    def test_present_zero_setting_events_cannot_complete_abc(self):
+        self.create_in_progress()
+        edit_url = "/shift/10/behaviour/1/edit"
+        completion = self.abc_payload(expected_version="1")
+        completion.pop("submission_token")
+        completion.pop("setting_event_option_ids")
+        completion.update({"action": "complete", "setting_events_present": "1"})
+
+        response = self.client.post(edit_url, data=completion)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.row()["status"], "In Progress")
+        self.assertEqual(self.row()["version_number"], 1)
+        conn = sqlite3.connect(self.path)
+        selections = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_occurrence_setting_events "
+            "WHERE behaviour_occurrence_id = 1"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(selections, [(self.setting_event_option_id("HUNGER"),)])
+
+    def test_present_zero_setting_events_is_allowed_for_new_draft(self):
+        self.login()
+        payload = self.in_progress_payload(token="Z" * 43)
+        payload.pop("setting_event_option_ids")
+        payload["setting_events_present"] = "1"
+        payload["confirm_distinct_episode"] = "1"
+
+        response = self.client.post("/shift/10/behaviour", data=payload)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.row()["status"], "In Progress")
+        conn = sqlite3.connect(self.path)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM behaviour_occurrence_setting_events"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+    def test_present_zero_setting_events_is_rejected_for_new_finalized_abc(self):
+        self.login()
+        payload = self.abc_payload(token="Y" * 43)
+        payload.pop("setting_event_option_ids")
+        payload["setting_events_present"] = "1"
+
+        response = self.client.post("/shift/10/behaviour", data=payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIsNone(self.row())
+
+    def test_present_valid_setting_events_persist_for_new_abc(self):
+        self.login()
+        payload = self.abc_payload(token="X" * 43)
+        payload["setting_events_present"] = "1"
+
+        response = self.client.post("/shift/10/behaviour", data=payload)
+
+        self.assertEqual(response.status_code, 302)
+        conn = sqlite3.connect(self.path)
+        selections = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_occurrence_setting_events"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(selections, [(self.setting_event_option_id("HUNGER"),)])
+
+    def test_stale_or_failed_edit_does_not_change_setting_events(self):
+        self.create_in_progress()
+        edit_url = "/shift/10/behaviour/1/edit"
+
+        stale = self.in_progress_payload(expected_version="2")
+        stale.pop("lifecycle_action")
+        stale.pop("submission_token")
+        stale["action"] = "save"
+        stale["setting_events_present"] = "1"
+        stale["setting_event_option_ids"] = str(
+            self.setting_event_option_id("THIRST")
+        )
+        self.assertEqual(self.client.post(edit_url, data=stale).status_code, 409)
+        conn = sqlite3.connect(self.path)
+        selections = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_occurrence_setting_events"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(selections, [(self.setting_event_option_id("HUNGER"),)])
+        self.assertEqual(self.row()["version_number"], 1)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            CREATE TRIGGER reject_behaviour_edit_audit BEFORE INSERT ON activity_log
+            BEGIN SELECT RAISE(ABORT, 'forced edit audit failure'); END
+        """)
+        conn.commit()
+        conn.close()
+        failed = self.in_progress_payload(
+            expected_version="1", additional_notes="Should roll back"
+        )
+        failed.pop("lifecycle_action")
+        failed.pop("submission_token")
+        failed["action"] = "save"
+        failed["setting_events_present"] = "1"
+        failed["setting_event_option_ids"] = str(
+            self.setting_event_option_id("THIRST")
+        )
+        self.assertEqual(self.client.post(edit_url, data=failed).status_code, 500)
+        self.assertEqual(self.row()["version_number"], 1)
+        self.assertIsNone(self.row()["additional_notes"])
+        conn = sqlite3.connect(self.path)
+        selections = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_occurrence_setting_events"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(selections, [(self.setting_event_option_id("HUNGER"),)])
 
     def test_in_progress_requires_meaningful_data_and_recorded_remains_legacy_default(self):
         self.login()

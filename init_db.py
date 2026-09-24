@@ -1,6 +1,7 @@
 import sqlite3
 from werkzeug.security import generate_password_hash
 import add_behaviour_occurrences_table
+import add_behaviour_setting_events_tables
 import add_schedule_tables
 import add_schedule_staff_order
 import add_leave_requests_table
@@ -90,6 +91,7 @@ VALUES (1, 'Neville', 1)
 """)
 
 add_behaviour_occurrences_table.migrate(conn)
+add_behaviour_setting_events_tables.migrate(conn)
 add_schedule_tables.migrate(conn)
 add_schedule_staff_order.migrate(conn)
 add_leave_requests_table.migrate(conn)

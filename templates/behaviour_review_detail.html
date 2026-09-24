@@ -37,6 +37,26 @@
     </table>
 
     {% if occurrence.record_format == 'ABC' %}
+        <section class="setting-events-review">
+            <h3>Setting Events</h3>
+            {% if setting_event_groups %}
+                {% for group in setting_event_groups %}
+                    <h4>{{ group.label }}</h4>
+                    <ul>
+                    {% for option in group.options %}
+                        <li>
+                            {{ option.label }}
+                            {% if option.other_text %}
+                                <div class="setting-event-review-other">Other details: {{ option.other_text }}</div>
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                    </ul>
+                {% endfor %}
+            {% else %}
+                <p>Not captured before Setting Events were introduced.</p>
+            {% endif %}
+        </section>
         {% for section in abc_sections %}
             <h3>{{ section.heading }}</h3>
             {% if section["items"] %}<p>{{ section["items"]|join(', ') }}</p>{% endif %}

@@ -9,6 +9,8 @@ from werkzeug.datastructures import MultiDict
 import app
 import add_leave_requests_table as leave_requests_schema
 import add_staff_notices_tables as staff_notice_schema
+import add_behaviour_occurrences_table as behaviour_schema
+import add_behaviour_setting_events_tables as setting_events_schema
 import add_worker_resources_table as worker_resources_schema
 import add_grocery_lists_tables as grocery_lists_schema
 
@@ -194,6 +196,8 @@ class StaffNoticePublicationTests(unittest.TestCase):
                 conn.execute(sql)
 
             leave_requests_schema.migrate(conn)
+            behaviour_schema.migrate(conn)
+            setting_events_schema.migrate(conn)
             worker_resources_schema.migrate(conn)
             grocery_lists_schema.migrate(conn)
 

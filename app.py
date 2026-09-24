@@ -29,6 +29,8 @@ import re
 import secrets
 import add_leave_requests_table
 import add_sleep_events_note
+import add_behaviour_occurrences_table
+import add_behaviour_setting_events_tables
 import add_worker_resources_table
 import add_grocery_lists_tables
 import mail_service
@@ -290,6 +292,25 @@ ABC_TEXT_FIELDS = (
     "antecedent_other_details", "behaviour_other_details",
     "response_other_details", "calming_description", "additional_notes",
 )
+SETTING_EVENT_OPTION_FIELD = "setting_event_option_ids"
+SETTING_EVENT_PRESENT_FIELD = "setting_events_present"
+SETTING_EVENT_OTHER_FIELD_PREFIX = "setting_event_other_"
+SETTING_EVENT_MAX_SUBMITTED_OPTIONS = 100
+SETTING_EVENT_OTHER_MAX_LENGTH = 1000
+SETTING_EVENT_CATEGORY_LABELS = {
+    "PHYSIOLOGICAL_BIOLOGICAL": "Physiological / Biological",
+    "PHYSICAL_ENVIRONMENTAL": "Physical / Environmental",
+    "ROUTINE_TRANSITION": "Routine / Transition",
+    "SOCIAL_INTERPERSONAL": "Social / Interpersonal",
+    "SPECIAL": "Special",
+}
+SETTING_EVENT_CATEGORY_ORDER = (
+    "PHYSIOLOGICAL_BIOLOGICAL",
+    "PHYSICAL_ENVIRONMENTAL",
+    "ROUTINE_TRANSITION",
+    "SOCIAL_INTERPERSONAL",
+    "SPECIAL",
+)
 ABC_FIELD_LABELS = {
     "antecedent_transition_activities": "Asked to transition between activities",
     "antecedent_denied_access": "Denied access to item/activity",
@@ -495,6 +516,8 @@ def get_db():
             raise RuntimeError(error_message)
 
         conn.row_factory = sqlite3.Row
+        add_behaviour_occurrences_table.migrate(conn)
+        add_behaviour_setting_events_tables.migrate(conn)
         add_leave_requests_table.migrate(conn)
         add_sleep_events_note.migrate(conn)
         add_worker_resources_table.migrate(conn)
@@ -1753,6 +1776,264 @@ def validate_abc_in_progress_submission(form):
     ):
         raise ValueError("Add Behaviour information before saving In Progress.")
     return result
+
+
+def load_behaviour_setting_event_options(conn, include_inactive=False):
+    """Load Setting Event options in deterministic display order."""
+    active_filter = "" if include_inactive else "WHERE active = 1"
+    return conn.execute(
+        "SELECT setting_event_option_id, code, category, label, "
+        "display_order, active, option_kind "
+        "FROM behaviour_setting_event_options "
+        f"{active_filter} "
+        "ORDER BY category, display_order, setting_event_option_id"
+    ).fetchall()
+
+
+def setting_event_other_field_name(code):
+    """Return the stable form field name for one category-specific Other."""
+    return SETTING_EVENT_OTHER_FIELD_PREFIX + code
+
+
+def group_behaviour_setting_event_options(options):
+    """Group database-backed Setting Events in business display order."""
+    by_category = {}
+    for option in options:
+        by_category.setdefault(option["category"], []).append(option)
+    categories = [
+        category for category in SETTING_EVENT_CATEGORY_ORDER
+        if category in by_category
+    ]
+    categories.extend(sorted(set(by_category) - set(categories)))
+    return [
+        {
+            "category": category,
+            "label": SETTING_EVENT_CATEGORY_LABELS.get(
+                category, category.replace("_", " ").title()
+            ),
+            "options": by_category[category],
+        }
+        for category in categories
+    ]
+
+
+def filter_behaviour_setting_event_form_options(options, existing_selections=()):
+    """Keep active options plus inactive options already selected in an edit."""
+    existing_ids = {
+        selection["setting_event_option_id"]
+        for selection in existing_selections
+    }
+    return [
+        option for option in options
+        if option["active"] or option["setting_event_option_id"] in existing_ids
+    ]
+
+
+def load_behaviour_setting_event_selections(conn, occurrence_id):
+    """Load all selections, including inactive options, for safe editing."""
+    return conn.execute(
+        "SELECT se.behaviour_occurrence_setting_event_id, "
+        "se.behaviour_occurrence_id, se.setting_event_option_id, "
+        "se.other_text, o.code, o.category, o.label, o.display_order, "
+        "o.active, o.option_kind "
+        "FROM behaviour_occurrence_setting_events se "
+        "JOIN behaviour_setting_event_options o "
+        "ON o.setting_event_option_id = se.setting_event_option_id "
+        "WHERE se.behaviour_occurrence_id = ? "
+        "ORDER BY o.category, o.display_order, o.setting_event_option_id",
+        (occurrence_id,),
+    ).fetchall()
+
+
+def _behaviour_form_values(form):
+    """Preserve repeated Setting Event values for a future form redisplay."""
+    values = form.to_dict()
+    values[SETTING_EVENT_OPTION_FIELD] = form.getlist(
+        SETTING_EVENT_OPTION_FIELD
+    )
+    for field_name in form.keys():
+        if field_name.startswith(SETTING_EVENT_OTHER_FIELD_PREFIX):
+            values[field_name] = form.get(field_name)
+    if SETTING_EVENT_PRESENT_FIELD in form:
+        values[SETTING_EVENT_PRESENT_FIELD] = form.get(
+            SETTING_EVENT_PRESENT_FIELD
+        )
+    return values
+
+
+def _setting_events_present(form):
+    values = form.getlist(SETTING_EVENT_PRESENT_FIELD)
+    if len(values) > 1 or (values and values[0] != "1"):
+        raise ValueError("Setting Event presence marker is invalid.")
+    return values == ["1"]
+
+
+def _normalise_setting_event_other_values(other_text_values):
+    if other_text_values is None:
+        return {}
+    if not isinstance(other_text_values, Mapping):
+        raise ValueError("Setting Event Other text input is invalid.")
+
+    normalised = {}
+    for field_name, raw_values in other_text_values.items():
+        if (
+            not isinstance(field_name, str)
+            or not field_name.startswith(SETTING_EVENT_OTHER_FIELD_PREFIX)
+        ):
+            raise ValueError("Setting Event Other text input is invalid.")
+        code = field_name[len(SETTING_EVENT_OTHER_FIELD_PREFIX):]
+        if not re.fullmatch(r"[A-Z0-9_]+", code):
+            raise ValueError("Setting Event Other text input is invalid.")
+        values = (
+            list(raw_values)
+            if isinstance(raw_values, (list, tuple))
+            else [raw_values]
+        )
+        if len(values) != 1 or not isinstance(values[0], str):
+            raise ValueError("Setting Event Other text input is invalid.")
+        normalised[code] = values[0].strip()
+    return normalised
+
+
+def validate_behaviour_setting_events(
+    conn,
+    submitted_option_ids,
+    other_text_values=None,
+    finalized=False,
+    allowed_inactive_option_ids=(),
+):
+    """Validate and normalize one ABC Setting Event submission.
+
+    The option and Other values are resolved against the database. The
+    returned selections are ready for transactional persistence.
+    """
+    submitted_option_ids = list(submitted_option_ids or [])
+    if len(submitted_option_ids) > SETTING_EVENT_MAX_SUBMITTED_OPTIONS:
+        raise ValueError("Too many Setting Event options were submitted.")
+
+    option_ids = []
+    for raw_id in submitted_option_ids:
+        if not isinstance(raw_id, str) or not re.fullmatch(r"[1-9][0-9]*", raw_id):
+            raise ValueError("Setting Event option ID is invalid.")
+        option_id = int(raw_id)
+        if option_id in option_ids:
+            raise ValueError("Duplicate Setting Event options are not allowed.")
+        option_ids.append(option_id)
+
+    option_rows = {}
+    if option_ids:
+        placeholders = ", ".join("?" for _ in option_ids)
+        rows = conn.execute(
+            "SELECT setting_event_option_id, code, category, label, "
+            "display_order, active, option_kind "
+            "FROM behaviour_setting_event_options "
+            f"WHERE setting_event_option_id IN ({placeholders})",
+            option_ids,
+        ).fetchall()
+        option_rows = {row["setting_event_option_id"]: row for row in rows}
+        allowed_inactive = set(allowed_inactive_option_ids or ())
+        for option_id in option_ids:
+            row = option_rows.get(option_id)
+            if row is None:
+                raise ValueError("Setting Event option does not exist.")
+            if not row["active"] and option_id not in allowed_inactive:
+                raise ValueError("Inactive Setting Event options cannot be selected.")
+
+    selected_rows = [option_rows[option_id] for option_id in option_ids]
+    selected_kinds = {row["option_kind"] for row in selected_rows}
+    special_kinds = selected_kinds.intersection({"NONE", "UNKNOWN"})
+    if special_kinds and len(selected_rows) != 1:
+        raise ValueError(
+            "None observed and unknown Setting Events cannot be combined "
+            "with another Setting Event."
+        )
+    if finalized and not selected_rows:
+        raise ValueError("At least one Setting Event is required for a finalized ABC record.")
+
+    other_values = _normalise_setting_event_other_values(other_text_values)
+    other_rows = {}
+    if other_values:
+        codes = tuple(other_values)
+        placeholders = ", ".join("?" for _ in codes)
+        rows = conn.execute(
+            "SELECT setting_event_option_id, code, option_kind "
+            "FROM behaviour_setting_event_options "
+            f"WHERE code IN ({placeholders})",
+            codes,
+        ).fetchall()
+        other_rows = {row["code"]: row for row in rows}
+        if len(other_rows) != len(codes):
+            raise ValueError("Setting Event Other option is invalid.")
+
+    selected_by_code = {row["code"]: row for row in selected_rows}
+    other_text_by_id = {}
+    for code, text in other_values.items():
+        row = other_rows[code]
+        if row["option_kind"] != "OTHER":
+            if text:
+                raise ValueError(
+                    "Other text is only allowed for an Other Setting Event."
+                )
+            continue
+        selected = selected_by_code.get(code)
+        if selected is None:
+            if text:
+                raise ValueError(
+                    "Other text requires the matching Other Setting Event."
+                )
+            continue
+        if not text:
+            raise ValueError(
+                f"Other text is required for Setting Event {code}."
+            )
+        if len(text) > SETTING_EVENT_OTHER_MAX_LENGTH:
+            raise ValueError("Setting Event Other text cannot exceed 1,000 characters.")
+        other_text_by_id[selected["setting_event_option_id"]] = text
+
+    for row in selected_rows:
+        if row["option_kind"] != "OTHER" and row["setting_event_option_id"] in other_text_by_id:
+            raise ValueError("Other text is only allowed for an Other Setting Event.")
+        if row["option_kind"] == "OTHER" and row["setting_event_option_id"] not in other_text_by_id:
+            raise ValueError(
+                f"Other text is required for Setting Event {row['code']}."
+            )
+
+    return {
+        "option_ids": tuple(option_ids),
+        "selections": tuple({
+            "setting_event_option_id": row["setting_event_option_id"],
+            "other_text": other_text_by_id.get(row["setting_event_option_id"]),
+        } for row in selected_rows),
+        "other_text_by_code": dict(other_values),
+    }
+
+
+def replace_behaviour_setting_event_selections(conn, occurrence_id, selections):
+    """Replace selections without committing the caller's transaction."""
+    conn.execute(
+        "DELETE FROM behaviour_occurrence_setting_events "
+        "WHERE behaviour_occurrence_id = ?",
+        (occurrence_id,),
+    )
+    conn.executemany(
+        "INSERT INTO behaviour_occurrence_setting_events "
+        "(behaviour_occurrence_id, setting_event_option_id, other_text) "
+        "VALUES (?, ?, ?)",
+        (
+            (occurrence_id, selection["setting_event_option_id"], selection["other_text"])
+            for selection in selections
+        ),
+    )
+
+
+def _setting_event_selection_signature(selections):
+    return tuple(sorted(
+        (
+            int(selection["setting_event_option_id"]),
+            selection["other_text"],
+        )
+        for selection in selections
+    ))
 
 
 def get_active_authenticated_user(conn, user_id):
@@ -5216,7 +5497,7 @@ def _render_behaviour_record(
     submission_token=None, duplicate_warning=None,
     documentation_context=None, documentation_context_alternatives=None,
     form_action=None, edit_mode=False, expected_version=None,
-    lifecycle_action=None
+    lifecycle_action=None, setting_event_options=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -5225,6 +5506,11 @@ def _render_behaviour_record(
         except ValueError:
             selected_client_id = None
     values = values or {}
+    if setting_event_options is None:
+        setting_event_options = load_behaviour_setting_event_options(conn)
+    setting_event_option_groups = group_behaviour_setting_event_options(
+        setting_event_options
+    )
     return render_template("behaviour_record.html", clients=clients,
         selected_client_id=selected_client_id, recent_occurrences=_behaviour_recent_occurrences(conn, selected_client_id),
         submission_token=submission_token or secrets.token_urlsafe(32), error=error,
@@ -5234,6 +5520,11 @@ def _render_behaviour_record(
         abc_behaviour_fields=ABC_BEHAVIOUR_FIELDS,
         abc_response_fields=ABC_RESPONSE_FIELDS,
         abc_field_labels=ABC_FIELD_LABELS,
+        setting_event_options=setting_event_options,
+        setting_event_option_groups=setting_event_option_groups,
+        setting_event_option_field=SETTING_EVENT_OPTION_FIELD,
+        setting_event_presence_field=SETTING_EVENT_PRESENT_FIELD,
+        setting_event_other_field_name=setting_event_other_field_name,
         record_format=values.get("record_format", "ABC"),
         now_local=datetime.now(VANCOUVER_TIMEZONE).strftime("%Y-%m-%dT%H:%M"),
         values=values, shift_context=shift_context,
@@ -7299,6 +7590,14 @@ def behaviour_record(shift_id=None):
 
     values = {}
     try:
+        setting_event_options = load_behaviour_setting_event_options(
+            conn, include_inactive=True
+        )
+        setting_event_other_fields = {
+            setting_event_other_field_name(option["code"])
+            for option in setting_event_options
+            if option["option_kind"] == "OTHER"
+        }
         approved_fields = {
             "client_id", "occurrence_local", "repeated_hour_choice", "notes",
             "submission_token", "lifecycle_action", "resume_lifecycle_action",
@@ -7309,11 +7608,14 @@ def behaviour_record(shift_id=None):
         abc_fields = {
             "record_format", "duration_until_calm_minutes", "calming_description",
             "additional_notes", "antecedent_other_details", "behaviour_other_details",
-            "response_other_details", *ABC_ANTECEDENT_FIELDS,
+            "response_other_details", SETTING_EVENT_PRESENT_FIELD,
+            SETTING_EVENT_OPTION_FIELD,
+            *setting_event_other_fields, *ABC_ANTECEDENT_FIELDS,
             *ABC_BEHAVIOUR_FIELDS, *ABC_RESPONSE_FIELDS
         }
         is_abc = "record_format" in request.form
         if is_abc:
+            setting_events_present = _setting_events_present(request.form)
             approved_fields = {
                 "client_id", "occurrence_local", "repeated_hour_choice",
                 "submission_token", "lifecycle_action", "resume_lifecycle_action",
@@ -7349,7 +7651,7 @@ def behaviour_record(shift_id=None):
         ambiguity_values = request.form.getlist("repeated_hour_choice")
         if len(ambiguity_values) > 1:
             raise ValueError("Behaviour form input is invalid.")
-        values = request.form.to_dict()
+        values = _behaviour_form_values(request.form)
         submitted_client = request.form.get("client_id")
         if shift is not None:
             if submitted_client not in (None, "", str(shift["client_id"]),):
@@ -7365,6 +7667,19 @@ def behaviour_record(shift_id=None):
             validate_abc_in_progress_submission(request.form)
             if is_abc and lifecycle_action == "in_progress"
             else validate_abc_submission(request.form) if is_abc else None
+        )
+        setting_event_values = (
+            validate_behaviour_setting_events(
+                conn,
+                request.form.getlist(SETTING_EVENT_OPTION_FIELD),
+                {
+                    field_name: request.form.getlist(field_name)
+                    for field_name in setting_event_other_fields
+                    if field_name in request.form
+                },
+                finalized=(lifecycle_action == "recorded"),
+            )
+            if is_abc else None
         )
         flags = {}
         for field in BEHAVIOUR_CATEGORY_FIELDS:
@@ -7476,6 +7791,10 @@ def behaviour_record(shift_id=None):
                       notes, user["user_id"], recorded_utc, token,
                       "In Progress" if lifecycle_action == "in_progress" else "Recorded"))
             occurrence_id = cur.lastrowid
+            if is_abc:
+                replace_behaviour_setting_event_selections(
+                    conn, occurrence_id, setting_event_values["selections"]
+                )
             category_text = ", ".join(BEHAVIOUR_CATEGORY_LABELS[field] for field in BEHAVIOUR_CATEGORY_FIELDS if flags[field])
             activity_details = (
                 format_abc_behaviour_storyline_details(abc_values)
@@ -7534,7 +7853,7 @@ def behaviour_record(shift_id=None):
         raise
 
 
-def _behaviour_edit_form_values(occurrence):
+def _behaviour_edit_form_values(occurrence, setting_event_selections=()):
     values = {
         "record_format": occurrence["record_format"],
         "occurrence_local": behaviour_utc_to_vancouver(
@@ -7554,6 +7873,15 @@ def _behaviour_edit_form_values(occurrence):
         values["duration_until_calm_minutes"] = str(
             occurrence["duration_until_calm_minutes"]
         )
+    values[SETTING_EVENT_OPTION_FIELD] = [
+        str(selection["setting_event_option_id"])
+        for selection in setting_event_selections
+    ]
+    for selection in setting_event_selections:
+        if selection["other_text"] is not None:
+            values[setting_event_other_field_name(selection["code"])] = (
+                selection["other_text"]
+            )
     return values
 
 
@@ -7573,8 +7901,25 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 conn, shift_id, occurrence_id, session["user_id"]
             )
         )
+        setting_event_options = load_behaviour_setting_event_options(
+            conn, include_inactive=True
+        )
+        setting_event_other_fields = {
+            setting_event_other_field_name(option["code"])
+            for option in setting_event_options
+            if option["option_kind"] == "OTHER"
+        }
+        existing_setting_event_selections = (
+            load_behaviour_setting_event_selections(conn, occurrence_id)
+            if occurrence["record_format"] == "ABC" else []
+        )
+        setting_event_form_options = filter_behaviour_setting_event_form_options(
+            setting_event_options, existing_setting_event_selections
+        )
         if request.method == "GET":
-            values = _behaviour_edit_form_values(occurrence)
+            values = _behaviour_edit_form_values(
+                occurrence, existing_setting_event_selections
+            )
             response = _render_behaviour_record(
                 conn, occurrence["client_id"], values=values,
                 shift_context=True,
@@ -7585,16 +7930,24 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                     shift_id=shift_id, occurrence_id=occurrence_id
                 ),
                 edit_mode=True,
-                expected_version=occurrence["version_number"]
+                expected_version=occurrence["version_number"],
+                setting_event_options=setting_event_form_options,
             )
             return response
 
+        values = _behaviour_form_values(request.form)
         approved_fields = {
             "action", "expected_version", "occurrence_local", "repeated_hour_choice",
             "record_format", "notes", *BEHAVIOUR_CATEGORY_FIELDS,
             *ABC_ANTECEDENT_FIELDS, *ABC_BEHAVIOUR_FIELDS, *ABC_RESPONSE_FIELDS,
-            *ABC_TEXT_FIELDS, "duration_until_calm_minutes"
+            *ABC_TEXT_FIELDS, "duration_until_calm_minutes",
         }
+        if occurrence["record_format"] == "ABC":
+            approved_fields.update({
+                SETTING_EVENT_PRESENT_FIELD,
+                SETTING_EVENT_OPTION_FIELD,
+                *setting_event_other_fields,
+            })
         if not set(request.form).issubset(approved_fields):
             raise ValueError("Behaviour edit input is invalid.")
         action_values = request.form.getlist("action")
@@ -7635,8 +7988,55 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
         if occurrence["record_format"] == "ABC":
             flags = {field: 0 for field in BEHAVIOUR_CATEGORY_FIELDS}
             abc_values = validate_abc_in_progress_submission(request.form)
+            setting_events_present = _setting_events_present(request.form)
+            if setting_events_present:
+                setting_event_values = validate_behaviour_setting_events(
+                    conn,
+                    request.form.getlist(SETTING_EVENT_OPTION_FIELD),
+                    {
+                        field_name: request.form.getlist(field_name)
+                        for field_name in setting_event_other_fields
+                        if field_name in request.form
+                    },
+                    finalized=(action == "complete"),
+                    allowed_inactive_option_ids={
+                        selection["setting_event_option_id"]
+                        for selection in existing_setting_event_selections
+                    },
+                )
+            elif action == "complete":
+                existing_other_values = {
+                    setting_event_other_field_name(selection["code"]): [
+                        selection["other_text"] or ""
+                    ]
+                    for selection in existing_setting_event_selections
+                    if selection["option_kind"] == "OTHER"
+                }
+                setting_event_values = validate_behaviour_setting_events(
+                    conn,
+                    [
+                        str(selection["setting_event_option_id"])
+                        for selection in existing_setting_event_selections
+                    ],
+                    existing_other_values,
+                    finalized=True,
+                    allowed_inactive_option_ids={
+                        selection["setting_event_option_id"]
+                        for selection in existing_setting_event_selections
+                    },
+                )
+            else:
+                # The pre-Setting-Events form has no field to submit. Preserve
+                # existing selections until the new controls are rendered.
+                setting_event_values = {
+                    "selections": tuple({
+                        "setting_event_option_id": selection["setting_event_option_id"],
+                        "other_text": selection["other_text"],
+                    } for selection in existing_setting_event_selections),
+                }
         else:
             abc_values = None
+            setting_event_values = None
             flags = {}
             for field in BEHAVIOUR_CATEGORY_FIELDS:
                 values = request.form.getlist(field)
@@ -7672,22 +8072,44 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 )
             candidate = dict(current)
             candidate.update(mutable_values)
+            current_setting_event_selections = (
+                load_behaviour_setting_event_selections(conn, occurrence_id)
+                if current["record_format"] == "ABC" else []
+            )
+            setting_events_changed = (
+                _setting_event_selection_signature(
+                    current_setting_event_selections
+                )
+                != _setting_event_selection_signature(
+                    setting_event_values["selections"]
+                )
+            ) if current["record_format"] == "ABC" else False
             if action == "complete":
                 # Completion validates the submitted final values before any write.
                 validate_behaviour_occurrence_completion(candidate)
-            changes = {
+            field_changes = {
                 field: {"old": current[field], "new": value}
                 for field, value in mutable_values.items()
                 if current[field] != value
             }
-            if action == "save" and not changes:
+            audit_changes = dict(field_changes)
+            if setting_events_changed:
+                audit_changes["setting_events"] = {
+                    "old": _setting_event_selection_signature(
+                        current_setting_event_selections
+                    ),
+                    "new": _setting_event_selection_signature(
+                        setting_event_values["selections"]
+                    ),
+                }
+            if action == "save" and not field_changes and not setting_events_changed:
                 conn.rollback()
                 return "No Behaviour changes were submitted.", 400
 
             completed_at_utc = None
             resulting_version = expected_version + 1
-            assignments = list(f"{field} = ?" for field in changes)
-            parameters = [change["new"] for change in changes.values()]
+            assignments = list(f"{field} = ?" for field in field_changes)
+            parameters = [change["new"] for change in field_changes.values()]
             if action == "complete":
                 completed_at_utc = serialize_behaviour_utc(
                     datetime.now(timezone.utc).replace(microsecond=0)
@@ -7712,9 +8134,13 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 raise BehaviourConcurrencyConflictError(
                     "This Behaviour record was changed elsewhere. Reload before saving."
                 )
+            if current["record_format"] == "ABC" and setting_events_changed:
+                replace_behaviour_setting_event_selections(
+                    conn, occurrence_id, setting_event_values["selections"]
+                )
             change_text = "\n".join(
                 f"{field}: {change['old']!r} -> {change['new']!r}"
-                for field, change in changes.items()
+                for field, change in audit_changes.items()
             ) or "None"
             if action == "complete":
                 log_activity(
@@ -7765,6 +8191,24 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
     except PermissionError:
         return "Access denied", 403
     except ValueError as error:
+        if request.method == "POST" and "values" in locals():
+            response = _render_behaviour_record(
+                conn,
+                occurrence["client_id"],
+                error=str(error),
+                values=values,
+                shift_context=True,
+                documentation_context=documentation_context,
+                form_action=url_for(
+                    "behaviour_occurrence_edit",
+                    shift_id=shift_id,
+                    occurrence_id=occurrence_id,
+                ),
+                edit_mode=True,
+                expected_version=occurrence["version_number"],
+                setting_event_options=setting_event_form_options,
+            )
+            return response, 400
         return str(error), 400
     finally:
         conn.close()
@@ -26068,6 +26512,13 @@ def behaviour_review_detail(occurrence_id):
             return "Behaviour occurrence not found", 404
 
         occurrence = dict(occurrence_row)
+        setting_event_selections = (
+            load_behaviour_setting_event_selections(conn, occurrence_id)
+            if occurrence["record_format"] == "ABC" else []
+        )
+        setting_event_groups = group_behaviour_setting_event_options(
+            setting_event_selections
+        )
         reviews = conn.execute("""
             SELECT ack.acknowledgement_id, ack.acknowledged_at,
                    ack.user_id, u.full_name AS reviewed_by
@@ -26133,6 +26584,7 @@ def behaviour_review_detail(occurrence_id):
         occurrence=occurrence,
         categories=_behaviour_categories_for_row(occurrence),
         abc_sections=_behaviour_week_abc_sections(occurrence),
+        setting_event_groups=setting_event_groups,
         reviews=reviews,
         management_notes=management_notes,
         current_user_reviewed=any(

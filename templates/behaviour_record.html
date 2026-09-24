@@ -13,6 +13,50 @@
 <label>Occurrence date and time (Vancouver)</label><input type="datetime-local" name="occurrence_local" value="{{ values.get('occurrence_local', now_local) }}" required>
 
 {% if record_format == 'ABC' %}
+<style>
+.setting-events-section { margin: 1.25rem 0; }
+.setting-events-section > p { color: #555; max-width: 60rem; }
+.setting-event-category { margin: 1rem 0; padding: .75rem 1rem; }
+.setting-event-category legend { font-weight: 600; }
+.setting-event-special { background: #f7f7f7; border-color: #bbb; }
+.setting-event-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: .25rem 1rem; margin: .5rem 0; }
+.setting-event-option { margin: 0 !important; width: auto !important; }
+.setting-event-option input { flex: 0 0 auto; }
+.setting-event-inactive { color: #765; font-size: .9em; }
+.setting-event-other { margin: .25rem 0 .75rem 1.75rem; max-width: 36rem; }
+.setting-event-other label { display: block; font-size: .9em; }
+.setting-event-other textarea { width: 100%; min-height: 3.5rem; }
+@media (max-width: 42rem) {
+    .setting-event-options { grid-template-columns: 1fr; }
+    .setting-event-other { margin-left: .5rem; }
+}
+</style>
+<fieldset class="setting-events-section">
+<legend>Setting Events</legend>
+<p>Setting Events are conditions that may increase the likelihood of Behaviour and may have occurred earlier. Select only what was actually observed or reliably known. A Setting Event does not prove the cause of Behaviour. The Antecedent is what happened immediately before the Behaviour.</p>
+<input type="hidden" name="{{ setting_event_presence_field }}" value="1">
+{% for group in setting_event_option_groups %}
+<fieldset class="setting-event-category{% if group.category == 'SPECIAL' %} setting-event-special{% endif %}">
+<legend>{{ group.label }}</legend>
+<div class="checkbox-group setting-event-options">
+{% for option in group.options %}
+{% set option_input_id = 'setting-event-' ~ option.setting_event_option_id %}
+<label class="checkbox-option setting-event-option{% if group.category == 'SPECIAL' %} setting-event-special-option{% endif %}" for="{{ option_input_id }}">
+<input id="{{ option_input_id }}" type="checkbox" name="{{ setting_event_option_field }}" value="{{ option.setting_event_option_id }}"{% if option.setting_event_option_id|string in values.get(setting_event_option_field, []) %} checked{% endif %}>
+<span>{{ option.label }}{% if not option.active %} <span class="setting-event-inactive">(inactive historical option)</span>{% endif %}</span>
+</label>
+{% if option.option_kind == 'OTHER' %}
+<div class="setting-event-other">
+<label for="{{ option_input_id }}-other">Details for {{ option.label }} (required when selected)</label>
+<textarea id="{{ option_input_id }}-other" name="{{ setting_event_other_field_name(option.code) }}" maxlength="1000">{{ values.get(setting_event_other_field_name(option.code), '') }}</textarea>
+</div>
+{% endif %}
+{% endfor %}
+</div>
+</fieldset>
+{% endfor %}
+</fieldset>
+
 <h3>Before the Behaviour (A)</h3><p>What happened before the behaviour?</p><div class="checkbox-group">{% for field in abc_antecedent_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ abc_field_labels[field] }}</span></label>{% endfor %}</div>
 <label>Other details</label><textarea name="antecedent_other_details">{{ values.get('antecedent_other_details', '') }}</textarea>
 

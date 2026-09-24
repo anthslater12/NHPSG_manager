@@ -10,6 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import add_behaviour_occurrences_table as migration
+import add_behaviour_setting_events_tables as setting_event_migration
 import app
 
 
@@ -38,7 +39,9 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         INSERT INTO shifts VALUES (10,1,'Open'), (11,1,'Closed'), (12,1,'Cancelled'), (20,2,'Open');
         INSERT INTO shift_staff VALUES (1,10,1,1), (2,20,1,1);
         """)
-        migration.migrate(conn); conn.close()
+        migration.migrate(conn)
+        setting_event_migration.migrate(conn)
+        conn.close()
         self.client = app.app.test_client()
 
     def tearDown(self):
@@ -66,9 +69,16 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         conn.close(); return result
 
     def abc_payload(self, token="Q" * 43, **extra):
+        conn = sqlite3.connect(self.path)
+        setting_event_option_id = conn.execute(
+            "SELECT setting_event_option_id FROM "
+            "behaviour_setting_event_options WHERE code = 'HUNGER'"
+        ).fetchone()[0]
+        conn.close()
         value = {
             "occurrence_local": (datetime.now(app.VANCOUVER_TIMEZONE) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M"),
             "submission_token": token, "record_format": "ABC",
+            "setting_event_option_ids": str(setting_event_option_id),
             "antecedent_transition_activities": "1",
             "behaviour_physical_aggression": "1",
             "response_blocked_behaviour": "1",
