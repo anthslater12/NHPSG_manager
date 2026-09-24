@@ -60,6 +60,27 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
     def restore_application_state(self):
         app.DB_NAME = self.original_database_name
 
+    def manual_single_schedule_resolution(self, shift_type="Day"):
+        return {
+            "state": app.SHIFT_RESOLUTION_SCHEDULED_SINGLE,
+            "candidates": [{
+                "schedule_shift_id": 1,
+                "schedule_staff_id": 1,
+                "client_id": 1,
+                "user_id": 2,
+                "shift_date": "2026-08-03",
+                "shift_type": shift_type,
+                "planned_start_time": "07:00",
+                "planned_end_time": "15:00",
+                "parent_planned_start_time": "07:00",
+                "parent_planned_end_time": "15:00",
+                "worker_specific_times_used": False,
+                "source": "scheduled",
+            }],
+            "operational_date": "2026-08-03",
+            "suggested_shift_type": None,
+        }
+
     def create_database(self):
         conn = sqlite3.connect(self.database_path)
 
@@ -1677,8 +1698,8 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         client = app.app.test_client()
 
         with client.session_transaction() as session_data:
-            session_data["user_id"] = 3
-            session_data["role"] = "Behaviour Consultant"
+            session_data["user_id"] = 1
+            session_data["role"] = "Admin"
         with mock.patch.object(
             app,
             "_assign_staff_notice_delivery",
@@ -1727,14 +1748,18 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             session_data["user_id"] = 2
             session_data["role"] = "Support Worker"
 
-        with mock.patch.object(app, "get_db", return_value=tracking):
-            with mock.patch.object(
-                app,
-                "get_application_now_utc",
-                return_value=datetime(
-                    2026, 8, 3, 15, 0, tzinfo=timezone.utc
-                )
-            ):
+        with mock.patch.object(app, "get_db", return_value=tracking), \
+             mock.patch.object(
+                 app,
+                 "get_application_now_utc",
+                 return_value=datetime(
+                     2026, 8, 3, 15, 0, tzinfo=timezone.utc
+                 )
+             ), mock.patch.object(
+                 app,
+                 "resolve_shift_sign_on_candidates",
+                 return_value=self.manual_single_schedule_resolution()
+             ):
                 response = client.post("/shift/sign-on", data={
                     "shift_date": "2026-08-03",
                     "shift_type": "Day",
@@ -1761,7 +1786,12 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             session_data["user_id"] = 2
             session_data["role"] = "Support Worker"
 
-        with mock.patch.object(app, "get_db", return_value=tracking):
+        with mock.patch.object(app, "get_db", return_value=tracking), \
+             mock.patch.object(
+                 app,
+                 "resolve_shift_sign_on_candidates",
+                 return_value=self.manual_single_schedule_resolution()
+             ):
             with mock.patch.object(
                 app,
                 "reconcile_staff_notice_shift_sign_on",
@@ -1784,8 +1814,8 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
         tracking = ReconciliationTrackingConnection(self.open_database())
         client = app.app.test_client()
         with client.session_transaction() as session_data:
-            session_data["user_id"] = 2
-            session_data["role"] = "Support Worker"
+            session_data["user_id"] = 1
+            session_data["role"] = "Admin"
 
         with mock.patch.object(app, "get_db", return_value=tracking):
             response = client.post("/shift/sign-on", data={
@@ -1814,7 +1844,31 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
     def test_auto_sign_on_without_notice_commits_one_owned_connection(self):
         tracking = ReconciliationTrackingConnection(self.open_database())
 
-        with mock.patch.object(app, "get_db", return_value=tracking):
+        resolution = {
+            "state": app.SHIFT_RESOLUTION_SCHEDULED_SINGLE,
+            "candidates": [{
+                "schedule_shift_id": 1,
+                "schedule_staff_id": 1,
+                "client_id": 1,
+                "user_id": 2,
+                "shift_date": "2026-08-03",
+                "shift_type": "Day",
+                "planned_start_time": "07:00",
+                "planned_end_time": "15:00",
+                "parent_planned_start_time": "07:00",
+                "parent_planned_end_time": "15:00",
+                "worker_specific_times_used": False,
+                "source": "scheduled",
+            }],
+            "operational_date": "2026-08-03",
+            "suggested_shift_type": None,
+        }
+        with mock.patch.object(app, "get_db", return_value=tracking), \
+             mock.patch.object(
+                 app,
+                 "resolve_shift_sign_on_candidates",
+                 return_value=resolution
+             ):
             shift_id, checklist_completed = app.auto_sign_on_user(2)
 
         self.assertIsInstance(shift_id, int)
@@ -1847,9 +1901,31 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             conn.close()
 
         reconciliation = mock.Mock()
+        resolution = {
+            "state": app.SHIFT_RESOLUTION_SCHEDULED_SINGLE,
+            "candidates": [{
+                "schedule_shift_id": 1,
+                "schedule_staff_id": 1,
+                "client_id": 7,
+                "user_id": 2,
+                "shift_date": "2026-08-03",
+                "shift_type": "Day",
+                "planned_start_time": "07:00",
+                "planned_end_time": "15:00",
+                "parent_planned_start_time": "07:00",
+                "parent_planned_end_time": "15:00",
+                "worker_specific_times_used": False,
+                "source": "scheduled",
+            }],
+            "operational_date": "2026-08-03",
+            "suggested_shift_type": None,
+        }
         with mock.patch.object(app, "reconcile_staff_notice_shift_sign_on", reconciliation), \
-             mock.patch.object(app, "get_current_shift_date", return_value=datetime(2026, 8, 3).date()), \
-             mock.patch.object(app, "get_current_shift_type", return_value="Day"):
+             mock.patch.object(
+                 app,
+                 "resolve_shift_sign_on_candidates",
+                 return_value=resolution
+             ):
             shift_id, checklist_completed = app.auto_sign_on_user(2)
 
         self.assertEqual(checklist_completed, 0)
@@ -1900,10 +1976,33 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
             session_data["user_id"] = 2
             session_data["role"] = "Support Worker"
 
+        resolution = {
+            "state": app.SHIFT_RESOLUTION_SCHEDULED_SINGLE,
+            "candidates": [{
+                "schedule_shift_id": 1,
+                "schedule_staff_id": 1,
+                "client_id": 1,
+                "user_id": 2,
+                "shift_date": "2026-08-03",
+                "shift_type": "Day",
+                "planned_start_time": "07:00",
+                "planned_end_time": "15:00",
+                "parent_planned_start_time": "07:00",
+                "parent_planned_end_time": "15:00",
+                "worker_specific_times_used": False,
+                "source": "scheduled",
+            }],
+            "operational_date": "2026-08-03",
+            "suggested_shift_type": None,
+        }
         with mock.patch.object(
             app,
             "reconcile_staff_notice_shift_sign_on",
             side_effect=RuntimeError("controlled failure")
+        ), mock.patch.object(
+            app,
+            "resolve_shift_sign_on_candidates",
+            return_value=resolution
         ):
             response = client.get("/dashboard")
 
@@ -2601,6 +2700,10 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 0,
                 tzinfo=timezone.utc
             )
+        ), mock.patch.object(
+            app,
+            "resolve_shift_sign_on_candidates",
+            return_value=self.manual_single_schedule_resolution()
         ):
             response = client.post("/shift/sign-on", data={
                 "shift_date": "2026-08-03",
@@ -4908,7 +5011,7 @@ class StaffNoticeReconciliationTests(unittest.TestCase):
                 "2026-08-03",
                 "14:00",
                 "Reason.",
-                "16:00",
+                "02:00",
                 b"inconsistent"
             )
         )

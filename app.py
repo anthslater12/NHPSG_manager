@@ -471,6 +471,9 @@ def is_shift_activity_finalized(status):
 
 
 SCHEDULE_SHIFT_TYPES = ("Day", "Afternoon", "Overnight")
+SHIFT_RESOLUTION_SCHEDULED_SINGLE = "SCHEDULED_SINGLE"
+SHIFT_RESOLUTION_SCHEDULED_MULTIPLE = "SCHEDULED_MULTIPLE"
+SHIFT_RESOLUTION_UNSCHEDULED = "UNSCHEDULED"
 SCHEDULE_VIEW_ROLES = {"Admin", "Director", "Program Manager", "Support Worker"}
 SCHEDULE_MANAGEMENT_ROLES = {"Admin", "Director", "Program Manager"}
 
@@ -10685,6 +10688,15 @@ class StaffNoticeShiftSignOnError(RuntimeError):
     pass
 
 
+class ShiftSignOnConfirmationRequired(RuntimeError):
+    """Signal that a current worker sign-on needs an explicit choice."""
+
+    def __init__(self, resolution, client_id):
+        super().__init__("Shift confirmation is required.")
+        self.resolution = resolution
+        self.client_id = client_id
+
+
 def _is_valid_staff_notice_identifier(value):
     return type(value) is int and value > 0
 
@@ -16406,27 +16418,21 @@ def _shift_staff_recorded_start_at_utc(assignment):
         )
 
     shift_type = assignment["shift_type"]
-    start_hour = start_clock.hour
-    if shift_type == "Day":
-        valid_clock = 7 <= start_hour < 15
-    elif shift_type == "Afternoon":
-        valid_clock = 15 <= start_hour < 23
-    elif shift_type == "Overnight":
-        valid_clock = start_hour >= 23 or start_hour < 7
-        if start_hour < 7:
-            shift_date += timedelta(days=1)
-    else:
-        valid_clock = False
-
-    if not valid_clock:
+    if shift_type not in SCHEDULE_SHIFT_TYPES:
         raise ShiftStaffCompletionError(
-            "The recorded genuine start is inconsistent with the "
-            "shift type and requires repair."
+            "The recorded shift type is invalid and requires repair."
         )
+
+    start_local_date = shift_date
+    if (
+        shift_type == "Overnight"
+        and start_clock < datetime_time(7, 0)
+    ):
+        start_local_date += timedelta(days=1)
 
     try:
         start_local = _staff_notice_resolve_local_shift_datetime(
-            shift_date,
+            start_local_date,
             start_clock,
             "Recorded genuine shift start"
         )
@@ -16434,6 +16440,12 @@ def _shift_staff_recorded_start_at_utc(assignment):
         raise ShiftStaffCompletionError(
             f"{error} The assignment requires separate repair."
         ) from error
+
+    if get_current_shift_date(start_local) != shift_date:
+        raise ShiftStaffCompletionError(
+            "The recorded genuine start is inconsistent with the "
+            "shift's operational date and requires repair."
+        )
 
     return start_local.astimezone(timezone.utc)
 
@@ -20668,9 +20680,182 @@ def get_current_shift_date(current_datetime=None):
     return shift_date
 
 
+def _shift_sign_on_fallback_type(current_datetime):
+    """Suggest a shift type without treating the clock as authoritative."""
+    hour = current_datetime.hour
+
+    if 7 <= hour < 14:
+        return "Day"
+    if 14 <= hour < 23:
+        return "Afternoon"
+    return "Overnight"
+
+
+def _shift_sign_on_nonblank_time(value):
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _shift_sign_on_candidate_interval(
+    shift_date_value,
+    shift_type,
+    planned_start_time,
+    planned_end_time,
+):
+    """Return one safe Vancouver interval, or None for invalid schedule data."""
+    try:
+        shift_date = date.fromisoformat(shift_date_value)
+        start_clock = _parse_staff_notice_shift_clock(
+            planned_start_time,
+            "Planned shift start"
+        )
+        end_clock = _parse_staff_notice_shift_clock(
+            planned_end_time,
+            "Planned shift end"
+        )
+        if start_clock is None or end_clock is None:
+            return None
+
+        if shift_type != "Overnight" and end_clock <= start_clock:
+            return None
+
+        end_date = shift_date
+        if shift_type == "Overnight" and end_clock <= start_clock:
+            end_date += timedelta(days=1)
+
+        start_local = _staff_notice_resolve_local_shift_datetime(
+            shift_date,
+            start_clock,
+            "Planned shift start"
+        )
+        end_local = _staff_notice_resolve_local_shift_datetime(
+            end_date,
+            end_clock,
+            "Planned shift end"
+        )
+    except (TypeError, ValueError):
+        return None
+
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+    if end_utc <= start_utc:
+        return None
+    return start_utc, end_utc
+
+
+def resolve_shift_sign_on_candidates(conn, user_id, client_id, current_utc):
+    """Resolve published schedule candidates without creating sign-on rows.
+
+    The returned state distinguishes one scheduled candidate, overlapping
+    scheduled candidates, and an unscheduled clock suggestion.  This helper
+    deliberately performs no authorization or persistence; its caller remains
+    responsible for both.
+    """
+    if (
+        not isinstance(current_utc, datetime)
+        or current_utc.tzinfo is None
+        or current_utc.utcoffset() is None
+    ):
+        raise ValueError("current_utc must include a UTC offset.")
+
+    current_utc = current_utc.astimezone(timezone.utc)
+    current_local = current_utc.astimezone(VANCOUVER_TIMEZONE)
+    operational_date = get_current_shift_date(current_local)
+
+    rows = conn.execute("""
+        SELECT
+            ss.schedule_staff_id,
+            ss.user_id,
+            ss.planned_start_time AS worker_planned_start_time,
+            ss.planned_end_time AS worker_planned_end_time,
+            s.schedule_shift_id,
+            s.client_id,
+            s.shift_date,
+            s.shift_type,
+            s.planned_start_time AS parent_planned_start_time,
+            s.planned_end_time AS parent_planned_end_time
+        FROM schedule_shifts s
+        JOIN schedule_staff ss
+            ON ss.schedule_shift_id = s.schedule_shift_id
+        WHERE s.status = 'Published'
+          AND s.client_id = ?
+          AND ss.user_id = ?
+          AND s.shift_date = ?
+        ORDER BY s.schedule_shift_id, ss.schedule_staff_id
+    """, (
+        client_id,
+        user_id,
+        operational_date.isoformat(),
+    )).fetchall()
+
+    candidates = []
+    for row in rows:
+        worker_start = _shift_sign_on_nonblank_time(
+            row["worker_planned_start_time"]
+        )
+        worker_end = _shift_sign_on_nonblank_time(
+            row["worker_planned_end_time"]
+        )
+        parent_start = _shift_sign_on_nonblank_time(
+            row["parent_planned_start_time"]
+        )
+        parent_end = _shift_sign_on_nonblank_time(
+            row["parent_planned_end_time"]
+        )
+        effective_start = worker_start or parent_start
+        effective_end = worker_end or parent_end
+        interval = _shift_sign_on_candidate_interval(
+            row["shift_date"],
+            row["shift_type"],
+            effective_start,
+            effective_end,
+        )
+        if interval is None:
+            continue
+
+        start_utc, end_utc = interval
+        if not (start_utc <= current_utc < end_utc):
+            continue
+
+        candidates.append({
+            "schedule_shift_id": row["schedule_shift_id"],
+            "schedule_staff_id": row["schedule_staff_id"],
+            "client_id": row["client_id"],
+            "user_id": row["user_id"],
+            "shift_date": row["shift_date"],
+            "shift_type": row["shift_type"],
+            "planned_start_time": effective_start,
+            "planned_end_time": effective_end,
+            "parent_planned_start_time": parent_start,
+            "parent_planned_end_time": parent_end,
+            "worker_specific_times_used": bool(
+                worker_start or worker_end
+            ),
+            "source": "scheduled",
+        })
+
+    if len(candidates) == 1:
+        state = SHIFT_RESOLUTION_SCHEDULED_SINGLE
+        suggested_shift_type = None
+    elif candidates:
+        state = SHIFT_RESOLUTION_SCHEDULED_MULTIPLE
+        suggested_shift_type = None
+    else:
+        state = SHIFT_RESOLUTION_UNSCHEDULED
+        suggested_shift_type = _shift_sign_on_fallback_type(current_local)
+
+    return {
+        "state": state,
+        "candidates": candidates,
+        "operational_date": operational_date.isoformat(),
+        "suggested_shift_type": suggested_shift_type,
+    }
+
+
 def get_active_shift_staff():
-    current_datetime = datetime.now(VANCOUVER_TIMEZONE)
-    shift_type = get_current_shift_type(current_datetime)
+    current_utc = get_application_now_utc()
+    current_datetime = current_utc.astimezone(VANCOUVER_TIMEZONE)
     shift_date = get_current_shift_date(current_datetime).isoformat()
 
     conn = get_db()
@@ -20695,14 +20880,10 @@ def get_active_shift_staff():
         WHERE ss.active = 1
           AND s.status = 'Open'
           AND s.shift_date = ?
-          AND s.shift_type = ?
           AND u.role = 'Support Worker'
 
         ORDER BY ss.actual_start_time
-    """, (
-        shift_date,
-        shift_type
-    )).fetchall()
+    """, (shift_date,)).fetchall()
 
     conn.close()
 
@@ -21429,6 +21610,8 @@ def documentation_context():
                 new_shift_id, start_checklist_completed = auto_sign_on_user(
                     session["user_id"]
                 )
+            except ShiftSignOnConfirmationRequired:
+                return redirect(url_for("shift_sign_on_confirmation"))
             except StaffNoticeShiftSignOnError as error:
                 flash(str(error))
                 return redirect(url_for("dashboard"))
@@ -21647,6 +21830,8 @@ def dashboard():
         shift_id, start_checklist_completed = auto_sign_on_user(
             current_user["user_id"]
         )
+    except ShiftSignOnConfirmationRequired:
+        return redirect(url_for("shift_sign_on_confirmation"))
     except StaffNoticeShiftSignOnError as error:
         return str(error), 503
 
@@ -22370,11 +22555,136 @@ def _find_cancelled_matching_shift(conn, client_id, shift_date, shift_type):
     """, (client_id, shift_date, shift_type)).fetchone()
 
 
+def _get_sole_active_sign_on_client(conn):
+    active_clients = conn.execute("""
+        SELECT client_id, client_name
+        FROM clients
+        WHERE active = 1
+        ORDER BY client_id
+    """).fetchall()
+    if len(active_clients) != 1:
+        raise RuntimeError(
+            "Shift sign-on requires exactly one active client."
+        )
+    return active_clients[0]
+
+
+def _persist_shift_sign_on(
+    conn,
+    user_id,
+    client_id,
+    shift_date,
+    shift_type,
+    actual_start_time,
+    current_utc,
+    shared_scheduled_start_time=None,
+    shared_scheduled_end_time=None,
+    activity_type="auto_sign_on",
+    activity_summary=None,
+):
+    """Persist one already-resolved sign-on in the caller's transaction."""
+    shift = conn.execute("""
+        SELECT shift_id
+        FROM shifts
+        WHERE client_id = ?
+          AND shift_date = ?
+          AND shift_type = ?
+          AND status = 'Open'
+    """, (client_id, shift_date, shift_type)).fetchone()
+
+    if shift is None:
+        if _find_cancelled_matching_shift(
+            conn,
+            client_id,
+            shift_date,
+            shift_type
+        ) is not None:
+            raise ShiftCancellationConflictError(
+                "This shift was cancelled. A replacement cannot be "
+                "created through sign-on."
+            )
+        cur = conn.execute("""
+            INSERT INTO shifts
+            (client_id, shift_date, shift_type, status,
+             scheduled_start_time, scheduled_end_time)
+            VALUES (?, ?, ?, 'Open', ?, ?)
+        """, (
+            client_id,
+            shift_date,
+            shift_type,
+            shared_scheduled_start_time,
+            shared_scheduled_end_time,
+        ))
+        shift_id = cur.lastrowid
+    else:
+        shift_id = shift["shift_id"]
+
+    existing = conn.execute("""
+        SELECT shift_staff_id, start_checklist_completed
+        FROM shift_staff
+        WHERE shift_id = ?
+          AND user_id = ?
+          AND active = 1
+    """, (shift_id, user_id)).fetchone()
+
+    if existing is not None:
+        return shift_id, existing["start_checklist_completed"]
+
+    active_other = conn.execute("""
+        SELECT ss.shift_staff_id
+        FROM shift_staff ss
+        JOIN shifts s
+            ON s.shift_id = ss.shift_id
+        WHERE ss.user_id = ?
+          AND ss.active = 1
+          AND ss.shift_id <> ?
+          AND s.status = 'Open'
+        LIMIT 1
+    """, (user_id, shift_id)).fetchone()
+    if active_other is not None:
+        raise StaffNoticeShiftSignOnError(
+            "You are already signed onto another active shift."
+        )
+
+    cur = conn.execute("""
+        INSERT INTO shift_staff
+        (shift_id, user_id, actual_start_time, active)
+        VALUES (?, ?, ?, 1)
+    """, (
+        shift_id,
+        user_id,
+        actual_start_time,
+    ))
+
+    shift_staff_id = cur.lastrowid
+    reconcile_staff_notice_shift_sign_on(
+        conn,
+        shift_id,
+        user_id,
+        current_utc
+    )
+    log_activity(
+        conn,
+        activity_class="SHIFT",
+        activity_type=activity_type,
+        summary=(
+            activity_summary
+            or f"User automatically signed onto {shift_type} shift"
+        ),
+        user_id=user_id,
+        client_id=client_id,
+        shift_id=shift_id,
+        related_table="shift_staff",
+        related_id=shift_staff_id,
+        success=1
+    )
+    return shift_id, 0
+
+
 def auto_sign_on_user(user_id):
-    current_datetime = datetime.now(VANCOUVER_TIMEZONE)
-    shift_type = get_current_shift_type(current_datetime)
-    shift_date = get_current_shift_date(current_datetime).isoformat()
-    actual_start_time = current_datetime.strftime("%H:%M")
+    current_utc = get_application_now_utc()
+    current_local = current_utc.astimezone(VANCOUVER_TIMEZONE)
+    actual_start_time = current_local.strftime("%H:%M")
 
     conn = get_db()
 
@@ -22385,92 +22695,41 @@ def auto_sign_on_user(user_id):
             raise PermissionError(
                 "This role cannot automatically sign on to a shift."
             )
-        active_clients = [dict(row) for row in conn.execute("""
-            SELECT client_id
-            FROM clients
-            WHERE active = 1
-            ORDER BY client_id
-        """).fetchall()]
-        if len(active_clients) != 1:
-            raise RuntimeError(
-                "Automatic sign-on requires exactly one active client."
+        client = _get_sole_active_sign_on_client(conn)
+        resolution = resolve_shift_sign_on_candidates(
+            conn,
+            user_id,
+            client["client_id"],
+            current_utc,
+        )
+        if resolution["state"] != SHIFT_RESOLUTION_SCHEDULED_SINGLE:
+            raise ShiftSignOnConfirmationRequired(
+                resolution,
+                client["client_id"],
             )
-        client_id = active_clients[0]["client_id"]
-        shift = conn.execute("""
-            SELECT shift_id
-            FROM shifts
-            WHERE client_id = ?
-              AND shift_date = ?
-              AND shift_type = ?
-              AND status = 'Open'
-        """, (client_id, shift_date, shift_type)).fetchone()
 
-        if shift is None:
-            if _find_cancelled_matching_shift(
-                conn,
-                client_id,
-                shift_date,
-                shift_type
-            ) is not None:
-                raise ShiftCancellationConflictError(
-                    "This shift was cancelled. A replacement cannot be "
-                    "created through sign-on."
-                )
-            cur = conn.execute("""
-                INSERT INTO shifts
-                (client_id, shift_date, shift_type, status)
-                VALUES (?, ?, ?, 'Open')
-            """, (client_id, shift_date, shift_type))
-
-            shift_id = cur.lastrowid
-        else:
-            shift_id = shift["shift_id"]
-
-        existing = conn.execute("""
-            SELECT shift_staff_id, start_checklist_completed
-            FROM shift_staff
-            WHERE shift_id = ?
-              AND user_id = ?
-              AND active = 1
-        """, (shift_id, user_id)).fetchone()
-
-        if existing is None:
-            cur = conn.execute("""
-                INSERT INTO shift_staff
-                (shift_id, user_id, actual_start_time, active)
-                VALUES (?, ?, ?, 1)
-            """, (
-                shift_id,
-                user_id,
-                actual_start_time
-            ))
-
-            shift_staff_id = cur.lastrowid
-            start_checklist_completed = 0
-
-            reconcile_staff_notice_shift_sign_on(
-                conn,
-                shift_id,
-                user_id,
-                current_datetime.astimezone(timezone.utc)
-            )
-            log_activity(
-                conn,
-                activity_class="SHIFT",
-                activity_type="auto_sign_on",
-                summary=f"User automatically signed onto {shift_type} shift",
-                user_id=user_id,
-                client_id=client_id,
-                shift_id=shift_id,
-                related_table="shift_staff",
-                related_id=shift_staff_id,
-                success=1
-            )
-        else:
-            shift_staff_id = existing["shift_staff_id"]
-            start_checklist_completed = existing["start_checklist_completed"]
+        candidate = resolution["candidates"][0]
+        shift_id, start_checklist_completed = _persist_shift_sign_on(
+            conn,
+            user_id,
+            client["client_id"],
+            candidate["shift_date"],
+            candidate["shift_type"],
+            actual_start_time,
+            current_utc,
+            shared_scheduled_start_time=(
+                candidate.get("parent_planned_start_time")
+            ),
+            shared_scheduled_end_time=(
+                candidate.get("parent_planned_end_time")
+            ),
+        )
 
         conn.commit()
+    except ShiftSignOnConfirmationRequired:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     except Exception as error:
         if conn.in_transaction:
             conn.rollback()
@@ -22482,6 +22741,139 @@ def auto_sign_on_user(user_id):
 
     return shift_id, start_checklist_completed
 
+
+@app.route("/shift/sign-on/confirm", methods=["GET", "POST"])
+def shift_sign_on_confirmation():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    resolution = None
+    client = None
+    error = None
+
+    def render_confirmation(status_code=200):
+        return render_template(
+            "shift_sign_on_confirmation.html",
+            client=client,
+            resolution=resolution,
+            shift_type_options=SCHEDULE_SHIFT_TYPES,
+            error=error,
+        ), status_code
+
+    try:
+        if request.method == "POST":
+            conn.execute("BEGIN IMMEDIATE")
+
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        if actor["role"] not in SHIFT_AUTO_SIGN_ON_ROLES:
+            return "Access denied", 403
+
+        client = _get_sole_active_sign_on_client(conn)
+        current_utc = get_application_now_utc()
+        resolution = resolve_shift_sign_on_candidates(
+            conn,
+            actor["user_id"],
+            client["client_id"],
+            current_utc,
+        )
+
+        if request.method == "GET":
+            if resolution["state"] == SHIFT_RESOLUTION_SCHEDULED_SINGLE:
+                return redirect(url_for("dashboard"))
+            return render_confirmation()
+
+        selected_candidate = None
+        if resolution["state"] == SHIFT_RESOLUTION_SCHEDULED_SINGLE:
+            selected_candidate = resolution["candidates"][0]
+        elif resolution["state"] == SHIFT_RESOLUTION_SCHEDULED_MULTIPLE:
+            requested_schedule_shift_id = request.form.get(
+                "schedule_shift_id",
+                type=int,
+            )
+            selected_candidate = next(
+                (
+                    candidate
+                    for candidate in resolution["candidates"]
+                    if candidate["schedule_shift_id"] == requested_schedule_shift_id
+                ),
+                None,
+            )
+            if selected_candidate is None:
+                error = (
+                    "That scheduled shift is no longer available. "
+                    "Please choose a current shift."
+                )
+                conn.rollback()
+                return render_confirmation(409)
+
+        if selected_candidate is not None:
+            shift_date = selected_candidate["shift_date"]
+            shift_type = selected_candidate["shift_type"]
+            scheduled_start_time = selected_candidate.get(
+                "parent_planned_start_time"
+            )
+            scheduled_end_time = selected_candidate.get(
+                "parent_planned_end_time"
+            )
+        else:
+            shift_type = (request.form.get("shift_type") or "").strip()
+            if (
+                resolution["state"] != SHIFT_RESOLUTION_UNSCHEDULED
+                or shift_type not in SCHEDULE_SHIFT_TYPES
+            ):
+                error = "Select one of the available shifts."
+                conn.rollback()
+                return render_confirmation(400)
+            shift_date = resolution["operational_date"]
+            scheduled_start_time = None
+            scheduled_end_time = None
+
+        current_local = current_utc.astimezone(VANCOUVER_TIMEZONE)
+        shift_id, start_checklist_completed = _persist_shift_sign_on(
+            conn,
+            actor["user_id"],
+            client["client_id"],
+            shift_date,
+            shift_type,
+            current_local.strftime("%H:%M"),
+            current_utc,
+            shared_scheduled_start_time=scheduled_start_time,
+            shared_scheduled_end_time=scheduled_end_time,
+        )
+        conn.commit()
+
+        _store_documentation_shift_id(shift_id)
+        if not start_checklist_completed:
+            return redirect(url_for("start_checklist", shift_id=shift_id))
+        return redirect(url_for("shift_dashboard", shift_id=shift_id))
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except ShiftCancellationConflictError as caught_error:
+        if conn.in_transaction:
+            conn.rollback()
+        error = str(caught_error)
+        return render_confirmation(409)
+    except StaffNoticeShiftSignOnError:
+        if conn.in_transaction:
+            conn.rollback()
+        error = "Shift sign-on could not be completed. Please try again."
+        return render_confirmation(503)
+    except RuntimeError as caught_error:
+        if conn.in_transaction:
+            conn.rollback()
+        return str(caught_error), 503
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        error = "Shift sign-on could not be completed. Please try again."
+        return render_confirmation(503)
+    finally:
+        conn.close()
+
+
 @app.route("/shift/sign-on", methods=["GET", "POST"])
 def shift_sign_on():
     if "user_id" not in session:
@@ -22490,86 +22882,104 @@ def shift_sign_on():
     error = None
 
     if request.method == "POST":
-        shift_date = request.form["shift_date"]
-        shift_type = request.form["shift_type"]
-        actual_start_time = request.form["actual_start_time"]
+        shift_date = (request.form.get("shift_date") or "").strip()
+        shift_type = (request.form.get("shift_type") or "").strip()
+        actual_start_time = (
+            request.form.get("actual_start_time") or ""
+        ).strip()
 
         if not shift_date or not shift_type or not actual_start_time:
             error = "Shift date, shift type, and actual start time are required."
         else:
+            try:
+                date.fromisoformat(shift_date)
+            except ValueError:
+                error = "A valid shift date is required."
+
+        if error is None:
             conn = get_db()
 
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                actor = get_active_authenticated_user(
+                    conn,
+                    session["user_id"]
+                )
+                client = _get_sole_active_sign_on_client(conn)
+                current_utc = get_application_now_utc()
 
-                # Find an open shift for this date/type/client
-                shift = conn.execute("""
-                    SELECT shift_id
-                    FROM shifts
-                    WHERE client_id = 1
-                      AND shift_date = ?
-                      AND shift_type = ?
-                      AND status = 'Open'
-                """, (shift_date, shift_type)).fetchone()
+                is_current_worker_sign_on = (
+                    actor["role"] in SHIFT_AUTO_SIGN_ON_ROLES
+                )
+                is_historical_management_sign_on = (
+                    actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+                )
 
-                # If no open shift exists, create one
-                if shift is None:
-                    if _find_cancelled_matching_shift(
-                        conn,
-                        1,
-                        shift_date,
-                        shift_type
-                    ) is not None:
-                        raise ShiftCancellationConflictError(
-                            "This shift was cancelled. A replacement "
-                            "cannot be created through sign-on."
-                        )
-                    cur = conn.execute("""
-                        INSERT INTO shifts
-                        (client_id, shift_date, shift_type, status)
-                        VALUES (1, ?, ?, 'Open')
-                    """, (shift_date, shift_type))
-
-                    shift_id = cur.lastrowid
-                else:
-                    shift_id = shift["shift_id"]
-
-                # Check if this user is already signed on to this shift
-                existing = conn.execute("""
-                    SELECT shift_staff_id
-                    FROM shift_staff
-                    WHERE shift_id = ?
-                      AND user_id = ?
-                      AND active = 1
-                """, (shift_id, session["user_id"])).fetchone()
-
-                if existing:
-                    conn.rollback()
-                    return redirect(
-                        url_for("shift_dashboard", shift_id=shift_id)
+                if not (
+                    is_current_worker_sign_on
+                    or is_historical_management_sign_on
+                ):
+                    raise PermissionError(
+                        "This role cannot manually sign on to a shift."
                     )
 
-                # Sign user onto the shift
-                conn.execute("""
-                    INSERT INTO shift_staff
-                    (shift_id, user_id, actual_start_time, active)
-                    VALUES (?, ?, ?, 1)
-                """, (
-                    shift_id,
-                    session["user_id"],
-                    actual_start_time
-                ))
-                reconcile_staff_notice_shift_sign_on(
+                scheduled_start_time = None
+                scheduled_end_time = None
+                if is_current_worker_sign_on:
+                    resolution = resolve_shift_sign_on_candidates(
+                        conn,
+                        actor["user_id"],
+                        client["client_id"],
+                        current_utc,
+                    )
+                    if resolution["state"] != SHIFT_RESOLUTION_SCHEDULED_SINGLE:
+                        conn.rollback()
+                        return redirect(url_for("shift_sign_on_confirmation"))
+
+                    candidate = resolution["candidates"][0]
+                    shift_date = candidate["shift_date"]
+                    shift_type = candidate["shift_type"]
+                    scheduled_start_time = candidate.get(
+                        "parent_planned_start_time"
+                    )
+                    scheduled_end_time = candidate.get(
+                        "parent_planned_end_time"
+                    )
+                elif shift_type not in SCHEDULE_SHIFT_TYPES:
+                    raise ValueError("Select a valid shift type.")
+
+                shift_id, start_checklist_completed = _persist_shift_sign_on(
                     conn,
-                    shift_id,
-                    session["user_id"],
-                    get_application_now_utc()
+                    actor["user_id"],
+                    client["client_id"],
+                    shift_date,
+                    shift_type,
+                    actual_start_time,
+                    current_utc,
+                    shared_scheduled_start_time=scheduled_start_time,
+                    shared_scheduled_end_time=scheduled_end_time,
+                    activity_type="manual_sign_on",
+                    activity_summary=(
+                        f"User manually signed onto {shift_type} shift"
+                    ),
                 )
                 conn.commit()
-                return redirect(
-                    url_for("shift_dashboard", shift_id=shift_id)
-                )
+
+                _store_documentation_shift_id(shift_id)
+                if not start_checklist_completed:
+                    return redirect(
+                        url_for("start_checklist", shift_id=shift_id)
+                    )
+                return redirect(url_for("shift_dashboard", shift_id=shift_id))
+            except PermissionError:
+                if conn.in_transaction:
+                    conn.rollback()
+                return "Access denied", 403
             except ShiftCancellationConflictError as caught_error:
+                if conn.in_transaction:
+                    conn.rollback()
+                error = str(caught_error)
+            except ValueError as caught_error:
                 if conn.in_transaction:
                     conn.rollback()
                 error = str(caught_error)

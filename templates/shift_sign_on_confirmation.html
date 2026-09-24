@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<section class="card">
+    <h2>Which shift are you starting?</h2>
+
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <p>
+        Client: <strong>{{ client.client_name }}</strong><br>
+        Operational date: <strong>{{ resolution.operational_date }}</strong>
+    </p>
+
+    {% if resolution.state == "SCHEDULED_MULTIPLE" %}
+        <p>Select the scheduled shift you are starting.</p>
+        <form method="post">
+            {% for candidate in resolution.candidates %}
+                <label>
+                    <input
+                        type="radio"
+                        name="schedule_shift_id"
+                        value="{{ candidate.schedule_shift_id }}"
+                        required
+                    >
+                    {{ candidate.shift_type }} Shift
+                    ({{ candidate.planned_start_time }} - {{ candidate.planned_end_time }})
+                </label>
+                <br>
+            {% endfor %}
+            <br>
+            <button type="submit">Confirm Shift</button>
+        </form>
+    {% else %}
+        <p>
+            No published schedule is active for you right now. Select the
+            shift you are starting.
+        </p>
+        <form method="post">
+            {% for shift_type in shift_type_options %}
+                <label>
+                    <input
+                        type="radio"
+                        name="shift_type"
+                        value="{{ shift_type }}"
+                        {% if shift_type == resolution.suggested_shift_type %}checked{% endif %}
+                        required
+                    >
+                    {{ shift_type }} Shift
+                </label>
+                <br>
+            {% endfor %}
+            <br>
+            <button type="submit">Confirm Shift</button>
+        </form>
+    {% endif %}
+</section>
+
+{% endblock %}

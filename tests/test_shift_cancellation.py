@@ -647,12 +647,26 @@ class ShiftCancellationTests(unittest.TestCase):
         before = self.snapshot()
         with mock.patch.object(
             app,
-            "get_current_shift_date",
-            return_value=datetime(2026, 8, 10).date()
-        ), mock.patch.object(
-            app,
-            "get_current_shift_type",
-            return_value="Day"
+            "resolve_shift_sign_on_candidates",
+            return_value={
+                "state": app.SHIFT_RESOLUTION_SCHEDULED_SINGLE,
+                "candidates": [{
+                    "schedule_shift_id": 1,
+                    "schedule_staff_id": 1,
+                    "client_id": 1,
+                    "user_id": 4,
+                    "shift_date": "2026-08-10",
+                    "shift_type": "Day",
+                    "planned_start_time": "07:00",
+                    "planned_end_time": "15:00",
+                    "parent_planned_start_time": "07:00",
+                    "parent_planned_end_time": "15:00",
+                    "worker_specific_times_used": False,
+                    "source": "scheduled",
+                }],
+                "operational_date": "2026-08-10",
+                "suggested_shift_type": None,
+            }
         ):
             with self.assertRaises(app.StaffNoticeShiftSignOnError):
                 app.auto_sign_on_user(4)
@@ -662,14 +676,33 @@ class ShiftCancellationTests(unittest.TestCase):
         with client.session_transaction() as session_data:
             session_data["user_id"] = 4
             session_data["role"] = "Support Worker"
-        response = client.post(
-            "/shift/sign-on",
-            data={
-                "shift_date": "2026-08-10",
-                "shift_type": "Day",
-                "actual_start_time": "07:00"
-            }
-        )
+        with mock.patch.object(
+            app,
+            "resolve_shift_sign_on_candidates",
+            return_value={
+                "state": app.SHIFT_RESOLUTION_SCHEDULED_SINGLE,
+                "candidates": [{
+                    "schedule_shift_id": 1,
+                    "schedule_staff_id": 1,
+                    "client_id": 1,
+                    "user_id": 4,
+                    "shift_date": "2026-08-10",
+                    "shift_type": "Day",
+                    "parent_planned_start_time": "07:00",
+                    "parent_planned_end_time": "15:00",
+                }],
+                "operational_date": "2026-08-10",
+                "suggested_shift_type": None,
+            },
+        ):
+            response = client.post(
+                "/shift/sign-on",
+                data={
+                    "shift_date": "2026-08-10",
+                    "shift_type": "Day",
+                    "actual_start_time": "07:00"
+                }
+            )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"This shift was cancelled", response.data)
         self.assertEqual(self.snapshot(), before)
