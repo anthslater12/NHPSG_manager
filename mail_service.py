@@ -43,8 +43,8 @@ def _mail_configuration():
     }
 
 
-def send_email(to_address, subject, body):
-    """Send one plain-text email through the configured SMTP service."""
+def send_email(to_address, subject, body, html_body=None):
+    """Send one email with a plain-text body and optional HTML alternative."""
     recipient = (to_address or "").strip()
     subject = (subject or "").strip()
 
@@ -61,6 +61,8 @@ def send_email(to_address, subject, body):
     message["To"] = recipient
     message["Subject"] = subject
     message.set_content(body or "")
+    if html_body is not None:
+        message.add_alternative(html_body, subtype="html")
 
     with smtplib.SMTP(
         config["server"],

@@ -266,7 +266,7 @@ class GroceryListEmailSendTests(unittest.TestCase):
                 self.assertEqual(send_email.call_args.args[0], "contact@example.com")
                 self.assertEqual(
                     send_email.call_args.args[1],
-                    "Grocery List - Client A",
+                    "Grocery List",
                 )
 
     def test_non_managers_cannot_send_even_with_edit_share(self):
@@ -339,6 +339,14 @@ class GroceryListEmailSendTests(unittest.TestCase):
 
     def test_send_uses_server_side_subject_body_and_snapshot_content(self):
         list_id = self.create_list()
+        private_client_name = "PRIVATE CLIENT NAME 123"
+        conn = self.connect()
+        conn.execute(
+            "UPDATE clients SET client_name = ? WHERE client_id = 10",
+            (private_client_name,),
+        )
+        conn.commit()
+        conn.close()
         section_id = self.add_section(list_id, "Pantry")
         self.add_item(
             section_id,
@@ -361,12 +369,21 @@ class GroceryListEmailSendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         recipient, subject, body = send_email.call_args.args
         self.assertEqual(recipient, "contact@example.com")
-        self.assertEqual(subject, "Grocery List - Client A")
+        self.assertEqual(subject, "Grocery List")
+        self.assertNotIn(private_client_name, subject)
         self.assertIn("Original Item", body)
         self.assertIn("Original Stock", body)
         self.assertIn("Original Need", body)
         self.assertIn("Purchased", body)
+        self.assertNotIn(private_client_name, body)
+        html_body = send_email.call_args.kwargs["html_body"]
+        self.assertIn("Original Item", html_body)
+        self.assertIn("Original Stock", html_body)
+        self.assertIn("Original Need", html_body)
+        self.assertIn("Purchased", html_body)
+        self.assertNotIn(private_client_name, html_body)
         self.assertNotIn("Forged", subject + body + recipient)
+        self.assertNotIn("Forged", html_body)
 
     def test_current_edits_after_preview_do_not_change_sent_body(self):
         list_id = self.create_list()
@@ -393,11 +410,18 @@ class GroceryListEmailSendTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 302)
         body = send_email.call_args.args[2]
+        html_body = send_email.call_args.kwargs["html_body"]
         self.assertIn("Original Item", body)
         self.assertIn("Original Stock", body)
         self.assertIn("Original Need", body)
         self.assertNotIn("Changed Item", body)
         self.assertNotIn("Purchased", body)
+        self.assertIn("Original Item", html_body)
+        self.assertIn("Original Stock", html_body)
+        self.assertIn("Original Need", html_body)
+        self.assertNotIn("Changed Item", html_body)
+        self.assertNotIn(">Purchased</td>", html_body)
+        self.assertIn(">Not Purchased</td>", html_body)
 
     def test_all_current_recipients_are_used_after_recipient_changes(self):
         list_id = self.create_list()
@@ -492,7 +516,7 @@ class GroceryListEmailSendTests(unittest.TestCase):
             add_default=False,
         )
 
-        def send_side_effect(recipient, subject, body):
+        def send_side_effect(recipient, subject, body, html_body=None):
             if recipient == "first@example.com":
                 raise RuntimeError("SMTP failure")
 

@@ -102,6 +102,39 @@ class MailServiceTests(unittest.TestCase):
             "Your schedule is ready.",
         )
 
+    @patch("mail_service.smtplib.SMTP")
+    def test_send_email_adds_html_alternative_and_preserves_utf8(
+        self,
+        smtp_class,
+    ):
+        smtp = MagicMock()
+        smtp_class.return_value.__enter__.return_value = smtp
+
+        with patch.dict(
+            os.environ,
+            self.valid_environment(),
+            clear=True,
+        ):
+            mail_service.send_email(
+                "worker@example.com",
+                "Grocery List — Client É",
+                "Plain fallback — café",
+                html_body="<p>HTML — café</p>",
+            )
+
+        message = smtp.send_message.call_args.args[0]
+        self.assertTrue(message.is_multipart())
+        self.assertEqual(message.get_content_type(), "multipart/alternative")
+        parts = message.get_payload()
+        self.assertEqual(
+            [part.get_content_type() for part in parts],
+            ["text/plain", "text/html"],
+        )
+        self.assertEqual(parts[0].get_content().strip(), "Plain fallback — café")
+        self.assertEqual(parts[1].get_content().strip(), "<p>HTML — café</p>")
+        self.assertEqual(message["To"], "worker@example.com")
+        self.assertEqual(message["Subject"], "Grocery List — Client É")
+
 
 if __name__ == "__main__":
     unittest.main()

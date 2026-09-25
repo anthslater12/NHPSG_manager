@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Grocery List</title>
+</head>
+<body style="margin: 0; padding: 20px; color: #1f2933; background-color: #ffffff; font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.4;">
+    <h1 style="margin: 0 0 20px; color: #004b87; font-size: 24px;">
+        Grocery List
+    </h1>
+
+    {% if presentation["sections"] %}
+        {% for section in presentation["sections"] %}
+            <h2 style="margin: 20px 0 8px; color: #004b87; font-size: 18px;">
+                {{ section.name }}
+            </h2>
+            <table role="table" style="width: 100%; border-collapse: collapse; margin: 0 0 16px; font-family: Arial, Helvetica, sans-serif;">
+                <thead>
+                    <tr>
+                        <th scope="col" style="padding: 8px; border: 1px solid #cbd5e1; background-color: #004b87; color: #ffffff; text-align: left;">Item</th>
+                        <th scope="col" style="padding: 8px; border: 1px solid #cbd5e1; background-color: #004b87; color: #ffffff; text-align: left;">Stock</th>
+                        <th scope="col" style="padding: 8px; border: 1px solid #cbd5e1; background-color: #004b87; color: #ffffff; text-align: left;">Needed</th>
+                        <th scope="col" style="padding: 8px; border: 1px solid #cbd5e1; background-color: #004b87; color: #ffffff; text-align: left;">Purchased</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in section["items"] %}
+                        <tr{% if item.needs_purchase %} style="background-color: #fff8d6;"{% endif %}>
+                            <td style="padding: 8px; border: 1px solid #cbd5e1;">{{ item.item_name or '' }}</td>
+                            <td style="padding: 8px; border: 1px solid #cbd5e1;">{{ item.stock_text or '' }}</td>
+                            <td style="padding: 8px; border: 1px solid #cbd5e1;">{{ item.needed_text or '' }}</td>
+                            <td style="padding: 8px; border: 1px solid #cbd5e1;">{% if item.purchased %}Purchased{% else %}Not Purchased{% endif %}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endfor %}
+    {% else %}
+        <p>No sections have been added.</p>
+    {% endif %}
+</body>
+</html>

@@ -261,7 +261,7 @@ class GroceryListEmailPreviewTests(unittest.TestCase):
         response = self.client.post("/client/10/grocery-list/email-preview")
         body = response.data
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Grocery List - Client A", body)
+        self.assertIn(b"Grocery List Email Preview", body)
         self.assertIn(b"Jane Smith", body)
         self.assertIn(b"jane@example.com", body)
         self.assertIn(b"Mom", body)

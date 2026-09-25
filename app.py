@@ -35229,20 +35229,44 @@ def _grocery_list_section_redirect(client_id):
     return redirect(url_for("client_grocery_list", client_id=client_id))
 
 
-def _build_grocery_list_email_subject(client_name):
+def _build_grocery_list_email_subject():
     """Return the deterministic subject for a Grocery List email."""
-    return f"Grocery List - {client_name}"
+    return "Grocery List"
 
 
-def _render_grocery_list_email_body(client_name, sections):
+def _build_grocery_list_snapshot_presentation(
+    snapshot,
+    sections,
+):
+    """Build a renderer-neutral view of immutable Grocery List snapshot data."""
+    presentation_sections = []
+    for section in sections:
+        presentation_section = dict(section)
+        presentation_section["items"] = []
+        for item in section["items"]:
+            presentation_item = dict(item)
+            needed_text = presentation_item["needed_text"]
+            presentation_item["needs_purchase"] = bool(
+                needed_text and needed_text.strip()
+            )
+            presentation_section["items"].append(presentation_item)
+        presentation_sections.append(presentation_section)
+
+    return {
+        "snapshot": dict(snapshot) if snapshot is not None else {},
+        "sections": presentation_sections,
+    }
+
+
+def _render_grocery_list_email_body(presentation):
     """Render an immutable Grocery List snapshot as plain text."""
-    lines = ["Grocery List", client_name, ""]
+    lines = ["Grocery List", ""]
 
-    if not sections:
+    if not presentation["sections"]:
         lines.append("No sections have been added.")
         return "\n".join(lines) + "\n"
 
-    for section in sections:
+    for section in presentation["sections"]:
         lines.append(section["name"])
         items = section["items"]
         if not items:
@@ -35262,6 +35286,14 @@ def _render_grocery_list_email_body(client_name, sections):
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_grocery_list_email_html(presentation):
+    """Render immutable Grocery List snapshot data as escaped HTML."""
+    return render_template(
+        "grocery_list_email.html",
+        presentation=presentation,
+    )
 
 
 def _load_grocery_list_snapshot_sections(conn, snapshot_id):
@@ -35351,9 +35383,13 @@ def grocery_list_email_preview(client_id):
             raise sqlite3.Error("Created EMAIL snapshot could not be loaded.")
 
         sections = _load_grocery_list_snapshot_sections(conn, snapshot_id)
-
-        subject = _build_grocery_list_email_subject(client["client_name"])
-        body = _render_grocery_list_email_body(client["client_name"], sections)
+        presentation = _build_grocery_list_snapshot_presentation(
+            snapshot,
+            sections,
+        )
+        subject = _build_grocery_list_email_subject()
+        body = _render_grocery_list_email_body(presentation)
+        html_body = _render_grocery_list_email_html(presentation)
         conn.commit()
     except PermissionError:
         if conn.in_transaction:
@@ -35376,6 +35412,15 @@ def grocery_list_email_preview(client_id):
         )
         flash("The Grocery List email preview could not be prepared.")
         return _grocery_list_section_redirect(client_id)
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        app.logger.exception(
+            "Could not render Grocery List email preview for client %s",
+            client_id,
+        )
+        flash("The Grocery List email preview could not be prepared.")
+        return _grocery_list_section_redirect(client_id)
     finally:
         conn.close()
 
@@ -35387,6 +35432,7 @@ def grocery_list_email_preview(client_id):
         snapshot=snapshot,
         subject=subject,
         body=body,
+        html_body=html_body,
     )
 
 
@@ -35427,8 +35473,13 @@ def grocery_list_email_send(client_id, snapshot_id):
             return _grocery_list_section_redirect(client_id)
 
         sections = _load_grocery_list_snapshot_sections(conn, snapshot_id)
-        subject = _build_grocery_list_email_subject(client["client_name"])
-        body = _render_grocery_list_email_body(client["client_name"], sections)
+        presentation = _build_grocery_list_snapshot_presentation(
+            snapshot,
+            sections,
+        )
+        subject = _build_grocery_list_email_subject()
+        body = _render_grocery_list_email_body(presentation)
+        html_body = _render_grocery_list_email_html(presentation)
 
         sent_count = 0
         failed_count = 0
@@ -35438,6 +35489,7 @@ def grocery_list_email_send(client_id, snapshot_id):
                     recipient["email_address"],
                     subject,
                     body,
+                    html_body=html_body,
                 )
             except Exception:
                 failed_count += 1
@@ -35526,6 +35578,13 @@ def grocery_list_email_send(client_id, snapshot_id):
             client_id,
         )
         return "Database error", 503
+    except Exception:
+        app.logger.exception(
+            "Could not prepare Grocery List email snapshot %s for client %s",
+            snapshot_id,
+            client_id,
+        )
+        return "Grocery List email could not be prepared", 503
     finally:
         conn.close()
 
