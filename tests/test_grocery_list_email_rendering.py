@@ -95,6 +95,36 @@ class GroceryListEmailRenderingTests(unittest.TestCase):
         self.assertLess(html.index("First Section"), html.index("Second Section"))
         self.assertLess(html.index("Needed Item"), html.index("Later Item"))
 
+    def test_html_uses_constrained_container_and_shared_section_column_widths(self):
+        sections = [
+            {
+                "snapshot_section_id": 1,
+                "name": "First Section",
+                "display_order": 0,
+                "items": [],
+            },
+            {
+                "snapshot_section_id": 2,
+                "name": "Second Section",
+                "display_order": 1,
+                "items": [],
+            },
+        ]
+
+        _presentation, _text, html = self.render(sections)
+
+        self.assertIn('width="100%"', html)
+        self.assertIn("max-width: 960px;", html)
+        self.assertIn("margin: 0 auto;", html)
+        self.assertEqual(html.count('<col width="52%" style="width: 52%;">'), 2)
+        self.assertEqual(html.count('<col width="12%" style="width: 12%;">'), 2)
+        self.assertEqual(html.count('<col width="16%" style="width: 16%;">'), 2)
+        self.assertEqual(html.count('<col width="20%" style="width: 20%;">'), 2)
+        self.assertEqual(
+            52 + 12 + 16 + 20,
+            100,
+        )
+
     def test_html_escapes_all_user_entered_values(self):
         sections = [
             {
