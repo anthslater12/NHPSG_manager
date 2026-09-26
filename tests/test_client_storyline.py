@@ -172,17 +172,18 @@ class ClientStorylineTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when=None, user_id=1, details=None, event_datetime=None, related_table=None, related_id=None):
+    def add_event(self, event_type, summary, client_id=1, visible=1, success=1, when=None, user_id=1, details=None, event_datetime=None, related_table=None, related_id=None, shift_id=None):
         if when is None:
             when = f"{self.today} 10:00:00"
         conn = sqlite3.connect(self.path)
         conn.execute("""
             INSERT INTO activity_log
-            (activity_datetime, activity_type, user_id, client_id, summary, details,
-             success, storyline_visible, event_datetime, related_table, related_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (when, event_type, user_id, client_id, summary, details, success,
-               visible, event_datetime, related_table, related_id))
+            (activity_datetime, activity_type, user_id, client_id, shift_id,
+             summary, details, success, storyline_visible, event_datetime,
+             related_table, related_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (when, event_type, user_id, client_id, shift_id, summary, details,
+               success, visible, event_datetime, related_table, related_id))
         conn.commit()
         conn.close()
 
@@ -1372,6 +1373,50 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertNotIn(b"Failed note", page)
         self.assertNotIn(b"Other client note", page)
         self.assertNotIn(b"Follow-up required", page)
+
+    def test_shift_note_updates_collapse_per_shift_using_latest_content_and_time(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO shifts "
+            "(shift_id, client_id, status, shift_date, shift_type, scheduled_end_time) "
+            "VALUES (11, 1, 'Open', ?, 'Afternoon', '18:00')",
+            (self.today.isoformat(),),
+        )
+        conn.commit()
+        conn.close()
+
+        self.add_event(
+            "shift_note_updated", "Updated staff notes for shift",
+            when=f"{self.today} 09:00:00", details="Old shift one note",
+            related_table="shift_notes", related_id=1, shift_id=10,
+        )
+        self.add_event(
+            "shift_note_updated", "Updated staff notes for shift",
+            when=f"{self.today} 11:00:00", details="Latest shift one note",
+            related_table="shift_notes", related_id=1, shift_id=10,
+        )
+        self.add_event(
+            "shift_note_updated", "Updated staff notes for shift",
+            when=f"{self.today} 10:00:00", details="Shift two note",
+            related_table="shift_notes", related_id=2, shift_id=11,
+        )
+
+        self.login()
+        page = self.client.get(
+            f"/client/1/storyline?date={self.today.isoformat()}"
+        ).data
+
+        self.assertEqual(
+            page.count(b'<span class="status-active">Shift Note</span>'),
+            2,
+        )
+        self.assertNotIn(b"Old shift one note", page)
+        self.assertIn(b"Latest shift one note", page)
+        self.assertIn(b"Shift two note", page)
+        self.assertNotIn(b"09:00", page)
+        self.assertIn(b"11:00", page)
+        self.assertIn(b"10:00", page)
+        self.assertLess(page.find(b"Latest shift one note"), page.find(b"Shift two note"))
 
     def test_storyline_time_omits_seconds_and_username_but_keeps_user_linkage(self):
         self.login()

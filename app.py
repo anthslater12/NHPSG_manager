@@ -2416,6 +2416,16 @@ def _storyline_local_datetime(event_datetime, activity_datetime):
         return None
 
 
+def _storyline_event_recency_key(event):
+    local_datetime = _storyline_local_datetime(
+        event["event_datetime"], event["activity_datetime"]
+    )
+    return (
+        local_datetime or datetime.min.replace(tzinfo=VANCOUVER_TIMEZONE),
+        event["activity_id"] or 0,
+    )
+
+
 def _storyline_heading(local_datetime):
     try:
         event_date = local_datetime.date()
@@ -23844,13 +23854,35 @@ def client_storyline(client_id):
         else "NULL AS related_id"
     )
     events = conn.execute(f"""
-        SELECT al.activity_id, al.activity_datetime, {event_datetime_select},
+        SELECT al.activity_id, al.activity_datetime, al.shift_id,
+               {event_datetime_select},
                {activity_class_select}, al.activity_type, al.summary,
                al.details, {related_table_select}, {related_id_select}
         FROM activity_log al
         WHERE {where_sql}
         ORDER BY al.activity_id DESC
     """, parameters).fetchall()
+    latest_shift_note_events = {}
+    events_without_shift_note_key = []
+    for event in events:
+        is_shift_note_event = (
+            event["activity_type"] == "shift_note_updated"
+            and event["related_table"] == "shift_notes"
+            and event["shift_id"] is not None
+        )
+        if not is_shift_note_event:
+            events_without_shift_note_key.append(event)
+            continue
+        current = latest_shift_note_events.get(event["shift_id"])
+        if (
+            current is None
+            or _storyline_event_recency_key(event)
+            > _storyline_event_recency_key(current)
+        ):
+            latest_shift_note_events[event["shift_id"]] = event
+    events = events_without_shift_note_key + list(
+        latest_shift_note_events.values()
+    )
     prepared_events = []
     management_storyline = (
         storyline_actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
