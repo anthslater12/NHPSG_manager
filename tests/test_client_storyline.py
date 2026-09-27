@@ -941,6 +941,93 @@ class ClientStorylineTests(unittest.TestCase):
             self.assertIn(included, filtered)
             self.assertNotIn(excluded, filtered)
 
+    def test_completed_shift_storyline_events_show_assigned_worker_initials(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE users SET full_name = ? WHERE user_id = ?",
+            ("Martin Lapensee", 1),
+        )
+        conn.execute(
+            "UPDATE users SET full_name = ? WHERE user_id = ?",
+            ("Sarah Garrettsee", 3),
+        )
+        conn.execute(
+            "INSERT INTO shift_staff "
+            "(shift_staff_id, shift_id, user_id, active) VALUES (?, ?, ?, ?)",
+            (301, 10, 3, 1),
+        )
+        conn.commit()
+        conn.close()
+
+        self.add_event(
+            "start_shift_completed", "Beginning of Shift completed",
+            user_id=3, related_table="shift_staff", related_id=100,
+            shift_id=10,
+        )
+        self.add_event(
+            "end_shift_completed", "End of Shift completed",
+            user_id=1, related_table="shift_staff", related_id=301,
+            shift_id=10,
+        )
+
+        self.login()
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Beginning of Shift completed (ML)", page)
+        self.assertIn(b"End of Shift completed (SG)", page)
+        self.assertNotIn(b"Beginning of Shift completed (SG)", page)
+        self.assertNotIn(b"End of Shift completed (ML)", page)
+
+    def test_storyline_worker_initials_use_trimmed_single_and_last_words(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE users SET full_name = ? WHERE user_id = ?",
+            ("  Cher  ", 1),
+        )
+        conn.execute(
+            "UPDATE users SET full_name = ? WHERE user_id = ?",
+            (" Sarah Marie Garrettsee ", 3),
+        )
+        conn.execute(
+            "INSERT INTO shift_staff "
+            "(shift_staff_id, shift_id, user_id, active) VALUES (?, ?, ?, ?)",
+            (302, 10, 3, 1),
+        )
+        conn.commit()
+        conn.close()
+
+        self.add_event(
+            "start_shift_completed", "Beginning of Shift completed",
+            related_table="shift_staff", related_id=100, shift_id=10,
+        )
+        self.add_event(
+            "end_shift_completed", "End of Shift completed",
+            related_table="shift_staff", related_id=302, shift_id=10,
+        )
+
+        self.login()
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Beginning of Shift completed (C)", page)
+        self.assertIn(b"End of Shift completed (SG)", page)
+
+    def test_unrelated_storyline_events_do_not_show_worker_initials(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE users SET full_name = ? WHERE user_id = ?",
+            ("Martin Lapensee", 1),
+        )
+        conn.commit()
+        conn.close()
+
+        self.add_event(
+            "unknown_visible", "Unrelated activity", user_id=1,
+            related_table="shift_staff", related_id=100, shift_id=10,
+        )
+
+        self.login()
+        page = self.client.get("/client/1/storyline").data
+        self.assertIn(b"Unrelated activity", page)
+        self.assertNotIn(b"Unrelated activity (ML)", page)
+
     def test_invalid_filter_and_date_are_safe(self):
         self.login()
         self.add_event("shift_activity_created", "Activity event")

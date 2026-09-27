@@ -2465,6 +2465,15 @@ def _storyline_time(local_datetime):
         return "Time unavailable"
 
 
+def _storyline_worker_initials(full_name):
+    words = str(full_name or "").split()
+    if not words:
+        return ""
+    if len(words) == 1:
+        return words[0][0].upper()
+    return (words[0][0] + words[-1][0]).upper()
+
+
 def format_toileting_location(location, location_other=None):
     location = str(location or "").strip()
     location_other = str(location_other or "").strip()
@@ -23883,6 +23892,33 @@ def client_storyline(client_id):
     events = events_without_shift_note_key + list(
         latest_shift_note_events.values()
     )
+    shift_worker_names = {}
+    shift_staff_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] in {
+                "start_shift_completed", "end_shift_completed"
+            }
+            and event["related_table"] == "shift_staff"
+            and event["related_id"] is not None
+        )
+    }
+    if shift_staff_ids:
+        placeholders = ", ".join("?" for _ in shift_staff_ids)
+        shift_worker_rows = conn.execute(
+            "SELECT ss.shift_staff_id, u.full_name "
+            "FROM shift_staff ss "
+            "JOIN users u ON u.user_id = ss.user_id "
+            "JOIN shifts s ON s.shift_id = ss.shift_id "
+            "WHERE s.client_id = ? AND ss.shift_staff_id IN ("
+            + placeholders + ")",
+            (client_id, *sorted(shift_staff_ids)),
+        ).fetchall()
+        shift_worker_names = {
+            row["shift_staff_id"]: row["full_name"]
+            for row in shift_worker_rows
+        }
     prepared_events = []
     management_storyline = (
         storyline_actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
@@ -23995,6 +24031,15 @@ def client_storyline(client_id):
     for event in events:
         event = dict(event)
         event["label"] = _storyline_label(event["activity_type"])
+        event["worker_initials"] = (
+            _storyline_worker_initials(
+                shift_worker_names.get(event["related_id"])
+            )
+            if event["activity_type"] in {
+                "start_shift_completed", "end_shift_completed"
+            }
+            else ""
+        )
         event["storyline_details"] = None
         event["storyline_behaviour_lines"] = None
         event["storyline_status"] = None
