@@ -133,19 +133,21 @@
 
         </div>
 
-        <div class="card">
+        {% if can_manage_leave_requests %}
+            <div class="card">
 
-            <h3>Leave Requests</h3>
+                <h3>Leave Requests</h3>
 
-            <p>
-                Review staff leave requests and record management decisions.
-            </p>
+                <p>
+                    Review staff leave requests and record management decisions.
+                </p>
 
-            <a href="{{ url_for('leave_request_review_list') }}">
-                Open Leave Requests
-            </a>
+                <a href="{{ url_for('leave_request_review_list') }}">
+                    Open Leave Requests
+                </a>
 
-        </div>
+            </div>
+        {% endif %}
 
     </div>
 

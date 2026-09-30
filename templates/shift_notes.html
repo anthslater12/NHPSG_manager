@@ -5,11 +5,13 @@
 <div class="card">
     <h2>Shift Notes</h2>
 
+    {% if can_review %}
     <p>
         <a href="{{ url_for("manager_review_hub") }}">
             ← Back to Management Review
         </a>
     </p>
+    {% endif %}
 
     {% if notes %}
         <table>
@@ -47,26 +49,28 @@
 
 						{% endfor %}
 
-						{% if note.note_id not in reviewed_by_current_user %}
+                        {% if can_review and note.note_id not in reviewed_by_current_user %}
 
 							<br>
 
-							<form
-								method="post"
-								action="{{ url_for(
-									'acknowledge_shift_note',
+						<form
+							method="post"
+							action="{{ url_for(
+								'acknowledge_shift_note',
 									note_id=note.note_id
 								) }}"
 								class="inline-form preserve-review-position"
 							>
-								<button type="submit" class="link-button">
-									Add Review
-								</button>
-							</form>
+							<button type="submit" class="link-button">
+								Add Review
+							</button>
+						</form>
 
 						{% endif %}
 
-					{% else %}
+                    {% else %}
+
+						{% if can_review %}
 
 						<form
 							method="post"
@@ -80,6 +84,8 @@
 								Review
 							</button>
 						</form>
+
+						{% endif %}
 
 					{% endif %}
 

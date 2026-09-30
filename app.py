@@ -25273,6 +25273,11 @@ def shift_notes():
         return redirect(url_for("login"))
 
     conn = get_db()
+    try:
+        actor = get_active_authenticated_user(conn, session["user_id"])
+    except PermissionError:
+        conn.close()
+        return "Access denied", 403
 
     notes = conn.execute("""
         SELECT
@@ -25342,7 +25347,8 @@ def shift_notes():
         "shift_notes.html",
         notes=notes,
         reviews_by_note=reviews_by_note,
-        reviewed_by_current_user=reviewed_by_current_user
+        reviewed_by_current_user=reviewed_by_current_user,
+        can_review=actor["role"] in STORYLINE_REVIEW_AUTHORITY_ROLES
     )
 
 @app.route("/manager-review/shift-notes/<int:note_id>")
@@ -25707,31 +25713,36 @@ def acknowledge_shift_note(note_id):
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in ["Admin", "Program Manager", "Director"]:
-        return "Access denied", 403
-
     conn = get_db()
+    try:
+        actor = validate_storyline_review_authority(
+            conn, session["user_id"]
+        )
 
-    note = conn.execute("""
-        SELECT *
-        FROM shift_notes
-        WHERE note_id = ?
-    """, (note_id,)).fetchone()
+        note = conn.execute("""
+            SELECT *
+            FROM shift_notes
+            WHERE note_id = ?
+        """, (note_id,)).fetchone()
 
-    if note is None:
+        if note is None:
+            return "Shift note not found", 404
+
+        create_acknowledgement(
+            conn,
+            source_table="shift_notes",
+            source_id=note_id,
+            user_id=actor["user_id"],
+            acknowledgement_type="Review"
+        )
+
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    finally:
         conn.close()
-        return "Shift note not found", 404
-
-    create_acknowledgement(
-        conn,
-        source_table="shift_notes",
-        source_id=note_id,
-        user_id=session["user_id"],
-        acknowledgement_type="Review"
-    )
-
-    conn.commit()
-    conn.close()
 
     return_to = request.form.get("return_to", "")
     return_context = _storyline_return_context(
@@ -26572,8 +26583,8 @@ def incident_list():
         incidents=incidents,
         reviews_by_incident=reviews_by_incident,
         reviewed_by_current_user=reviewed_by_current_user,
-        management_user=(
-            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+        can_review=(
+            actor["role"] in STORYLINE_REVIEW_AUTHORITY_ROLES
         )
     )
 
@@ -26664,7 +26675,7 @@ def incident_review_detail(incident_id):
             for review in reviews
         ),
         can_access_management_review=(
-            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+            actor["role"] in STORYLINE_REVIEW_AUTHORITY_ROLES
         ),
         management_user=management_user,
         can_create_actions=can_create_actions,
@@ -26962,7 +26973,7 @@ def review_incident(incident_id):
 
     conn = get_db()
     try:
-        actor = get_active_authenticated_user(
+        validate_storyline_review_authority(
             conn,
             session["user_id"]
         )
@@ -26971,9 +26982,6 @@ def review_incident(incident_id):
         return "Access denied", 403
     finally:
         conn.close()
-
-    if actor["role"] not in STAFF_NOTICE_MANAGEMENT_ROLES:
-        return "Access denied", 403
 
     return redirect(url_for(
         "incident_review_detail",
@@ -27681,12 +27689,15 @@ def manager_review_hub():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
+    conn = get_db()
+    try:
+        actor = validate_storyline_review_authority(
+            conn, session["user_id"]
+        )
+    except PermissionError:
         return "Access denied", 403
+    finally:
+        conn.close()
 
     current_behaviour_week_monday = get_behaviour_operational_week_start(
         datetime.now(VANCOUVER_TIMEZONE)
@@ -27694,7 +27705,10 @@ def manager_review_hub():
 
     return render_template(
         "manager_review_hub.html",
-        current_behaviour_week_monday=current_behaviour_week_monday
+        current_behaviour_week_monday=current_behaviour_week_monday,
+        can_manage_leave_requests=(
+            actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
+        )
     )
 
 
@@ -28655,12 +28669,15 @@ def care_review_list():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
+    conn = get_db()
+    try:
+        validate_storyline_review_authority(
+            conn, session["user_id"]
+        )
+    except PermissionError:
         return "Access denied", 403
+    finally:
+        conn.close()
 
     conn = get_db()
 
@@ -28773,12 +28790,15 @@ def toileting_review_list():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
+    conn = get_db()
+    try:
+        validate_storyline_review_authority(
+            conn, session["user_id"]
+        )
+    except PermissionError:
         return "Access denied", 403
+    finally:
+        conn.close()
 
     conn = get_db()
 
@@ -28899,12 +28919,15 @@ def housekeeping_review_list():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if session["role"] not in [
-        "Admin",
-        "Program Manager",
-        "Director"
-    ]:
+    conn = get_db()
+    try:
+        validate_storyline_review_authority(
+            conn, session["user_id"]
+        )
+    except PermissionError:
         return "Access denied", 403
+    finally:
+        conn.close()
 
     conn = get_db()
 

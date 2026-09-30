@@ -18,6 +18,20 @@ class BehaviourWeeklyNavigationTests(unittest.TestCase):
         self.old_db = app.DB_NAME
         app.DB_NAME = os.path.join(self.temp.name, "navigation.db")
         conn = sqlite3.connect(app.DB_NAME)
+        conn.execute(
+            "CREATE TABLE users ("
+            "user_id INTEGER PRIMARY KEY, "
+            "full_name TEXT, role TEXT, active INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO users VALUES (?, ?, ?, 1)",
+            (
+                (1, "Admin User", "Admin"),
+                (2, "Program Manager", "Program Manager"),
+                (3, "Director User", "Director"),
+                (4, "Support Worker", "Support Worker"),
+            )
+        )
         conn.execute("CREATE TABLE clients (client_id INTEGER PRIMARY KEY, client_name TEXT, active INTEGER)")
         conn.execute("INSERT INTO clients VALUES (7, 'Client Seven', 1)")
         conn.commit()
@@ -29,8 +43,14 @@ class BehaviourWeeklyNavigationTests(unittest.TestCase):
         self.temp.cleanup()
 
     def login(self, role):
+        user_ids = {
+            "Admin": 1,
+            "Program Manager": 2,
+            "Director": 3,
+            "Support Worker": 4,
+        }
         with self.client.session_transaction() as session:
-            session["user_id"] = 1
+            session["user_id"] = user_ids[role]
             session["role"] = role
             session["full_name"] = role
 

@@ -712,7 +712,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
             "storyline_client_id=1&storyline_filter=Incident&storyline_date=2026-08-02"
         )
         self.assertEqual(consultant_detail.status_code, 200)
-        self.assertNotIn(b"Back to Management Review", consultant_detail.data)
+        self.assertIn(b"Back to Management Review", consultant_detail.data)
         self.assertIn(b"Return to Incident Reports", consultant_detail.data)
         self.assertIn(b"Back to Client Storyline", consultant_detail.data)
 

@@ -73,7 +73,7 @@
 
                         {% endfor %}
 
-                        {% if management_user and incident.incident_id not in reviewed_by_current_user %}
+                        {% if can_review and incident.incident_id not in reviewed_by_current_user %}
 
                             <br>
 
@@ -85,7 +85,7 @@
                         {% endif %}
 
                     {% else %}
-                        {% if management_user %}
+                        {% if can_review %}
                             <a href="{{ url_for('incident_review_detail',
                                                 incident_id=incident.incident_id) }}">
                                 Review
