@@ -227,7 +227,7 @@
 
     <h3>Linked Actions</h3>
 
-    {% if can_manage_actions %}<p>
+    {% if can_create_actions %}<p>
         <a href="{{ url_for(
             'care_action_new',
             entry_id=entry.entry_id

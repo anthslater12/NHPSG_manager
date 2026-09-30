@@ -122,7 +122,7 @@
 
         <h3>Linked Actions</h3>
 
-        {% if can_manage_actions and storyline_return_context %}
+        {% if can_create_actions and storyline_return_context %}
             <p>
                 <a href="{{ url_for(
                     'incident_action_new',
@@ -132,7 +132,7 @@
                     storyline_date=storyline_return_context.storyline_date
                 ) }}">Create Action</a>
             </p>
-        {% elif can_manage_actions %}
+        {% elif can_create_actions %}
             <p>
                 <a href="{{ url_for(
                     'incident_action_new',

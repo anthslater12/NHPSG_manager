@@ -732,14 +732,66 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         self.assertIn(b"Linked Actions", management_detail.data)
         self.assertIn(b"Create Action", management_detail.data)
 
-    def test_behaviour_consultant_can_review_and_note_but_not_create_actions(self):
+    def test_behaviour_consultant_can_create_but_not_manage_incident_actions(self):
         self.login(7)
         detail = self.client.get("/manager-review/incidents/41")
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Review required", detail.data)
         self.assertIn(b"Add Management Note", detail.data)
         self.assertIn(b"Linked Actions", detail.data)
-        self.assertNotIn(b"Create Action", detail.data)
+        self.assertIn(b"Create Action", detail.data)
+
+        created = self.client.post(
+            "/manager-review/incidents/41/action/new",
+            data={
+                "title": "Consultant incident follow-up",
+                "description": "Consultant-created action",
+                "priority": "High",
+                "assigned_to_user_id": "6",
+            }
+        )
+        self.assertEqual(created.status_code, 302)
+        action_id = self.rows(
+            "SELECT action_id FROM action_items "
+            "WHERE title = 'Consultant incident follow-up'"
+        )[0]["action_id"]
+        action = self.rows(
+            "SELECT source_table, source_id, created_by_user_id "
+            "FROM action_items WHERE action_id = ?",
+            (action_id,)
+        )[0]
+        self.assertEqual(
+            (action["source_table"], action["source_id"],
+             action["created_by_user_id"]),
+            ("incident_reports", 41, 7),
+        )
+
+        action_detail = self.client.get(f"/action/{action_id}")
+        self.assertEqual(action_detail.status_code, 200)
+        self.assertNotIn(b"Update Action", action_detail.data)
+        self.assertNotIn(b"Add Comment", action_detail.data)
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "update",
+                    "status": "Closed",
+                    "priority": "Low",
+                    "assigned_to_user_id": "1",
+                }
+            ).status_code,
+            403
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action_id}",
+                data={
+                    "form_type": "comment",
+                    "comment": "Not allowed",
+                }
+            ).status_code,
+            403
+        )
 
         self.assertEqual(
             self.client.post(
@@ -754,7 +806,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         )
         self.assertEqual(
             self.client.get("/manager-review/incidents/41/action/new").status_code,
-            403
+            200
         )
 
     def test_all_management_roles_can_add_and_view_incident_notes(self):

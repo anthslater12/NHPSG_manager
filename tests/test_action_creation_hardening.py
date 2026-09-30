@@ -179,13 +179,53 @@ class ActionCreationHardeningTests(unittest.TestCase):
                     (route, user_id)
                 )
 
-            for user_id in (1, 5, 6):
+            for user_id, expected_status in ((1, 403), (5, 200), (6, 403)):
                 self.login(user_id, session_role="Admin")
                 self.assertEqual(
                     self.client.get(route).status_code,
-                    403,
+                    expected_status,
                     (route, user_id)
                 )
+
+    def test_behaviour_consultant_can_create_each_legacy_linked_action(self):
+        self.login(5)
+        cases = (
+            (
+                "/manager-review/shift-notes/20/action/new",
+                "shift_notes", 20, None,
+            ),
+            (
+                "/manager-review/care/31/action/new",
+                "shift_care_task_entries", 31, 10,
+            ),
+            (
+                "/manager-review/toileting/50/action/new",
+                "toileting_events", 50, 10,
+            ),
+            (
+                "/manager-review/housekeeping/41/action/new",
+                "shift_housekeeping_task_entries", 41, 10,
+            ),
+        )
+        for route, source_table, source_id, shift_id in cases:
+            response = self.client.post(route, data={
+                "title": f"Consultant follow-up {source_table}",
+                "description": "Consultant-created follow-up",
+                "priority": "Medium",
+                "assigned_to_user_id": "1",
+            })
+            self.assertEqual(response.status_code, 302, route)
+            action = self.rows("""
+                SELECT source_table, source_id, shift_id,
+                       created_by_user_id
+                FROM action_items
+                WHERE source_table = ? AND source_id = ?
+            """, (source_table, source_id))[0]
+            self.assertEqual(
+                (action["source_table"], action["source_id"],
+                 action["shift_id"], action["created_by_user_id"]),
+                (source_table, source_id, shift_id, 5),
+            )
 
     def test_invalid_assignees_are_rejected_without_creating_actions(self):
         self.login(2)

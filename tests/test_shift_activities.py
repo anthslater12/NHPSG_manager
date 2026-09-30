@@ -1863,7 +1863,7 @@ class ShiftActivitiesTests(unittest.TestCase):
             "assigned_to_user_id": 1,
         })
 
-    def test_activity_action_link_and_route_use_strict_management_roles(self):
+    def test_behaviour_consultant_can_create_but_not_manage_activity_actions(self):
         activity_id = self.insert_activity()
 
         self.login(9, "Behaviour Consultant")
@@ -1871,17 +1871,47 @@ class ShiftActivitiesTests(unittest.TestCase):
             f"/manager-review/activities/{activity_id}"
         )
         self.assertEqual(consultant_detail.status_code, 200)
-        self.assertNotIn(b"Create Action", consultant_detail.data)
+        self.assertIn(b"Create Action", consultant_detail.data)
         self.assertEqual(
             self.client.get(
                 f"/manager-review/activities/{activity_id}/action/new"
             ).status_code,
-            403
+            200
         )
+        created = self.client.post(
+            f"/manager-review/activities/{activity_id}/action/new",
+            data={
+                "title": "Consultant activity follow-up",
+                "description": "Consultant-created action",
+                "priority": "Medium",
+                "assigned_to_user_id": "1",
+            }
+        )
+        self.assertEqual(created.status_code, 302)
+        action = self.rows("""
+            SELECT action_id, source_table, source_id, shift_id,
+                   created_by_user_id
+            FROM action_items
+            WHERE title = 'Consultant activity follow-up'
+        """)[0]
+        self.assertEqual(
+            (action["source_table"], action["source_id"],
+             action["shift_id"], action["created_by_user_id"]),
+            ("shift_activities", activity_id, 10, 9),
+        )
+        action_detail = self.client.get(f"/action/{action['action_id']}")
+        self.assertEqual(action_detail.status_code, 200)
+        self.assertNotIn(b"Update Action", action_detail.data)
+        self.assertNotIn(b"Add Comment", action_detail.data)
         self.assertEqual(
             self.client.post(
-                f"/manager-review/activities/{activity_id}/action/new",
-                data={"title": "Not allowed"}
+                f"/action/{action['action_id']}",
+                data={
+                    "form_type": "update",
+                    "status": "Completed",
+                    "priority": "High",
+                    "assigned_to_user_id": "2",
+                }
             ).status_code,
             403
         )

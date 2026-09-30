@@ -455,20 +455,53 @@ class SleepStorylineReviewTests(unittest.TestCase):
              'sleep_events', 1, 10, 2, 1)
         )
 
-    def test_sleep_action_link_and_route_use_strict_management_roles(self):
+    def test_behaviour_consultant_can_create_but_not_manage_sleep_actions(self):
         self.add_sleep_event(1)
         self.login(7, "Behaviour Consultant")
         detail = self.client.get("/manager-review/sleep/1")
         self.assertEqual(detail.status_code, 200)
-        self.assertNotIn(b"Create Action", detail.data)
+        self.assertIn(b"Create Action", detail.data)
         self.assertEqual(
             self.client.get("/manager-review/sleep/1/action/new").status_code,
-            403
+            200
         )
+        created = self.client.post(
+            "/manager-review/sleep/1/action/new",
+            data={
+                "title": "Consultant sleep follow-up",
+                "description": "Consultant-created action",
+                "priority": "Medium",
+                "assigned_to_user_id": "1",
+            }
+        )
+        self.assertEqual(created.status_code, 302)
+
+        conn = sqlite3.connect(self.path)
+        action = conn.execute("""
+            SELECT action_id, source_table, source_id, shift_id,
+                   created_by_user_id
+            FROM action_items
+            WHERE title = 'Consultant sleep follow-up'
+        """).fetchone()
+        conn.close()
+        self.assertEqual(
+            tuple(action),
+            (1, "sleep_events", 1, 10, 7),
+        )
+
+        action_detail = self.client.get(f"/action/{action[0]}")
+        self.assertEqual(action_detail.status_code, 200)
+        self.assertNotIn(b"Update Action", action_detail.data)
+        self.assertNotIn(b"Add Comment", action_detail.data)
         self.assertEqual(
             self.client.post(
-                "/manager-review/sleep/1/action/new",
-                data={"title": "Not allowed"}
+                f"/action/{action[0]}",
+                data={
+                    "form_type": "update",
+                    "status": "Completed",
+                    "priority": "High",
+                    "assigned_to_user_id": "2",
+                }
             ).status_code,
             403
         )

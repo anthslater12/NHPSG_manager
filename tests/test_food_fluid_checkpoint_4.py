@@ -660,24 +660,51 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
             "food_fluid_entries", 1, 10, 1, 4,
         ))
 
-    def test_food_fluid_action_route_is_manager_only(self):
-        for user_id in (4, 5):
-            with self.subTest(user_id=user_id):
-                self.login(user_id, session_role="Admin")
-                self.assertEqual(
-                    self.client.get(
-                        "/manager-review/food-fluid/1/action/new"
-                    ).status_code,
-                    403,
-                )
-                self.assertEqual(
-                    self.client.post(
-                        "/manager-review/food-fluid/1/action/new",
-                        data={"title": "Not authorized"},
-                    ).status_code,
-                    403,
-                )
-        self.assertEqual(self.count_rows("action_items"), 0)
+    def test_food_fluid_action_route_allows_consultant_creation_only(self):
+        self.login(4, session_role="Admin")
+        self.assertEqual(
+            self.client.get(
+                "/manager-review/food-fluid/1/action/new"
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/manager-review/food-fluid/1/action/new",
+                data={"title": "Support Worker cannot create"},
+            ).status_code,
+            403,
+        )
+
+        self.login(5, session_role="Admin")
+        self.assertEqual(
+            self.client.get(
+                "/manager-review/food-fluid/1/action/new"
+            ).status_code,
+            200,
+        )
+        created = self.client.post(
+            "/manager-review/food-fluid/1/action/new",
+            data={
+                "title": "Consultant food follow-up",
+                "description": "Consultant-created action",
+                "priority": "Medium",
+                "assigned_to_user_id": "4",
+            },
+        )
+        self.assertEqual(created.status_code, 302)
+        conn = self.connect()
+        action = conn.execute("""
+            SELECT action_id, source_table, source_id, shift_id,
+                   created_by_user_id
+            FROM action_items
+            WHERE title = 'Consultant food follow-up'
+        """).fetchone()
+        conn.close()
+        self.assertEqual(
+            tuple(action),
+            (1, "food_fluid_entries", 1, 10, 5),
+        )
 
     def test_no_inline_management_void_controls(self):
         self.login(1)

@@ -215,6 +215,12 @@ BEHAVIOUR_REVIEW_AUTHORITY_ROLES = frozenset((
     *BEHAVIOUR_VOID_AUTHORITY_ROLES,
     "Behaviour Consultant",
 ))
+ACTION_CREATION_ROLES = frozenset((
+    "Admin",
+    "Program Manager",
+    "Director",
+    "Behaviour Consultant",
+))
 BEHAVIOUR_OCCURRENCE_STATUSES = frozenset((
     "In Progress",
     "Completed",
@@ -25463,8 +25469,8 @@ def shift_note_review_detail(note_id):
         ),
         management_notes=management_notes,
         linked_actions=linked_actions,
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         storyline_return_context=storyline_return_context
     )
@@ -25542,7 +25548,7 @@ def shift_note_action_new(note_id):
 
     conn = get_db()
     try:
-        actor = get_action_management_actor(conn, session["user_id"])
+        actor = get_action_creation_actor(conn, session["user_id"])
     except PermissionError:
         conn.close()
         return "Access denied", 403
@@ -26616,7 +26622,7 @@ def incident_review_detail(incident_id):
     management_user = (
         actor["role"] in STORYLINE_REVIEW_AUTHORITY_ROLES
     )
-    can_manage_actions = actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+    can_create_actions = actor["role"] in ACTION_CREATION_ROLES
     management_notes = []
     linked_actions = []
     if management_user:
@@ -26661,7 +26667,7 @@ def incident_review_detail(incident_id):
             actor["role"] in STAFF_NOTICE_MANAGEMENT_ROLES
         ),
         management_user=management_user,
-        can_manage_actions=can_manage_actions,
+        can_create_actions=can_create_actions,
         management_notes=management_notes,
         linked_actions=linked_actions,
         storyline_return_context=_storyline_return_context(
@@ -26755,7 +26761,7 @@ def incident_action_new(incident_id):
             conn,
             session["user_id"]
         )
-        if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+        if actor["role"] not in ACTION_CREATION_ROLES:
             raise PermissionError(
                 "Current user is not allowed to create actions."
             )
@@ -27078,8 +27084,8 @@ def behaviour_review_detail(occurrence_id):
             review["user_id"] == actor["user_id"] for review in reviews
         ),
         linked_actions=linked_actions,
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         storyline_return_context=_storyline_return_context(
             request.args, occurrence["client_id"]
@@ -27167,7 +27173,7 @@ def behaviour_action_new(occurrence_id):
             conn,
             session["user_id"]
         )
-        if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+        if actor["role"] not in ACTION_CREATION_ROLES:
             conn.close()
             return "Access denied", 403
 
@@ -27425,8 +27431,8 @@ def sleep_review_detail(sleep_event_id):
         current_user_reviewed=current_user_review is not None,
         management_notes=management_notes,
         linked_actions=linked_actions,
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         storyline_return_context=_storyline_return_context(
             request.args, event["client_id"]
@@ -27503,7 +27509,7 @@ def sleep_action_new(sleep_event_id):
     conn = get_db()
     try:
         actor = get_sleep_management_actor(conn, session["user_id"])
-        if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+        if actor["role"] not in ACTION_CREATION_ROLES:
             conn.close()
             return "Access denied", 403
 
@@ -27848,8 +27854,8 @@ def activity_review_detail(activity_id):
         management_notes=management_notes,
         linked_actions=linked_actions,
         can_review=is_shift_activity_finalized(entry["status"]),
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         storyline_return_context=_storyline_return_context(
             request.args, entry["client_id"]
@@ -27940,7 +27946,7 @@ def activity_action_new(activity_id):
             conn,
             session["user_id"]
         )
-        if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+        if actor["role"] not in ACTION_CREATION_ROLES:
             conn.close()
             return "Access denied", 403
 
@@ -28271,8 +28277,8 @@ def food_fluid_review_detail(entry_id):
         reviewed_by_current_user=reviewed_by_current_user,
         management_notes=management_notes,
         linked_actions=linked_actions,
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         state_filter=get_food_fluid_review_filter(),
         storyline_return_context=_storyline_return_context(
@@ -28351,7 +28357,7 @@ def food_fluid_action_new(entry_id):
 
     conn = get_db()
     try:
-        actor = get_food_fluid_management_actor(
+        actor = get_action_creation_actor(
             conn,
             session["user_id"]
         )
@@ -29171,8 +29177,8 @@ def housekeeping_review_detail(entry_id):
         ),
         management_notes=management_notes,
         linked_actions=linked_actions,
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         shift_staff=shift_staff,
         storyline_return_context=_storyline_return_context(
@@ -29254,7 +29260,7 @@ def housekeeping_action_new(entry_id):
 
     conn = get_db()
     try:
-        actor = get_action_management_actor(conn, session["user_id"])
+        actor = get_action_creation_actor(conn, session["user_id"])
     except PermissionError:
         conn.close()
         return "Access denied", 403
@@ -29619,8 +29625,8 @@ def toileting_review_detail(entry_id):
         current_user_reviewed=current_user_reviewed,
         management_notes=management_notes,
         linked_actions=linked_actions,
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         shift_staff=shift_staff,
         storyline_return_context=storyline_return_context
@@ -29711,7 +29717,7 @@ def toileting_action_new(entry_id):
 
     conn = get_db()
     try:
-        actor = get_action_management_actor(conn, session["user_id"])
+        actor = get_action_creation_actor(conn, session["user_id"])
     except PermissionError:
         conn.close()
         return "Access denied", 403
@@ -30033,8 +30039,8 @@ def care_review_detail(entry_id):
         ),
         management_notes=management_notes,
         linked_actions=linked_actions,
-        can_manage_actions=(
-            actor["role"] in BEHAVIOUR_VOID_AUTHORITY_ROLES
+        can_create_actions=(
+            actor["role"] in ACTION_CREATION_ROLES
         ),
         shift_staff=shift_staff,
         storyline_return_context=_storyline_return_context(
@@ -30116,7 +30122,7 @@ def care_action_new(entry_id):
 
     conn = get_db()
     try:
-        actor = get_action_management_actor(conn, session["user_id"])
+        actor = get_action_creation_actor(conn, session["user_id"])
     except PermissionError:
         conn.close()
         return "Access denied", 403
@@ -30664,12 +30670,12 @@ def create_action(
     return action_id
 
 
-def get_action_management_actor(conn, user_id):
-    """Return an active user with Action-management authority."""
+def get_action_creation_actor(conn, user_id):
+    """Return an active user with Action-creation authority."""
     actor = get_active_authenticated_user(conn, user_id)
-    if actor["role"] not in BEHAVIOUR_VOID_AUTHORITY_ROLES:
+    if actor["role"] not in ACTION_CREATION_ROLES:
         raise PermissionError(
-            "Current user is not allowed to create or manage Actions."
+            "Current user is not allowed to create Actions."
         )
     return actor
 

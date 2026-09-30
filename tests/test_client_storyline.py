@@ -2132,7 +2132,7 @@ class ClientStorylineTests(unittest.TestCase):
             (5, "Admin", 200, True),
             (2, "Program Manager", 200, True),
             (6, "Director", 200, True),
-            (9, "Behaviour Consultant", 403, False),
+            (9, "Behaviour Consultant", 200, True),
             (1, "Support Worker", 403, False),
             (8, "Program Manager", 403, False),
             (10, "Behaviour Consultant", 403, False),
@@ -2148,6 +2148,45 @@ class ClientStorylineTests(unittest.TestCase):
                 self.assertIn(b"Create Action", detail.data)
             else:
                 self.assertNotIn(b"Create Action", detail.data)
+
+    def test_behaviour_consultant_can_create_behaviour_action_but_not_manage_it(self):
+        self.add_behaviour_occurrence(50, shift_id=10)
+        self.login(9, "Behaviour Consultant")
+
+        response = self.client.post(
+            "/manager-review/behaviour/50/action/new",
+            data={
+                "title": "Consultant Behaviour follow-up",
+                "description": "Consultant-created action",
+                "priority": "Medium",
+                "assigned_to_user_id": "1",
+            }
+        )
+        self.assertEqual(response.status_code, 302)
+        action = self.rows("""
+            SELECT action_id, source_table, source_id, shift_id,
+                   created_by_user_id
+            FROM action_items
+            WHERE title = 'Consultant Behaviour follow-up'
+        """)[0]
+        self.assertEqual(
+            (action["source_table"], action["source_id"],
+             action["shift_id"], action["created_by_user_id"]),
+            ("behaviour_occurrences", 50, 10, 9),
+        )
+
+        self.assertEqual(
+            self.client.post(
+                f"/action/{action['action_id']}",
+                data={
+                    "form_type": "update",
+                    "status": "Completed",
+                    "priority": "High",
+                    "assigned_to_user_id": "2",
+                }
+            ).status_code,
+            403
+        )
 
     def test_behaviour_consultant_matches_manager_storyline_access(self):
         occurrence_id = 45
