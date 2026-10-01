@@ -42,8 +42,8 @@ app.secret_key = "change-this-later"
 # Session Security Framework
 #
 
-SESSION_TIMEOUT_SECONDS = 10 * 60
-SESSION_WARNING_SECONDS = 60
+SESSION_TIMEOUT_SECONDS = 32 * 60
+SESSION_WARNING_SECONDS = 120
 
 
 @app.before_request
