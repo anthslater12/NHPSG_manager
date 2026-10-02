@@ -26182,7 +26182,13 @@ def shift_activity_edit(shift_id, activity_id):
 
             if parsed["action"] == "save" and not changes:
                 conn.rollback()
-                return "No Activity changes were submitted.", 400
+                return render_template(
+                    "shift_activity_edit.html",
+                    shift=context,
+                    activity=current,
+                    values=values,
+                    error="No changes were detected. The Activity already matches the information entered.",
+                ), 400
 
             assignments = [
                 f"{field_name} = ?" for field_name in changes
@@ -26267,6 +26273,12 @@ def shift_activity_edit(shift_id, activity_id):
             raise
 
         if parsed["action"] == "save":
+            if current["status"] in SHIFT_ACTIVITY_FINALIZED_STATUSES:
+                flash("Activity correction saved successfully.")
+                return redirect(url_for(
+                    "shift_activities",
+                    shift_id=shift_id,
+                ))
             flash("Activity progress saved.")
             return redirect(url_for(
                 "shift_activity_edit",

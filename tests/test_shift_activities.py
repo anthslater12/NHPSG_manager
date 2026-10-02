@@ -881,7 +881,7 @@ class ShiftActivitiesTests(unittest.TestCase):
             ),
         )
         self.assertEqual(response.status_code, 302)
-        self.assertIn(f"/shift/10/activity/{activity_id}/edit", response.location)
+        self.assertEqual(response.location, "/shift/10/activity")
 
         corrected = self.activity_row(activity_id)
         self.assertEqual(corrected["shift_activity_id"], activity_id)
@@ -918,6 +918,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         self.assertIn("Resulting version: 3", correction_audit["details"])
 
         page = self.client.get("/shift/10/activity").data
+        self.assertIn(b"Activity correction saved successfully.", page)
         self.assertIn(
             f'/shift/10/activity/{activity_id}/edit">Correct</a>'.encode(),
             page,
@@ -1113,10 +1114,46 @@ class ShiftActivitiesTests(unittest.TestCase):
             data=self.edit_payload(activity_id),
         )
         self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            b"No changes were detected. The Activity already matches the information entered.",
+            response.data,
+        )
+        self.assertIn(b"Continue Activity", response.data)
         self.assertEqual(self.activity_row(activity_id)["version_number"], 1)
         self.assertEqual(
             self.rows("SELECT activity_type FROM activity_log"),
             [{"activity_type": "shift_activity_created"}],
+        )
+
+    def test_finalized_activity_noop_uses_normal_form_without_writing(self):
+        activity_id = self.insert_completed_activity()
+        before = self.activity_row(activity_id)
+        self.login(1)
+        response = self.client.post(
+            f"/shift/10/activity/{activity_id}/edit",
+            data=self.edit_payload(
+                activity_id,
+                expected_version=2,
+                start_time="09:00",
+                end_time="10:00",
+                a_selected="1",
+                activity_description="Completed activity",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            b"No changes were detected. The Activity already matches the information entered.",
+            response.data,
+        )
+        self.assertIn(b"Correct Activity", response.data)
+        self.assertNotIn(b"No Activity changes were submitted.", response.data)
+
+        after = self.activity_row(activity_id)
+        self.assertEqual(after, before)
+        self.assertEqual(
+            self.rows("SELECT activity_type FROM activity_log"),
+            [],
         )
 
     def test_save_and_complete_persists_final_values_and_one_completion_audit(self):
