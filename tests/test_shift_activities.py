@@ -781,20 +781,6 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
         self.assertEqual(wrong_shift.status_code, 403)
 
-        recorded_id = self.insert_activity()
-        self.assertEqual(
-            self.client.get(
-                f"/shift/10/activity/{recorded_id}/edit"
-            ).status_code,
-            403,
-        )
-        completed_id = self.insert_completed_activity()
-        self.assertEqual(
-            self.client.get(
-                f"/shift/10/activity/{completed_id}/edit"
-            ).status_code,
-            403,
-        )
 
     def test_edit_action_and_expected_version_are_strictly_validated(self):
         activity_id = self.insert_in_progress_activity()
@@ -853,6 +839,271 @@ class ShiftActivitiesTests(unittest.TestCase):
         ])
         self.assertIn("activity_description", audits[1]["details"])
         self.assertIn("Resulting version: 2", audits[1]["details"])
+
+    def test_creator_can_correct_completed_activity_without_replacing_it(self):
+        activity_id = self.insert_in_progress_activity(
+            start_time="16:00",
+            end_time="16:10",
+            description="Original completed activity",
+        )
+        self.login(1)
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+
+        self.assertEqual(
+            self.client.post(
+                edit_url,
+                data=self.edit_payload(
+                    activity_id,
+                    action="complete",
+                    start_time="16:00",
+                    end_time="16:10",
+                    activity_description="Original completed activity",
+                ),
+            ).status_code,
+            302,
+        )
+        completed = self.activity_row(activity_id)
+        completed_at = completed["completed_at_utc"]
+        self.assertEqual(completed["status"], "Completed")
+        self.assertEqual(completed["version_number"], 2)
+
+        response = self.client.post(
+            edit_url,
+            data=self.edit_payload(
+                activity_id,
+                action="save",
+                expected_version=2,
+                start_time="16:20",
+                end_time="16:30",
+                a_selected=None,
+                t_selected="1",
+                activity_description="Corrected completed activity",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"/shift/10/activity/{activity_id}/edit", response.location)
+
+        corrected = self.activity_row(activity_id)
+        self.assertEqual(corrected["shift_activity_id"], activity_id)
+        self.assertEqual(corrected["status"], "Completed")
+        self.assertEqual(corrected["start_time"], "16:20")
+        self.assertEqual(corrected["end_time"], "16:30")
+        self.assertEqual(corrected["activity_description"], "Corrected completed activity")
+        self.assertEqual(corrected["a_selected"], 0)
+        self.assertEqual(corrected["t_selected"], 1)
+        self.assertEqual(corrected["version_number"], 3)
+        self.assertEqual(corrected["completed_by_user_id"], 1)
+        self.assertEqual(corrected["completed_at_utc"], completed_at)
+
+        audits = self.rows(
+            "SELECT activity_type, user_id, shift_id, related_table, related_id, details "
+            "FROM activity_log ORDER BY activity_id"
+        )
+        self.assertEqual(
+            [audit["activity_type"] for audit in audits],
+            [
+                "shift_activity_created",
+                "shift_activity_completed",
+                "shift_activity_updated",
+            ],
+        )
+        correction_audit = audits[-1]
+        self.assertEqual(correction_audit["user_id"], 1)
+        self.assertEqual(correction_audit["shift_id"], 10)
+        self.assertEqual(correction_audit["related_table"], "shift_activities")
+        self.assertEqual(correction_audit["related_id"], activity_id)
+        self.assertIn("start_time", correction_audit["details"])
+        self.assertIn("16:00", correction_audit["details"])
+        self.assertIn("16:20", correction_audit["details"])
+        self.assertIn("Resulting version: 3", correction_audit["details"])
+
+        page = self.client.get("/shift/10/activity").data
+        self.assertIn(
+            f'/shift/10/activity/{activity_id}/edit">Correct</a>'.encode(),
+            page,
+        )
+
+    def test_creator_can_correct_recorded_activity_and_preserve_recorded_status(self):
+        activity_id = self.insert_activity(description="Recorded activity")
+        self.login(1)
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+
+        page = self.client.get(edit_url)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Correct Activity", page.data)
+        self.assertIn(b"Save Correction", page.data)
+        self.assertNotIn(b"Save &amp; Complete", page.data)
+
+        response = self.client.post(
+            edit_url,
+            data=self.edit_payload(
+                activity_id,
+                start_time="16:20",
+                end_time="16:30",
+                activity_description="Corrected recorded activity",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        corrected = self.activity_row(activity_id)
+        self.assertEqual(corrected["shift_activity_id"], activity_id)
+        self.assertEqual(corrected["status"], "Recorded")
+        self.assertEqual(corrected["start_time"], "16:20")
+        self.assertEqual(corrected["end_time"], "16:30")
+        self.assertEqual(corrected["activity_description"], "Corrected recorded activity")
+        self.assertEqual(corrected["version_number"], 2)
+        self.assertIsNone(corrected["completed_at_utc"])
+        self.assertEqual(
+            [row["activity_type"] for row in self.rows(
+                "SELECT activity_type FROM activity_log ORDER BY activity_id"
+            )],
+            ["shift_activity_updated"],
+        )
+
+    def test_review_acknowledgement_from_any_reviewer_locks_worker_correction(self):
+        activity_id = self.insert_completed_activity()
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute("""
+                INSERT INTO acknowledgements
+                (source_table, source_id, user_id, acknowledgement_type, active)
+                VALUES ('shift_activities', ?, 6, 'Review', 1)
+            """, (activity_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.login(1)
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                edit_url,
+                data=self.edit_payload(
+                    activity_id,
+                    start_time="16:20",
+                    end_time="16:30",
+                    activity_description="Must not save",
+                ),
+            ).status_code,
+            403,
+        )
+        listing = self.client.get("/shift/10/activity")
+        self.assertNotIn(f"/shift/10/activity/{activity_id}/edit".encode(), listing.data)
+
+    def test_completed_activity_correction_requires_original_active_worker_context(self):
+        activity_id = self.insert_completed_activity()
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute(
+                "UPDATE shift_staff SET active = 0, sign_off_at = "
+                "'2026-08-03T23:00:00Z' WHERE shift_id = 10 AND user_id = 1"
+            )
+            conn.execute(
+                "UPDATE shift_activities SET completed_by_user_id = 2 "
+                "WHERE shift_activity_id = ?",
+                (activity_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        self.login(1)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                edit_url,
+                data=self.edit_payload(
+                    activity_id,
+                    start_time="16:20",
+                    end_time="16:30",
+                    activity_description="Must not save",
+                ),
+            ).status_code,
+            403,
+        )
+
+    def test_completed_activity_correction_is_denied_on_closed_or_cancelled_shift(self):
+        self.login(1)
+        for shift_status in ("Closed", "Cancelled"):
+            with self.subTest(shift_status=shift_status):
+                activity_id = self.insert_completed_activity()
+                conn = sqlite3.connect(self.database_path)
+                try:
+                    conn.execute(
+                        "UPDATE shifts SET status = ? WHERE shift_id = 10",
+                        (shift_status,),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                edit_url = f"/shift/10/activity/{activity_id}/edit"
+                self.assertEqual(self.client.get(edit_url).status_code, 403)
+                self.assertEqual(
+                    self.client.post(
+                        edit_url,
+                        data=self.edit_payload(
+                            activity_id,
+                            start_time="16:20",
+                            end_time="16:30",
+                            activity_description="Must not save",
+                        ),
+                    ).status_code,
+                    403,
+                )
+
+                conn = sqlite3.connect(self.database_path)
+                try:
+                    conn.execute(
+                        "UPDATE shifts SET status = 'Open' WHERE shift_id = 10"
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+    def test_handover_completer_and_forged_session_role_cannot_correct_activity(self):
+        activity_id = self.insert_completed_activity(user_id=1)
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.execute(
+                "UPDATE shift_activities SET completed_by_user_id = 2 "
+                "WHERE shift_activity_id = ?",
+                (activity_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        edit_url = f"/shift/10/activity/{activity_id}/edit"
+        self.login(2)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+
+        activity_id = self.insert_completed_activity(user_id=6)
+        self.login(6, role="Support Worker")
+        self.assertEqual(
+            self.client.get(
+                f"/shift/10/activity/{activity_id}/edit"
+            ).status_code,
+            403,
+        )
+
+    def test_final_activity_correction_revalidates_the_interval(self):
+        activity_id = self.insert_completed_activity()
+        before = self.activity_row(activity_id)
+        self.login(1)
+        response = self.client.post(
+            f"/shift/10/activity/{activity_id}/edit",
+            data=self.edit_payload(
+                activity_id,
+                start_time="16:30",
+                end_time="16:20",
+                activity_description="Invalid correction",
+            ),
+        )
+        self.assertEqual(response.status_code, 400)
+        after = self.activity_row(activity_id)
+        self.assertEqual(after, before)
 
     def test_save_noop_is_rejected_without_version_or_audit_change(self):
         activity_id = self.insert_in_progress_activity()
@@ -1006,7 +1257,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         self.assertNotIn(
             f"/shift/10/activity/{other_id}/edit".encode(), response.data
         )
-        self.assertNotIn(
+        self.assertIn(
             f"/shift/10/activity/{recorded_id}/edit".encode(), response.data
         )
 

@@ -5,7 +5,7 @@
 {% include "_documentation_context_banner.html" %}
 
 <div class="card">
-    <h2>Continue Activity</h2>
+    <h2>{% if activity.status == 'In Progress' %}Continue Activity{% else %}Correct Activity{% endif %}</h2>
 
     <p>
         <strong>{{ shift.shift_type }} Shift</strong><br>
@@ -87,11 +87,19 @@
             rows="5"
         >{{ values.get('activity_description') or '' }}</textarea>
 
-        <button type="submit" name="action" value="save">Save</button>
-        <button type="submit" name="action" value="complete">Save &amp; Complete</button>
+        <button type="submit" name="action" value="save">
+            {% if activity.status == 'In Progress' %}Save{% else %}Save Correction{% endif %}
+        </button>
+        {% if activity.status == 'In Progress' %}
+            <button type="submit" name="action" value="complete">Save &amp; Complete</button>
+        {% endif %}
     </form>
 
-    <p>Save &amp; Complete finalizes this Activity and stops normal worker editing.</p>
+    {% if activity.status == 'In Progress' %}
+        <p>Save &amp; Complete finalizes this Activity and stops normal worker editing.</p>
+    {% else %}
+        <p>This correction updates the existing Activity and preserves its finalized status.</p>
+    {% endif %}
 
     <p>
         <a href="{{ url_for('shift_activities', shift_id=shift.shift_id) }}">

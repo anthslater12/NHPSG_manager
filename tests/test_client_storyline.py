@@ -1825,12 +1825,19 @@ class ClientStorylineTests(unittest.TestCase):
             details="Description: Old Activity description",
             related_table="shift_activities", related_id=53
         )
+        self.add_event(
+            "shift_activity_updated", "Activity correction audit",
+            details="start_time: '10:00' -> '11:00'",
+            related_table="shift_activities", related_id=53
+        )
         self.login()
 
         page = self.client.get("/client/1/storyline").data
 
         self.assertIn(b"New authoritative description", page)
         self.assertNotIn(b"Old Activity description", page)
+        self.assertNotIn(b"Activity correction audit", page)
+        self.assertEqual(page.count(b'class="storyline-event"'), 1)
 
     def test_activity_storyline_rehydration_applies_to_authorized_roles(self):
         self.add_shift_activity(

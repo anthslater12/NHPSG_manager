@@ -82,6 +82,22 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
                 storyline_visible INTEGER NOT NULL DEFAULT 0,
                 event_datetime TEXT
             );
+            CREATE TABLE acknowledgements (
+                acknowledgement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                acknowledged_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                comment TEXT,
+                acknowledgement_type TEXT DEFAULT 'Read',
+                active INTEGER NOT NULL DEFAULT 1,
+                invalidated_at_utc TEXT,
+                invalidated_by_user_id INTEGER,
+                invalidation_reason TEXT
+            );
+            CREATE UNIQUE INDEX ux_acknowledgements_active_source_user
+                ON acknowledgements(source_table, source_id, user_id)
+                WHERE active = 1;
             CREATE TABLE sleep_events (
                 sleep_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 client_id INTEGER NOT NULL,

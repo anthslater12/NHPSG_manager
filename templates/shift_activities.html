@@ -138,13 +138,12 @@
                     <td>{{ entry.recorded_by_name }}</td>
                     <td>{{ entry.created_at }}</td>
                     <td>
-                        {% if shift.editable and entry.status == 'In Progress'
-                              and entry.recorded_by_user_id == shift.recorded_by_user_id %}
+                        {% if entry.can_correct %}
                             <a href="{{ url_for(
                                 'shift_activity_edit',
                                 shift_id=shift.shift_id,
                                 activity_id=entry.shift_activity_id
-                            ) }}">Continue</a>
+                            ) }}">{% if entry.status == 'In Progress' %}Continue{% else %}Correct{% endif %}</a>
                         {% elif shift.editable and entry.status == 'In Progress' %}
                             <a href="{{ url_for(
                                 'shift_activity_handover_complete',

@@ -371,6 +371,11 @@ SHIFT_ACTIVITY_FINALIZED_STATUSES = frozenset((
     "Completed",
     "Recorded",
 ))
+SHIFT_ACTIVITY_CORRECTABLE_STATUSES = frozenset((
+    "In Progress",
+    "Completed",
+    "Recorded",
+))
 SHIFT_ACTIVITY_LIFECYCLE_ACTION_FIELD = "lifecycle_action"
 SHIFT_ACTIVITY_LIFECYCLE_ACTIONS = frozenset(("in_progress", "recorded"))
 SHIFT_ACTIVITY_EDITABLE_FIELDS = (
@@ -9229,14 +9234,14 @@ def _activity_documentation_context_schema_available(conn):
     return True
 
 
-def get_shift_activity_in_progress_edit_context(
+def get_shift_activity_edit_context(
     conn, shift_id, activity_id, user_id
 ):
-    """Return the active creator context for one editable Activity draft."""
+    """Return the active creator context for one correctable Activity."""
     actor = get_active_authenticated_user(conn, user_id)
     if actor["role"] != "Support Worker":
         raise PermissionError(
-            "Only the recording Support Worker may edit an In Progress Activity."
+            "Only the recording Support Worker may edit this Activity."
         )
 
     if not _activity_documentation_context_schema_available(conn):
@@ -9265,10 +9270,19 @@ def get_shift_activity_in_progress_edit_context(
         WHERE sa.shift_activity_id = ?
           AND sa.shift_id = ?
           AND sa.recorded_by_user_id = ?
+          AND sa.status IN ('In Progress', 'Completed', 'Recorded')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM acknowledgements ack
+              WHERE ack.source_table = 'shift_activities'
+                AND ack.source_id = sa.shift_activity_id
+                AND ack.acknowledgement_type = 'Review'
+                AND ack.active = 1
+          )
     """, (activity_id, shift_id, actor["user_id"])).fetchone()
-    if activity is None or activity["status"] != "In Progress":
+    if activity is None:
         raise PermissionError(
-            "Only the recording Support Worker may edit an In Progress Activity."
+            "Only the recording Support Worker may edit an unreviewed Activity."
         )
     if (
         activity["activity_client_id"] != context["client_id"]
@@ -9277,7 +9291,6 @@ def get_shift_activity_in_progress_edit_context(
     ):
         raise PermissionError("Activity client and shift context do not match.")
     return actor, context, activity
-
 
 def _get_active_worker_client_documentation_contexts(
     conn, user_id, client_id
@@ -9701,7 +9714,7 @@ def require_active_shift_activity_context(conn, shift_id, user_id):
 
 
 def get_shift_activity_entries(conn, shift_id):
-    return conn.execute("""
+    rows = conn.execute("""
         SELECT
             sa.shift_activity_id,
             sa.shift_id,
@@ -9714,12 +9727,21 @@ def get_shift_activity_entries(conn, shift_id):
             sa.activity_description,
             sa.created_at,
             sa.status,
+            CASE WHEN EXISTS (
+                SELECT 1
+                FROM acknowledgements ack
+                WHERE ack.source_table = 'shift_activities'
+                  AND ack.source_id = sa.shift_activity_id
+                  AND ack.acknowledgement_type = 'Review'
+                  AND ack.active = 1
+            ) THEN 1 ELSE 0 END AS has_active_review,
             u.full_name AS recorded_by_name
         FROM shift_activities sa
         JOIN users u ON u.user_id = sa.recorded_by_user_id
         WHERE sa.shift_id = ?
         ORDER BY sa.created_at ASC, sa.shift_activity_id ASC
     """, (shift_id,)).fetchall()
+    return [dict(row) for row in rows]
 
 
 def format_food_fluid_storyline_summary(interaction_type, item_description):
@@ -26009,6 +26031,13 @@ def shift_activities(shift_id):
             ))
 
         entries = get_shift_activity_entries(conn, shift_id)
+        for entry in entries:
+            entry["can_correct"] = bool(
+                context["editable"]
+                and entry["recorded_by_user_id"] == context["recorded_by_user_id"]
+                and entry["status"] in SHIFT_ACTIVITY_CORRECTABLE_STATUSES
+                and not entry["has_active_review"]
+            )
         if context["editable"]:
             handover_entries = get_shift_activity_handover_records(
                 conn,
@@ -26086,14 +26115,14 @@ def _shift_activity_edit_form_values(activity):
     methods=["GET", "POST"],
 )
 def shift_activity_edit(shift_id, activity_id):
-    """Allow only the active creator to edit one In Progress Activity."""
+    """Allow the active creator to correct one unreviewed Activity."""
     if "user_id" not in session:
         return redirect(url_for("login"))
 
     conn = get_db()
     values = {}
     try:
-        actor, context, activity = get_shift_activity_in_progress_edit_context(
+        actor, context, activity = get_shift_activity_edit_context(
             conn, shift_id, activity_id, session["user_id"]
         )
         if request.method == "GET":
@@ -26115,7 +26144,7 @@ def shift_activity_edit(shift_id, activity_id):
         conn.execute("BEGIN IMMEDIATE")
         try:
             actor, context, current = (
-                get_shift_activity_in_progress_edit_context(
+                get_shift_activity_edit_context(
                     conn, shift_id, activity_id, session["user_id"]
                 )
             )
@@ -26126,6 +26155,18 @@ def shift_activity_edit(shift_id, activity_id):
 
             candidate = dict(current)
             candidate.update(mutable_values)
+            if (
+                parsed["action"] == "complete"
+                and current["status"] != "In Progress"
+            ):
+                raise PermissionError(
+                    "Only an In Progress Activity may be completed."
+                )
+            if (
+                parsed["action"] == "save"
+                and current["status"] in SHIFT_ACTIVITY_FINALIZED_STATUSES
+            ):
+                validate_shift_activity_final_candidate(candidate)
             if parsed["action"] == "complete":
                 validate_shift_activity_final_candidate(candidate)
             changes = {}
@@ -26169,7 +26210,8 @@ def shift_activity_edit(shift_id, activity_id):
             updated = conn.execute(
                 "UPDATE shift_activities SET " + ", ".join(assignments) + " "
                 "WHERE shift_activity_id = ? AND shift_id = ? "
-                "AND recorded_by_user_id = ? AND status = 'In Progress' "
+                "AND recorded_by_user_id = ? "
+                "AND status IN ('In Progress', 'Completed', 'Recorded') "
                 "AND version_number = ?",
                 parameters,
             )
