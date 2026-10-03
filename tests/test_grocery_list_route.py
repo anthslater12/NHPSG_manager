@@ -225,6 +225,117 @@ class GroceryListRouteTests(unittest.TestCase):
         self.assertIn(b"Not Purchased", body)
         self.assertIn("—".encode(), body)
 
+    def test_each_section_uses_the_same_edit_column_structure(self):
+        self.seed_content()
+        self.login(2)
+        response = self.client.get("/client/10/grocery-list")
+        self.assertEqual(response.status_code, 200)
+
+        tables = re.findall(
+            rb'<table class="grocery-items-table grocery-items-table-edit">'
+            rb'(.*?)</table>',
+            response.data,
+            re.DOTALL,
+        )
+        self.assertEqual(len(tables), 2)
+        expected_columns = [
+            b"grocery-column-item",
+            b"grocery-column-stock",
+            b"grocery-column-needed",
+            b"grocery-column-purchased",
+            b"grocery-column-actions",
+        ]
+        for table in tables:
+            self.assertEqual(
+                re.findall(rb'<col class="([^"]+)"', table),
+                expected_columns,
+            )
+
+    def test_new_section_inherits_the_same_edit_column_structure(self):
+        self.seed_content()
+        self.login(2)
+        response = self.client.post(
+            "/client/10/grocery-list/sections/new",
+            data={"name": "New Section"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self.connect()
+        section_id = conn.execute(
+            "SELECT section_id FROM grocery_list_sections "
+            "WHERE name = 'New Section'"
+        ).fetchone()[0]
+        conn.close()
+        response = self.client.post(
+            f"/client/10/grocery-list/sections/{section_id}/items/new",
+            data={"item_name": "New Section Item"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        response = self.client.get("/client/10/grocery-list")
+        self.assertEqual(response.status_code, 200)
+        tables = re.findall(
+            rb'<table class="grocery-items-table grocery-items-table-edit">'
+            rb'(.*?)</table>',
+            response.data,
+            re.DOTALL,
+        )
+        self.assertEqual(len(tables), 3)
+        expected_columns = [
+            b"grocery-column-item",
+            b"grocery-column-stock",
+            b"grocery-column-needed",
+            b"grocery-column-purchased",
+            b"grocery-column-actions",
+        ]
+        self.assertEqual(
+            [
+                re.findall(rb'<col class="([^"]+)"', table)
+                for table in tables
+            ],
+            [expected_columns] * 3,
+        )
+
+    def test_view_only_sections_use_the_same_four_column_structure(self):
+        self.seed_content()
+        conn = self.connect()
+        grocery_list_id = conn.execute(
+            "SELECT grocery_list_id FROM grocery_lists WHERE client_id = 10"
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO grocery_list_shares
+            (grocery_list_id, user_id, permission, shared_by_user_id,
+             shared_at_utc)
+            VALUES (?, 5, 'VIEW', 2, '2026-09-20T01:00:00Z')
+            """,
+            (grocery_list_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(5)
+        response = self.client.get("/client/10/grocery-list")
+        self.assertEqual(response.status_code, 200)
+        tables = re.findall(
+            rb'<table class="grocery-items-table grocery-items-table-view">'
+            rb'(.*?)</table>',
+            response.data,
+            re.DOTALL,
+        )
+        self.assertEqual(len(tables), 2)
+        expected_columns = [
+            b"grocery-column-item",
+            b"grocery-column-stock",
+            b"grocery-column-needed",
+            b"grocery-column-purchased",
+        ]
+        for table in tables:
+            self.assertEqual(
+                re.findall(rb'<col class="([^"]+)"', table),
+                expected_columns,
+            )
+
     def test_amount_needed_highlight_uses_only_non_blank_text(self):
         self.seed_content()
         conn = self.connect()

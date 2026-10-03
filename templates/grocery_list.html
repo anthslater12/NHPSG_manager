@@ -221,7 +221,14 @@
 
                     {% if section["items"] %}
                         <div class="table-scroll grocery-table-scroll">
-                            <table class="grocery-items-table">
+                            <table class="grocery-items-table{% if can_edit %} grocery-items-table-edit{% else %} grocery-items-table-view{% endif %}">
+                                <colgroup>
+                                    <col class="grocery-column-item">
+                                    <col class="grocery-column-stock">
+                                    <col class="grocery-column-needed">
+                                    <col class="grocery-column-purchased">
+                                    {% if can_edit %}<col class="grocery-column-actions">{% endif %}
+                                </colgroup>
                                 <thead>
                                     <tr>
                                         <th scope="col">Item</th>

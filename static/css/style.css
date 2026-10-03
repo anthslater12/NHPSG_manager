@@ -1690,6 +1690,42 @@ td,th{
 
 .grocery-table-scroll table {
     min-width: 760px;
+    table-layout: fixed;
+}
+
+.grocery-items-table-view {
+    --grocery-item-column-width: 40%;
+    --grocery-stock-column-width: 20%;
+    --grocery-needed-column-width: 20%;
+    --grocery-purchased-column-width: 20%;
+}
+
+.grocery-items-table-edit {
+    --grocery-item-column-width: 34%;
+    --grocery-stock-column-width: 16%;
+    --grocery-needed-column-width: 16%;
+    --grocery-purchased-column-width: 14%;
+    --grocery-actions-column-width: 20%;
+}
+
+.grocery-items-table .grocery-column-item {
+    width: var(--grocery-item-column-width);
+}
+
+.grocery-items-table .grocery-column-stock {
+    width: var(--grocery-stock-column-width);
+}
+
+.grocery-items-table .grocery-column-needed {
+    width: var(--grocery-needed-column-width);
+}
+
+.grocery-items-table .grocery-column-purchased {
+    width: var(--grocery-purchased-column-width);
+}
+
+.grocery-items-table .grocery-column-actions {
+    width: var(--grocery-actions-column-width);
 }
 
 .grocery-items-table th,
