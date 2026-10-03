@@ -276,6 +276,31 @@ class SleepEventsTests(unittest.TestCase):
             [("sleep_fell_asleep", 1), ("sleep_event_updated", 0)],
         )
 
+    def test_newly_recorded_sleep_event_is_correctable_with_sleep_authorization(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE shift_staff SET actual_start_time = NULL, sign_on_at = NULL "
+            "WHERE shift_id = 10 AND user_id = 1"
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(1)
+        self.assertEqual(self.client.get("/shift/10/sleep").status_code, 200)
+        response = self.post(
+            "fell_asleep", event_local="2026-08-02T08:00", note="Settled"
+        )
+        self.assertEqual(response.status_code, 302)
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+
+        page = self.client.get("/shift/10/sleep")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Correct", page.data)
+        self.assertIn(
+            f"/shift/10/sleep/{sleep_event_id}/edit".encode(),
+            page.data,
+        )
+
     def test_other_worker_reviewed_and_signed_off_entries_have_no_correct(self):
         self.login(1)
         self.post("fell_asleep", note="Settled")

@@ -2309,16 +2309,9 @@ def get_sleep_edit_context(conn, shift_id, sleep_event_id, user_id):
     if actor["role"] != "Support Worker":
         raise PermissionError("Only the recording Support Worker may edit Sleep.")
 
-    documentation_context = get_worker_documentation_shift_context(
+    sleep_context = get_active_sleep_shift_context(
         conn, shift_id, actor["user_id"]
     )
-    if documentation_context is None or (
-        documentation_context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
-        or documentation_context.get("shift_status") != "Open"
-    ):
-        raise PermissionError(
-            "Sleep editing requires the worker's open active shift."
-        )
 
     event = conn.execute("""
         SELECT se.*, c.client_name, s.shift_date, s.shift_type,
@@ -2336,7 +2329,7 @@ def get_sleep_edit_context(conn, shift_id, sleep_event_id, user_id):
         raise PermissionError(
             "Only the recording Support Worker may edit this Sleep event."
         )
-    if event["client_id"] != documentation_context["client_id"]:
+    if event["client_id"] != sleep_context["client_id"]:
         raise PermissionError("Sleep client and shift context do not match.")
 
     reviewed = conn.execute("""
@@ -2350,7 +2343,7 @@ def get_sleep_edit_context(conn, shift_id, sleep_event_id, user_id):
     """, (sleep_event_id,)).fetchone()
     if reviewed is not None:
         raise PermissionError("Reviewed Sleep events cannot be corrected.")
-    return actor, documentation_context, event
+    return actor, sleep_context, event
 
 
 def get_sleep_events(conn, shift_id, viewer_user_id=None):
