@@ -98,4 +98,30 @@
 <p><strong>Do not guess motives or assume that a Setting Event caused the Behaviour.</strong></p>
 </div>
 </details>
-</div>{% endblock %}
+</div>
+{% if shift_context and not edit_mode %}
+<div class="card">
+<h2>Behaviour List for this Shift</h2>
+{% if behaviour_shift_occurrences %}
+<div class="table-scroll">
+<table>
+<thead><tr><th>Occurrence</th><th>Behaviour</th><th>Notes</th><th>Status</th><th>Recorded By</th><th>Action</th></tr></thead>
+<tbody>
+{% for occurrence in behaviour_shift_occurrences %}
+<tr>
+<td>{{ occurrence.local_time }}</td>
+<td>{{ occurrence.summary }}</td>
+<td>{{ occurrence.notes_summary }}</td>
+<td>{{ occurrence.status }}</td>
+<td>{{ occurrence.recorder_name }}</td>
+<td>{% if occurrence.can_correct %}<a href="{{ url_for('behaviour_occurrence_edit', shift_id=occurrence.shift_id, occurrence_id=occurrence.behaviour_occurrence_id) }}">Correct Behaviour</a>{% elif occurrence.can_continue %}<a href="{{ url_for('behaviour_occurrence_edit', shift_id=occurrence.shift_id, occurrence_id=occurrence.behaviour_occurrence_id) }}">Edit / Continue</a>{% else %}—{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% else %}
+<p>No Behaviour occurrences have been recorded for this shift.</p>
+{% endif %}
+</div>
+{% endif %}{% endblock %}

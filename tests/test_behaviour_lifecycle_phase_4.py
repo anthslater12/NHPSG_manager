@@ -229,7 +229,7 @@ class BehaviourLifecyclePhaseFourTests(BehaviourLifecyclePhaseTwoTests):
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.location, "/behaviour/week/2026-08-03")
+        self.assertEqual(response.location, "/shift/10/behaviour")
         page = self.client.get(response.location)
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"Behaviour correction saved successfully.", page.data)

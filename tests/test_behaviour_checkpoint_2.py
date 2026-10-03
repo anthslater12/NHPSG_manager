@@ -25,9 +25,15 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT,
           full_name TEXT, role TEXT, active INTEGER);
         CREATE TABLE clients (client_id INTEGER PRIMARY KEY, client_name TEXT, active INTEGER);
-        CREATE TABLE shifts (shift_id INTEGER PRIMARY KEY, client_id INTEGER, status TEXT);
-        CREATE TABLE shift_staff (shift_staff_id INTEGER PRIMARY KEY, shift_id INTEGER,
-          user_id INTEGER, active INTEGER);
+        CREATE TABLE shifts (
+          shift_id INTEGER PRIMARY KEY, client_id INTEGER, shift_date TEXT,
+          shift_type TEXT, status TEXT, scheduled_end_time TEXT
+        );
+        CREATE TABLE shift_staff (
+          shift_staff_id INTEGER PRIMARY KEY, shift_id INTEGER, user_id INTEGER,
+          actual_start_time TEXT, actual_end_at_utc TEXT, sign_on_at TEXT,
+          sign_off_at TEXT, active INTEGER
+        );
         CREATE TABLE activity_log (activity_id INTEGER PRIMARY KEY, activity_datetime TEXT,
           activity_class TEXT NOT NULL, activity_type TEXT NOT NULL, user_id INTEGER, client_id INTEGER,
           shift_id INTEGER, related_table TEXT, related_id INTEGER, summary TEXT NOT NULL, details TEXT, storyline_visible INTEGER NOT NULL DEFAULT 0, success INTEGER, event_datetime TEXT);
@@ -36,8 +42,20 @@ class BehaviourCheckpointTwoTests(unittest.TestCase):
         INSERT INTO users VALUES (3,'other','x','Other','Support Worker',1);
         INSERT INTO clients VALUES (1,'Active Client',1);
         INSERT INTO clients VALUES (2,'Inactive Client',0);
-        INSERT INTO shifts VALUES (10,1,'Open'), (11,1,'Closed'), (12,1,'Cancelled'), (20,2,'Open');
-        INSERT INTO shift_staff VALUES (1,10,1,1), (2,20,1,1);
+        CREATE TABLE acknowledgements (
+          acknowledgement_id INTEGER PRIMARY KEY, source_table TEXT NOT NULL,
+          source_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+          acknowledged_at TEXT NOT NULL, acknowledgement_type TEXT NOT NULL,
+          comment TEXT, active INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO shifts VALUES
+          (10,1,'2026-08-03','Day','Open','20:00'),
+          (11,1,'2026-08-03','Day','Closed','20:00'),
+          (12,1,'2026-08-03','Day','Cancelled','20:00'),
+          (20,2,'2026-08-03','Day','Open','20:00');
+        INSERT INTO shift_staff VALUES
+          (1,10,1,'08:00',NULL,'2026-08-03T15:00:00Z',NULL,1),
+          (2,20,1,'08:00',NULL,'2026-08-03T15:00:00Z',NULL,1);
         """)
         migration.migrate(conn)
         setting_event_migration.migrate(conn)

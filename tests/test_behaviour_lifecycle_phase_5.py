@@ -93,6 +93,151 @@ class BehaviourLifecyclePhaseFiveTests(BehaviourLifecyclePhaseFourTests):
         self.assertIn(b"/shift/10/behaviour/1/edit", page)
         self.assertNotIn(b"/shift/10/behaviour/2/edit", page)
 
+    def test_behaviour_recording_page_shows_empty_current_shift_list(self):
+        self.login()
+        page = self.client.get("/shift/10/behaviour")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Behaviour List for this Shift", page.data)
+        self.assertIn(
+            b"No Behaviour occurrences have been recorded for this shift.",
+            page.data,
+        )
+
+    def test_behaviour_recording_page_shows_own_in_progress_edit_control(self):
+        occurrence = self.create_in_progress()
+        page = self.client.get("/shift/10/behaviour")
+        self.assertIn(b"Behaviour List for this Shift", page.data)
+        self.assertIn(b"Edit / Continue", page.data)
+        self.assertIn(
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit".encode(),
+            page.data,
+        )
+
+    def test_behaviour_edit_form_does_not_render_shift_list_empty_state(self):
+        occurrence = self.create_in_progress()
+        page = self.client.get(
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit"
+        )
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn(b"Behaviour List for this Shift", page.data)
+        self.assertNotIn(
+            b"No Behaviour occurrences have been recorded for this shift.",
+            page.data,
+        )
+
+    def test_behaviour_recording_page_shows_own_finalized_correction_control(self):
+        occurrence = self.create_completed_v1()
+        page = self.client.get("/shift/10/behaviour")
+        self.assertIn(b"Completed", page.data)
+        self.assertIn(b"Correct Behaviour", page.data)
+        self.assertIn(
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit".encode(),
+            page.data,
+        )
+
+    def test_reviewed_behaviour_remains_visible_without_correction_control(self):
+        occurrence = self.create_completed_v1()
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO acknowledgements "
+            "(source_table, source_id, user_id, acknowledged_at, "
+            "acknowledgement_type, active) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "behaviour_occurrences",
+                occurrence["behaviour_occurrence_id"],
+                3,
+                "2026-08-03T16:00:00Z",
+                "Review",
+                1,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        page = self.client.get("/shift/10/behaviour")
+        self.assertIn(b"Completed", page.data)
+        self.assertNotIn(b"Correct Behaviour", page.data)
+        self.assertNotIn(
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit".encode(),
+            page.data,
+        )
+
+    def test_voided_behaviour_has_no_correction_control_on_recording_page(self):
+        occurrence = self.create_recorded_v1()
+        self.login(user_id=3, shift_id=None)
+        response = self.client.post(
+            f"/behaviour/occurrences/{occurrence['behaviour_occurrence_id']}/void",
+            data={"void_reason": "Incorrect record"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        self.login()
+        page = self.client.get("/shift/10/behaviour")
+        self.assertIn(b"Voided", page.data)
+        self.assertNotIn(b"Correct Behaviour", page.data)
+        self.assertNotIn(b"Edit / Continue", page.data)
+
+    def test_another_workers_behaviour_has_no_edit_controls_on_recording_page(self):
+        occurrence = self.create_completed_v1()
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE behaviour_occurrences SET recorded_by_user_id = 2 "
+            "WHERE behaviour_occurrence_id = ?",
+            (occurrence["behaviour_occurrence_id"],),
+        )
+        conn.commit()
+        conn.close()
+
+        page = self.client.get("/shift/10/behaviour")
+        self.assertIn(b"Other Worker", page.data)
+        self.assertNotIn(b"Correct Behaviour", page.data)
+        self.assertNotIn(b"Edit / Continue", page.data)
+
+    def test_signed_off_worker_cannot_get_recording_page_controls(self):
+        self.create_completed_v1()
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE shift_staff SET active = 0, actual_end_at_utc = ?, "
+            "sign_off_at = ? WHERE shift_id = 10 AND user_id = 1",
+            ("2026-08-03T16:00:00Z", "2026-08-03T16:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+
+        page = self.client.get("/shift/10/behaviour")
+        self.assertNotEqual(page.status_code, 200)
+        self.assertNotIn(b"Correct Behaviour", page.data)
+
+    def test_finalized_correction_from_recording_page_returns_to_same_page(self):
+        occurrence = self.create_completed_v1()
+        page = self.client.get("/shift/10/behaviour")
+        self.assertIn(b"Correct Behaviour", page.data)
+
+        payload = self.edit_payload(occurrence, action="save")
+        payload["notes"] = "Corrected from shift page"
+        response = self.client.post(
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit",
+            data=payload,
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/shift/10/behaviour")
+
+        corrected_page = self.client.get(response.location)
+        self.assertEqual(corrected_page.status_code, 200)
+        self.assertIn(b"Behaviour correction saved successfully.", corrected_page.data)
+        self.assertIn(b"Corrected from shift page", corrected_page.data)
+
+    def test_weekly_behaviour_page_remains_available(self):
+        occurrence = self.create_completed_v1()
+        page = self.client.get("/behaviour/week/2026-08-03")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Completed", page.data)
+        self.assertIn(b"Correct Behaviour", page.data)
+        self.assertIn(
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit".encode(),
+            page.data,
+        )
+
     def test_current_shift_excludes_finalized_and_voided_records(self):
         for status in ("Completed", "Recorded", "Voided"):
             with self.subTest(status=status):

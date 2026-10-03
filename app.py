@@ -3249,6 +3249,53 @@ def _behaviour_week_abc_sections(row):
     return sections
 
 
+def _behaviour_shift_occurrences(conn, shift_id, viewer_user_id=None):
+    rows = conn.execute("""
+        SELECT bo.*, u.full_name AS recorder_name
+        FROM behaviour_occurrences bo
+        JOIN users u ON u.user_id = bo.recorded_by_user_id
+        WHERE bo.shift_id = ?
+        ORDER BY bo.occurred_at_utc, bo.behaviour_occurrence_id
+    """, (shift_id,)).fetchall()
+    occurrences = []
+    for row in rows:
+        item = dict(row)
+        local = behaviour_utc_to_vancouver(item["occurred_at_utc"])
+        item["local_time"] = local.strftime("%Y-%m-%d %H:%M")
+        item["categories"] = _behaviour_categories_for_row(row)
+        item["summary"] = ", ".join(
+            item["categories"]
+        ) if item["record_format"] != "ABC" else ", ".join(
+            label for label in (
+                ABC_FIELD_LABELS[field]
+                for field in ABC_BEHAVIOUR_FIELDS if item.get(field)
+            )
+        )
+        if not item["summary"]:
+            item["summary"] = "Behaviour occurrence recorded"
+        item["notes_summary"] = str(
+            item.get("notes") or item.get("additional_notes") or ""
+        ).strip()
+        item["can_continue"] = False
+        item["can_correct"] = False
+        if viewer_user_id is not None:
+            try:
+                get_behaviour_edit_context(
+                    conn,
+                    shift_id,
+                    item["behaviour_occurrence_id"],
+                    viewer_user_id,
+                )
+                item["can_continue"] = item["status"] == "In Progress"
+                item["can_correct"] = item["status"] in (
+                    "Completed", "Recorded"
+                )
+            except PermissionError:
+                pass
+        occurrences.append(item)
+    return occurrences
+
+
 def _behaviour_week_occurrences(conn, monday, viewer_user_id=None):
     start_utc, end_utc = get_behaviour_operational_week_range(monday)
     rows = conn.execute("""
@@ -5528,7 +5575,8 @@ def _render_behaviour_record(
     submission_token=None, duplicate_warning=None,
     documentation_context=None, documentation_context_alternatives=None,
     form_action=None, edit_mode=False, expected_version=None,
-    lifecycle_action=None, setting_event_options=None, correction_mode=False
+    lifecycle_action=None, setting_event_options=None, correction_mode=False,
+    behaviour_shift_occurrences=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -5563,6 +5611,7 @@ def _render_behaviour_record(
         expected_version=expected_version,
         lifecycle_action=lifecycle_action,
         correction_mode=correction_mode,
+        behaviour_shift_occurrences=behaviour_shift_occurrences or [],
         documentation_context=documentation_context,
         documentation_context_alternatives=(
             documentation_context_alternatives or []
@@ -7607,12 +7656,17 @@ def behaviour_record(shift_id=None):
             if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
             else None
         )
+    behaviour_shift_occurrences = (
+        _behaviour_shift_occurrences(conn, shift_id, user["user_id"])
+        if shift_id is not None else []
+    )
 
     if request.method == "GET":
         selected = shift["client_id"] if shift is not None else request.args.get("client_id", type=int)
         response = _render_behaviour_record(
             conn, selected, shift_context=shift is not None,
             documentation_context=documentation_context,
+            behaviour_shift_occurrences=behaviour_shift_occurrences,
             documentation_context_alternatives=(
                 documentation_context_alternatives
             )
@@ -7782,6 +7836,7 @@ def behaviour_record(shift_id=None):
                     shift_context=True, submission_token=token,
                     duplicate_warning=duplicate_warning,
                     documentation_context=documentation_context,
+                    behaviour_shift_occurrences=behaviour_shift_occurrences,
                     documentation_context_alternatives=(
                         documentation_context_alternatives
                     ), lifecycle_action=lifecycle_action
@@ -7872,6 +7927,7 @@ def behaviour_record(shift_id=None):
             shift_context=shift is not None,
             submission_token=values.get("submission_token"),
             documentation_context=documentation_context,
+            behaviour_shift_occurrences=behaviour_shift_occurrences,
             documentation_context_alternatives=(
                 documentation_context_alternatives
             ), lifecycle_action=locals().get("lifecycle_action")
@@ -8252,13 +8308,10 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
             raise
         if action == "save":
             if correction_mode:
-                correction_week = get_behaviour_operational_week_start(
-                    behaviour_utc_to_vancouver(occurrence_utc)
-                )
                 flash("Behaviour correction saved successfully.")
                 return redirect(url_for(
-                    "behaviour_weekly",
-                    monday=correction_week.isoformat(),
+                    "behaviour_record",
+                    shift_id=shift_id,
                 ))
             flash("Behaviour progress saved.")
             return redirect(url_for(
