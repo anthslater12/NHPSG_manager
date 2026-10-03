@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "_documentation_context_banner.html" %}
-<div class="card"><h2>{% if edit_mode %}Continue Behaviour Record{% else %}Record Behaviour{% endif %}</h2>
+<div class="card"><h2>{% if correction_mode %}Correct Behaviour Record{% elif edit_mode %}Continue Behaviour Record{% else %}Record Behaviour{% endif %}</h2>
 {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
 <form method="post"{% if form_action %} action="{{ form_action }}"{% endif %}>
 {% if edit_mode %}<input type="hidden" name="expected_version" value="{{ expected_version }}">{% else %}<input type="hidden" name="submission_token" value="{{ submission_token }}">{% endif %}
@@ -73,7 +73,7 @@
 <h3>Behaviour Categories</h3><div class="checkbox-group">{% for field in category_fields %}<label class="checkbox-option"><input type="checkbox" name="{{ field }}" value="1" {% if values.get(field) == '1' %}checked{% endif %}><span>{{ category_labels[field] }}</span></label>{% endfor %}</div>
 <label>Notes</label><textarea name="notes">{{ values.get('notes', '') }}</textarea>
 {% endif %}
-{% if not duplicate_warning %}{% if edit_mode %}<button type="submit" name="action" value="save">Save In Progress</button> <button type="submit" name="action" value="complete">Save &amp; Complete</button><p>Save &amp; Complete finalizes this record and stops normal worker editing.</p>{% elif shift_context %}<button type="submit" name="lifecycle_action" value="in_progress">Save In Progress</button> <button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% else %}<button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% endif %}{% endif %}</form>
+{% if not duplicate_warning %}{% if correction_mode %}<button type="submit" name="action" value="save">Save Correction</button><p>This correction preserves the finalized Behaviour status and completion information.</p>{% elif edit_mode %}<button type="submit" name="action" value="save">Save In Progress</button> <button type="submit" name="action" value="complete">Save &amp; Complete</button><p>Save &amp; Complete finalizes this record and stops normal worker editing.</p>{% elif shift_context %}<button type="submit" name="lifecycle_action" value="in_progress">Save In Progress</button> <button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% else %}<button type="submit" name="lifecycle_action" value="recorded">Record/Submit Behaviour <span class="sr-only">(Save once)</span></button>{% endif %}{% endif %}</form>
 <details class="behaviour-support-information">
 <summary>Behaviour Support Information</summary>
 <div class="behaviour-support-content">

@@ -51,7 +51,9 @@
                     {% if item.notes %}<section class="behaviour-review-section"><h5>Notes</h5><div class="behaviour-review-nested">{{ item.notes }}</div></section>{% endif %}
                 </div>
             {% endif %}
-            {% if item.can_continue %}
+            {% if item.can_correct %}
+                <p><a class="button" href="{{ url_for('behaviour_occurrence_edit', shift_id=item.shift_id, occurrence_id=item.behaviour_occurrence_id) }}">Correct Behaviour</a></p>
+            {% elif item.can_continue %}
                 <p><a class="button" href="{{ url_for('behaviour_occurrence_edit', shift_id=item.shift_id, occurrence_id=item.behaviour_occurrence_id) }}">Edit / Continue</a></p>
             {% endif %}
             {% if item.status == 'Voided' %}

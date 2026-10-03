@@ -64,7 +64,7 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
             data=self.edit_payload(occurrence)
         )
 
-    def test_creator_completes_complete_abc_and_worker_edit_locks(self):
+    def test_creator_completes_complete_abc_and_worker_can_correct(self):
         occurrence = self.complete_abc_record()
         self.login(1)
         response = self.complete(occurrence)
@@ -84,7 +84,7 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
             self.client.get(
                 "/shift/10/behaviour/1/edit"
             ).status_code,
-            403
+            200
         )
         import app
         week = app.get_behaviour_operational_week_start(
@@ -93,6 +93,7 @@ class BehaviourLifecyclePhaseThreeTests(BehaviourLifecyclePhaseTwoTests):
         weekly = self.client.get(f"/behaviour/week/{week.isoformat()}")
         self.assertIn(b"Completed", weekly.data)
         self.assertNotIn(b"Edit / Continue", weekly.data)
+        self.assertIn(b"Correct Behaviour", weekly.data)
 
         conn = sqlite3.connect(self.path)
         details = conn.execute(

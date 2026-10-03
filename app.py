@@ -3285,23 +3285,21 @@ def _behaviour_week_occurrences(conn, monday, viewer_user_id=None):
             else "Voided" if item["status"] == "Voided" else "Active"
         )
         item["can_continue"] = False
-        if (
-            viewer_user_id is not None
-            and item["status"] == "In Progress"
-            and item["recorded_by_user_id"] == viewer_user_id
-            and item.get("shift_id")
-        ):
+        item["can_correct"] = False
+        if viewer_user_id is not None and item.get("shift_id"):
             try:
-                context = get_worker_documentation_shift_context(
-                    conn, item["shift_id"], viewer_user_id
+                get_behaviour_edit_context(
+                    conn,
+                    item["shift_id"],
+                    item["behaviour_occurrence_id"],
+                    viewer_user_id,
                 )
-                item["can_continue"] = bool(
-                    context
-                    and context["documentation_access"] == DOCUMENTATION_ACCESS_ACTIVE
-                    and context.get("shift_status") == "Open"
+                item["can_continue"] = item["status"] == "In Progress"
+                item["can_correct"] = item["status"] in (
+                    "Completed", "Recorded"
                 )
             except PermissionError:
-                item["can_continue"] = False
+                pass
         item["shift_type"] = None
         if item.get("shift_id"):
             shift_table = conn.execute(
@@ -5530,7 +5528,7 @@ def _render_behaviour_record(
     submission_token=None, duplicate_warning=None,
     documentation_context=None, documentation_context_alternatives=None,
     form_action=None, edit_mode=False, expected_version=None,
-    lifecycle_action=None, setting_event_options=None
+    lifecycle_action=None, setting_event_options=None, correction_mode=False
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -5564,6 +5562,7 @@ def _render_behaviour_record(
         form_action=form_action, edit_mode=edit_mode,
         expected_version=expected_version,
         lifecycle_action=lifecycle_action,
+        correction_mode=correction_mode,
         documentation_context=documentation_context,
         documentation_context_alternatives=(
             documentation_context_alternatives or []
@@ -7923,16 +7922,19 @@ def _behaviour_edit_form_values(occurrence, setting_event_selections=()):
     methods=["GET", "POST"]
 )
 def behaviour_occurrence_edit(shift_id, occurrence_id):
-    """Allow only the active creator to continue an In Progress occurrence."""
+    """Allow the active creator to edit an unreviewed Behaviour occurrence."""
     if "user_id" not in session:
         return redirect(url_for("login"))
 
     conn = get_db()
     try:
         actor, documentation_context, occurrence = (
-            get_behaviour_in_progress_edit_context(
+            get_behaviour_edit_context(
                 conn, shift_id, occurrence_id, session["user_id"]
             )
+        )
+        correction_mode = occurrence["status"] in (
+            "Completed", "Recorded"
         )
         setting_event_options = load_behaviour_setting_event_options(
             conn, include_inactive=True
@@ -7965,6 +7967,7 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 edit_mode=True,
                 expected_version=occurrence["version_number"],
                 setting_event_options=setting_event_form_options,
+                correction_mode=correction_mode,
             )
             return response
 
@@ -7987,6 +7990,8 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
         if len(action_values) != 1 or action_values[0] not in ("save", "complete"):
             raise ValueError("Behaviour edit action is invalid.")
         action = action_values[0]
+        if correction_mode and action != "save":
+            raise ValueError("Behaviour correction action is invalid.")
         for field_name in ("expected_version", "occurrence_local", "record_format"):
             if len(request.form.getlist(field_name)) != 1:
                 raise ValueError("Behaviour edit input is invalid.")
@@ -8031,7 +8036,7 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                         for field_name in setting_event_other_fields
                         if field_name in request.form
                     },
-                    finalized=(action == "complete"),
+                    finalized=(action == "complete" or correction_mode),
                     allowed_inactive_option_ids={
                         selection["setting_event_option_id"]
                         for selection in existing_setting_event_selections
@@ -8095,7 +8100,7 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
         conn.execute("BEGIN IMMEDIATE")
         try:
             actor, documentation_context, current = (
-                get_behaviour_in_progress_edit_context(
+                get_behaviour_edit_context(
                     conn, shift_id, occurrence_id, session["user_id"]
                 )
             )
@@ -8117,7 +8122,7 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                     setting_event_values["selections"]
                 )
             ) if current["record_format"] == "ABC" else False
-            if action == "complete":
+            if action == "complete" or correction_mode:
                 # Completion validates the submitted final values before any write.
                 validate_behaviour_occurrence_completion(candidate)
             field_changes = {
@@ -8137,7 +8142,26 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 }
             if action == "save" and not field_changes and not setting_events_changed:
                 conn.rollback()
-                return "No Behaviour changes were submitted.", 400
+                return _render_behaviour_record(
+                    conn,
+                    current["client_id"],
+                    error=(
+                        "No changes were detected. The Behaviour occurrence "
+                        "already matches the information entered."
+                    ),
+                    values=values,
+                    shift_context=True,
+                    documentation_context=documentation_context,
+                    form_action=url_for(
+                        "behaviour_occurrence_edit",
+                        shift_id=shift_id,
+                        occurrence_id=occurrence_id,
+                    ),
+                    edit_mode=True,
+                    expected_version=current["version_number"],
+                    setting_event_options=setting_event_form_options,
+                    correction_mode=correction_mode,
+                ), 400
 
             completed_at_utc = None
             resulting_version = expected_version + 1
@@ -8155,11 +8179,18 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 parameters += [completed_at_utc, actor["user_id"]]
             assignments.append("version_number = ?")
             parameters.append(resulting_version)
-            parameters += [occurrence_id, shift_id, actor["user_id"], expected_version]
+            parameters += [occurrence_id, shift_id, actor["user_id"]]
+            if correction_mode:
+                parameters += [current["status"]]
+            parameters.append(expected_version)
+            status_clause = (
+                "AND status = ?" if correction_mode
+                else "AND status = 'In Progress'"
+            )
             updated = conn.execute(
                 "UPDATE behaviour_occurrences SET " + ", ".join(assignments) + " "
                 "WHERE behaviour_occurrence_id = ? AND shift_id = ? "
-                "AND recorded_by_user_id = ? AND status = 'In Progress' "
+                "AND recorded_by_user_id = ? " + status_clause + " "
                 "AND version_number = ?",
                 parameters
             )
@@ -8197,12 +8228,21 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                     event_datetime=completed_at_utc
                 )
             else:
+                update_details = "Changed fields:\n" + change_text
+                if correction_mode:
+                    update_details = (
+                        f"Occurrence ID: {occurrence_id}\n"
+                        f"Client ID: {current['client_id']}\n"
+                        f"Shift ID: {shift_id}\n"
+                        + update_details + "\n"
+                        f"Resulting version: {resulting_version}"
+                    )
                 log_activity(
                     conn, "BEHAVIOUR", "behaviour_occurrence_updated",
                     "Behaviour occurrence updated", user_id=actor["user_id"],
                     client_id=current["client_id"], shift_id=shift_id,
                     related_table="behaviour_occurrences", related_id=occurrence_id,
-                    details="Changed fields:\n" + change_text, success=1,
+                    details=update_details, success=1,
                     storyline_visible=True, event_datetime=occurrence_utc
                 )
             conn.commit()
@@ -8211,6 +8251,15 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 conn.rollback()
             raise
         if action == "save":
+            if correction_mode:
+                correction_week = get_behaviour_operational_week_start(
+                    behaviour_utc_to_vancouver(occurrence_utc)
+                )
+                flash("Behaviour correction saved successfully.")
+                return redirect(url_for(
+                    "behaviour_weekly",
+                    monday=correction_week.isoformat(),
+                ))
             flash("Behaviour progress saved.")
             return redirect(url_for(
                 "behaviour_occurrence_edit",
@@ -8240,6 +8289,7 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 edit_mode=True,
                 expected_version=occurrence["version_number"],
                 setting_event_options=setting_event_form_options,
+                correction_mode=correction_mode,
             )
             return response, 400
         return str(error), 400
@@ -8871,7 +8921,7 @@ def get_worker_documentation_shift_context(
     return matches[0]
 
 
-def get_behaviour_in_progress_edit_context(conn, shift_id, occurrence_id, user_id):
+def get_behaviour_edit_context(conn, shift_id, occurrence_id, user_id):
     """Return the active creator context for one editable Behaviour record."""
     actor = get_active_authenticated_user(conn, user_id)
     if actor["role"] != "Support Worker":
@@ -8894,10 +8944,29 @@ def get_behaviour_in_progress_edit_context(conn, shift_id, occurrence_id, user_i
           AND bo.shift_id = ?
           AND bo.recorded_by_user_id = ?
     """, (occurrence_id, shift_id, actor["user_id"])).fetchone()
-    if occurrence is None or occurrence["status"] != "In Progress":
-        raise PermissionError("Only the recording Support Worker may edit an In Progress Behaviour.")
+    if occurrence is None:
+        raise PermissionError("Only the recording Support Worker may edit this Behaviour.")
     if occurrence["client_id"] != documentation_context["client_id"]:
         raise PermissionError("Behaviour client and shift context do not match.")
+    if occurrence["status"] == "Voided":
+        raise PermissionError("Voided Behaviour occurrences cannot be corrected.")
+    if occurrence["status"] not in (
+        "In Progress", "Completed", "Recorded"
+    ):
+        raise PermissionError("This Behaviour occurrence cannot be edited.")
+    reviewed = conn.execute("""
+        SELECT 1
+        FROM acknowledgements
+        WHERE source_table = 'behaviour_occurrences'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        LIMIT 1
+    """, (occurrence_id,)).fetchone()
+    if reviewed is not None:
+        raise PermissionError(
+            "Reviewed Behaviour occurrences cannot be corrected."
+        )
     return actor, documentation_context, occurrence
 
 
@@ -8920,6 +8989,14 @@ def get_behaviour_in_progress_resume_records(conn, shift_id, user_id):
           AND bo.client_id = ?
           AND bo.recorded_by_user_id = ?
           AND bo.status = 'In Progress'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM acknowledgements ack
+              WHERE ack.source_table = 'behaviour_occurrences'
+                AND ack.source_id = bo.behaviour_occurrence_id
+                AND ack.acknowledgement_type = 'Review'
+                AND ack.active = 1
+          )
         ORDER BY bo.occurred_at_utc DESC, bo.behaviour_occurrence_id DESC
     """, (
         shift_id,

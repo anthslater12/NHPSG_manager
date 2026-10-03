@@ -187,6 +187,231 @@ class BehaviourLifecyclePhaseFourTests(BehaviourLifecyclePhaseTwoTests):
             ["behaviour_occurrence_created", "behaviour_occurrence_updated"],
         )
 
+    def create_completed_v1(self):
+        occurrence = self.create_v1_in_progress()
+        self.login()
+        response = self.client.post(
+            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit",
+            data=self.edit_payload(occurrence, action="complete"),
+        )
+        self.assertEqual(response.status_code, 302)
+        return self.row(occurrence["behaviour_occurrence_id"])
+
+    def create_recorded_v1(self):
+        self.login()
+        response = self.client.post(
+            "/shift/10/behaviour",
+            data={
+                "occurrence_local": "2026-08-03T07:00",
+                "submission_token": "R" * 43,
+                "self_harm": "1",
+                "notes": "Recorded notes",
+                "lifecycle_action": "recorded",
+                "confirm_distinct_episode": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        return self.row()
+
+    def test_creator_can_correct_completed_behaviour_and_preserve_finalization(self):
+        completed = self.create_completed_v1()
+        original_id = completed["behaviour_occurrence_id"]
+        completed_at = completed["completed_at_utc"]
+        completed_by = completed["completed_by_user_id"]
+        self.login()
+        payload = self.edit_payload(completed, action="save")
+        payload["occurrence_local"] = "2026-08-03T08:00"
+        payload["notes"] = "Corrected completed notes"
+
+        response = self.client.post(
+            f"/shift/10/behaviour/{original_id}/edit",
+            data=payload,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/behaviour/week/2026-08-03")
+        page = self.client.get(response.location)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Behaviour correction saved successfully.", page.data)
+        corrected = self.row(original_id)
+        self.assertEqual(corrected["behaviour_occurrence_id"], original_id)
+        self.assertEqual(corrected["status"], "Completed")
+        self.assertEqual(corrected["completed_at_utc"], completed_at)
+        self.assertEqual(corrected["completed_by_user_id"], completed_by)
+        self.assertEqual(corrected["notes"], "Corrected completed notes")
+        self.assertEqual(corrected["version_number"], 3)
+        self.assertEqual(
+            self.activity_types(),
+            [
+                "behaviour_occurrence_created",
+                "behaviour_occurrence_completed",
+                "behaviour_occurrence_updated",
+            ],
+        )
+        conn = sqlite3.connect(self.path)
+        details = conn.execute(
+            "SELECT details FROM activity_log "
+            "WHERE activity_type = 'behaviour_occurrence_updated'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertIn(f"Occurrence ID: {original_id}", details)
+        self.assertIn("Resulting version: 3", details)
+        self.assertIn("notes", details)
+
+    def test_behaviour_correction_rehydrates_current_storyline_representation(self):
+        completed = self.create_completed_v1()
+        occurrence_id = completed["behaviour_occurrence_id"]
+        self.login()
+        payload = self.edit_payload(completed, action="save")
+        payload["occurrence_local"] = "2026-08-03T08:00"
+        payload["notes"] = "Latest corrected storyline notes"
+
+        response = self.client.post(
+            f"/shift/10/behaviour/{occurrence_id}/edit",
+            data=payload,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        self.login(user_id=3, shift_id=None)
+        storyline = self.client.get(
+            "/client/1/storyline?filter=Behaviour&date=2026-08-03"
+        )
+        self.assertEqual(storyline.status_code, 200)
+        self.assertIn(b"08:00", storyline.data)
+        self.assertIn(b"Latest corrected storyline notes", storyline.data)
+        self.assertEqual(storyline.data.count(b'class="storyline-event"'), 1)
+
+    def test_creator_can_correct_recorded_behaviour_and_preserve_recorded_status(self):
+        recorded = self.create_recorded_v1()
+        original_id = recorded["behaviour_occurrence_id"]
+        self.login()
+        payload = self.edit_payload(recorded, action="save")
+        payload["occurrence_local"] = "2026-08-03T08:00"
+        payload["notes"] = "Corrected recorded notes"
+
+        response = self.client.post(
+            f"/shift/10/behaviour/{original_id}/edit",
+            data=payload,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        corrected = self.row(original_id)
+        self.assertEqual(corrected["behaviour_occurrence_id"], original_id)
+        self.assertEqual(corrected["status"], "Recorded")
+        self.assertIsNone(corrected["completed_at_utc"])
+        self.assertIsNone(corrected["completed_by_user_id"])
+        self.assertEqual(corrected["notes"], "Corrected recorded notes")
+        self.assertEqual(corrected["version_number"], 2)
+        self.assertEqual(
+            self.activity_types(),
+            ["behaviour_occurrence_created", "behaviour_occurrence_updated"],
+        )
+
+    def test_behaviour_correction_noop_uses_normal_form_without_writing(self):
+        completed = self.create_completed_v1()
+        original_id = completed["behaviour_occurrence_id"]
+        before = dict(completed)
+        self.login()
+        response = self.client.post(
+            f"/shift/10/behaviour/{original_id}/edit",
+            data=self.edit_payload(completed, action="save"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            b"No changes were detected. The Behaviour occurrence already "
+            b"matches the information entered.",
+            response.data,
+        )
+        self.assertIn(b"Correct Behaviour Record", response.data)
+        self.assertNotIn(b"No Behaviour changes were submitted.", response.data)
+        self.assertEqual(dict(self.row(original_id)), before)
+        self.assertEqual(
+            self.activity_types(),
+            [
+                "behaviour_occurrence_created",
+                "behaviour_occurrence_completed",
+            ],
+        )
+
+    def test_review_acknowledgement_removes_and_denies_behaviour_correction(self):
+        completed = self.create_completed_v1()
+        occurrence_id = completed["behaviour_occurrence_id"]
+        week_url = "/behaviour/week/2026-08-03"
+        self.login()
+        before_review = self.client.get(week_url)
+        self.assertIn(b"Correct Behaviour", before_review.data)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            """
+            INSERT INTO acknowledgements
+            (source_table, source_id, user_id, acknowledged_at,
+             acknowledgement_type, active)
+            VALUES ('behaviour_occurrences', ?, 3,
+                    '2026-08-03T16:00:00Z', 'Review', 1)
+            """,
+            (occurrence_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertNotIn(b"Correct Behaviour", self.client.get(week_url).data)
+        edit_url = f"/shift/10/behaviour/{occurrence_id}/edit"
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        response = self.client.post(
+            edit_url,
+            data=self.edit_payload(completed, action="save"),
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.row(occurrence_id)["version_number"], 2)
+
+    def test_behaviour_correction_requires_original_worker_active_shift(self):
+        completed = self.create_completed_v1()
+        edit_url = (
+            f"/shift/10/behaviour/"
+            f"{completed['behaviour_occurrence_id']}/edit"
+        )
+
+        self.login(user_id=2)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        with self.client.session_transaction() as session:
+            session["role"] = "Admin"
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+
+        self.login(user_id=8)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE shift_staff SET active = 0, actual_end_at_utc = ?, "
+            "sign_off_at = ? WHERE shift_id = 10 AND user_id = 1",
+            ("2026-08-03T16:00:00Z", "2026-08-03T16:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+        self.login(user_id=1)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+
+    def test_voided_behaviour_cannot_be_corrected_by_original_worker(self):
+        recorded = self.create_recorded_v1()
+        occurrence_id = recorded["behaviour_occurrence_id"]
+        self.login(user_id=3)
+        response = self.client.post(
+            f"/behaviour/occurrences/{occurrence_id}/void",
+            data={"void_reason": "Incorrect record"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.row(occurrence_id)["status"], "Voided")
+
+        self.login(user_id=1)
+        edit_url = f"/shift/10/behaviour/{occurrence_id}/edit"
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        self.assertNotIn(
+            b"Correct Behaviour",
+            self.client.get("/behaviour/week/2026-08-03").data,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

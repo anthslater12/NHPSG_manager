@@ -572,7 +572,7 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
         self.assertEqual(self.row()["status"], "In Progress")
         self.assertNotIn("behaviour_occurrence_voided", self.activity_types())
 
-    def test_creator_cannot_edit_finalized_or_voided_statuses(self):
+    def test_creator_can_access_unreviewed_finalized_but_not_voided_statuses(self):
         for status in ("Recorded", "Completed", "Voided"):
             with self.subTest(status=status):
                 occurrence = self.create_in_progress(token=status[0] * 43)
@@ -604,10 +604,17 @@ class BehaviourLifecyclePhaseTwoTests(unittest.TestCase):
                 conn.close()
                 self.login(1)
                 edit_url = f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit"
-                self.assertEqual(self.client.get(edit_url).status_code, 403)
+                expected_get_status = 403 if status == "Voided" else 200
                 self.assertEqual(
-                    self.client.post(edit_url, data={"expected_version": "1"}).status_code,
-                    403
+                    self.client.get(edit_url).status_code,
+                    expected_get_status,
+                )
+                expected_post_status = 403 if status == "Voided" else 400
+                self.assertEqual(
+                    self.client.post(
+                        edit_url, data={"expected_version": "1"}
+                    ).status_code,
+                    expected_post_status,
                 )
                 self.assertEqual(
                     self.row(occurrence["behaviour_occurrence_id"])["status"],
