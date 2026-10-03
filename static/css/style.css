@@ -1786,6 +1786,12 @@ td,th{
     color: #526779;
 }
 
+.grocery-needed-instruction {
+    margin: 0 0 12px;
+    color: #526779;
+    font-size: 0.9rem;
+}
+
 .grocery-add-section {
     margin-top: 16px;
     padding: 12px;

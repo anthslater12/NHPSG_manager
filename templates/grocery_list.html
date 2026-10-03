@@ -166,6 +166,10 @@
         </nav>
     </header>
 
+    <p class="grocery-needed-instruction">
+        Leave the Needed cell blank if the item does not need to be purchased.
+    </p>
+
     {% if sections %}
         <div class="grocery-section-list">
             {% for section in sections %}
@@ -240,7 +244,7 @@
                                 </thead>
                                 <tbody>
                                     {% for item in section["items"] %}
-                                        <tr{% if item.needed_text and item.needed_text.strip() %} class="grocery-needed-row"{% endif %}>
+                                        <tr{% if item.needed_text and item.needed_text.strip() not in ("", "0") %} class="grocery-needed-row"{% endif %}>
                                             <td>{{ item.item_name }}</td>
                                             <td>{% if item.stock_text %}{{ item.stock_text }}{% else %}—{% endif %}</td>
                                             <td>{% if item.needed_text %}{{ item.needed_text }}{% else %}—{% endif %}</td>

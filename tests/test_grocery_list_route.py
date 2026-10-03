@@ -358,9 +358,13 @@ class GroceryListRouteTests(unittest.TestCase):
                    (?, 'Blank Needed', 'Available', NULL, 0, 40,
                     '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
                    (?, 'Whitespace Needed', 'Available', '   ', 0, 50,
+                    '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
+                   (?, 'Zero Needed', 'Available', '0', 0, 60,
+                    '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
+                   (?, 'Padded Zero Needed', 'Available', '  0  ', 0, 70,
                     '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2)
             """,
-            (section_id, section_id, section_id),
+            (section_id, section_id, section_id, section_id, section_id),
         )
         conn.commit()
         conn.close()
@@ -370,6 +374,10 @@ class GroceryListRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.data
 
+        self.assertIn(
+            b"Leave the Needed cell blank if the item does not need to be purchased.",
+            body,
+        )
         self.assertRegex(
             body,
             re.compile(
@@ -401,11 +409,35 @@ class GroceryListRouteTests(unittest.TestCase):
             body,
             rb'<tr class="grocery-needed-row">\s*<td>Whitespace Needed</td>',
         )
+        self.assertNotRegex(
+            body,
+            rb'<tr class="grocery-needed-row">\s*<td>Zero Needed</td>',
+        )
+        self.assertNotRegex(
+            body,
+            rb'<tr class="grocery-needed-row">\s*<td>Padded Zero Needed</td>',
+        )
         self.assertRegex(
             body,
             re.compile(
                 rb'<tr>\s*<td>Whitespace Needed</td>.*?'
                 rb'<td>   </td>.*?</tr>',
+                re.DOTALL,
+            ),
+        )
+        self.assertRegex(
+            body,
+            re.compile(
+                rb'<tr>\s*<td>Zero Needed</td>.*?'
+                rb'<td>0</td>.*?</tr>',
+                re.DOTALL,
+            ),
+        )
+        self.assertRegex(
+            body,
+            re.compile(
+                rb'<tr>\s*<td>Padded Zero Needed</td>.*?'
+                rb'<td>  0  </td>.*?</tr>',
                 re.DOTALL,
             ),
         )
