@@ -28,8 +28,15 @@ class SleepEventsTests(unittest.TestCase):
         conn.executescript("""
             CREATE TABLE users (user_id INTEGER PRIMARY KEY, full_name TEXT, role TEXT, active INTEGER);
             CREATE TABLE clients (client_id INTEGER PRIMARY KEY, client_name TEXT, active INTEGER);
-            CREATE TABLE shifts (shift_id INTEGER PRIMARY KEY, client_id INTEGER, shift_date TEXT, shift_type TEXT, status TEXT);
-            CREATE TABLE shift_staff (shift_staff_id INTEGER PRIMARY KEY, shift_id INTEGER, user_id INTEGER, active INTEGER);
+            CREATE TABLE shifts (
+                shift_id INTEGER PRIMARY KEY, client_id INTEGER, shift_date TEXT,
+                shift_type TEXT, status TEXT, scheduled_end_time TEXT
+            );
+            CREATE TABLE shift_staff (
+                shift_staff_id INTEGER PRIMARY KEY, shift_id INTEGER, user_id INTEGER,
+                actual_start_time TEXT, actual_end_at_utc TEXT, sign_on_at TEXT,
+                sign_off_at TEXT, active INTEGER
+            );
             CREATE TABLE activity_log (
                 activity_id INTEGER PRIMARY KEY AUTOINCREMENT, activity_datetime TEXT,
                 activity_class TEXT, activity_type TEXT, user_id INTEGER, client_id INTEGER,
@@ -38,10 +45,22 @@ class SleepEventsTests(unittest.TestCase):
                 storyline_visible INTEGER NOT NULL DEFAULT 0,
                 event_datetime TEXT NULL
             );
+            CREATE TABLE acknowledgements (
+                acknowledgement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL, source_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL, acknowledged_at TEXT NOT NULL,
+                acknowledgement_type TEXT NOT NULL, comment TEXT,
+                active INTEGER NOT NULL DEFAULT 1
+            );
             INSERT INTO users VALUES (1, 'Assigned', 'Support Worker', 1), (2, 'Unassigned', 'Support Worker', 1), (3, 'Manager', 'Admin', 1);
             INSERT INTO clients VALUES (1, 'One', 1), (2, 'Two', 1);
-            INSERT INTO shifts VALUES (10, 2, '2026-08-02', 'Day', 'Open'), (20, 2, '2026-08-02', 'Day', 'Closed'), (30, 2, '2026-08-02', 'Day', 'Cancelled');
-            INSERT INTO shift_staff VALUES (100, 10, 1, 1), (200, 10, 2, 0);
+            INSERT INTO shifts VALUES
+                (10, 2, '2026-08-02', 'Day', 'Open', '20:00'),
+                (20, 2, '2026-08-02', 'Day', 'Closed', '20:00'),
+                (30, 2, '2026-08-02', 'Day', 'Cancelled', '20:00');
+            INSERT INTO shift_staff VALUES
+                (100, 10, 1, '08:00', NULL, '2026-08-02T15:00:00Z', NULL, 1),
+                (200, 10, 2, '08:00', NULL, '2026-08-02T15:00:00Z', NULL, 0);
         """)
         add_sleep_events_table.migrate(conn)
         add_sleep_events_note.migrate(conn)
@@ -221,6 +240,144 @@ class SleepEventsTests(unittest.TestCase):
         self.assertEqual(
             self.rows("SELECT event_datetime FROM sleep_events"),
             [("2026-08-03T13:00:00Z",)]
+        )
+
+    def test_eligible_own_sleep_event_shows_correct_and_saves_in_place(self):
+        self.login(1)
+        self.post("fell_asleep", event_local="2026-08-02T08:00", note="Settled")
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+        edit_url = f"/shift/10/sleep/{sleep_event_id}/edit"
+
+        page = self.client.get("/shift/10/sleep")
+        self.assertIn(b"Correct", page.data)
+        self.assertEqual(self.client.get(edit_url).status_code, 200)
+        self.assertIn(b"Correct Sleep Entry", self.client.get(edit_url).data)
+        response = self.client.post(
+            edit_url,
+            data={"event_local": "2026-08-02T09:00", "note": "Settled after correction"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/shift/10/sleep")
+        result = self.client.get(response.location)
+        self.assertIn(b"Sleep correction saved successfully.", result.data)
+        self.assertIn(b"Settled after correction", result.data)
+        self.assertEqual(
+            self.rows(
+                "SELECT sleep_event_id, client_id, shift_id, event_type, "
+                "event_datetime, recorded_by_user_id, note FROM sleep_events"
+            ),
+            [(sleep_event_id, 2, 10, "fell_asleep", "2026-08-02T16:00:00Z", 1, "Settled after correction")],
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT activity_type, storyline_visible FROM activity_log "
+                "ORDER BY activity_id"
+            ),
+            [("sleep_fell_asleep", 1), ("sleep_event_updated", 0)],
+        )
+
+    def test_other_worker_reviewed_and_signed_off_entries_have_no_correct(self):
+        self.login(1)
+        self.post("fell_asleep", note="Settled")
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+        edit_url = f"/shift/10/sleep/{sleep_event_id}/edit"
+
+        self.login(2)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        self.login(1)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO acknowledgements "
+            "(source_table, source_id, user_id, acknowledged_at, acknowledgement_type, active) "
+            "VALUES ('sleep_events', ?, 3, '2026-08-02T16:00:00Z', 'Review', 1)",
+            (sleep_event_id,),
+        )
+        conn.commit()
+        conn.close()
+        self.assertNotIn(b"Correct", self.client.get("/shift/10/sleep").data)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                edit_url,
+                data={"event_local": "2026-08-02T09:00", "note": "Changed"},
+            ).status_code,
+            403,
+        )
+
+    def test_signed_off_and_inactive_users_cannot_correct_sleep(self):
+        self.login(1)
+        self.post("fell_asleep", note="Settled")
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+        edit_url = f"/shift/10/sleep/{sleep_event_id}/edit"
+        conn = sqlite3.connect(self.path)
+        conn.execute("INSERT INTO users VALUES (4, 'Inactive', 'Support Worker', 0)")
+        conn.execute(
+            "UPDATE shift_staff SET active = 0, actual_end_at_utc = ?, sign_off_at = ? "
+            "WHERE shift_id = 10 AND user_id = 1",
+            ("2026-08-02T16:00:00Z", "2026-08-02T16:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+        self.login(4)
+        self.assertEqual(self.client.get(edit_url).status_code, 403)
+
+    def test_session_role_does_not_grant_sleep_correction(self):
+        self.login(1)
+        self.post("fell_asleep", note="Settled")
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+        self.login(3, role="Support Worker")
+        self.assertEqual(
+            self.client.get(f"/shift/10/sleep/{sleep_event_id}/edit").status_code,
+            403,
+        )
+
+    def test_sleep_correction_noop_keeps_row_and_audit_unchanged(self):
+        self.login(1)
+        self.post("fell_asleep", note="Settled")
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+        before = self.rows("SELECT * FROM sleep_events")
+        response = self.client.post(
+            f"/shift/10/sleep/{sleep_event_id}/edit",
+            data={"event_local": "2026-08-02T08:00", "note": "Settled"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            b"No changes were detected. The Sleep entry already matches the information entered.",
+            response.data,
+        )
+        self.assertEqual(self.rows("SELECT * FROM sleep_events"), before)
+        self.assertEqual(
+            self.rows("SELECT activity_type FROM activity_log"),
+            [("sleep_fell_asleep",)],
+        )
+
+    def test_sleep_correction_still_requires_notes(self):
+        self.login(1)
+        self.post("fell_asleep", note="Settled")
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+        response = self.client.post(
+            f"/shift/10/sleep/{sleep_event_id}/edit",
+            data={"event_local": "2026-08-02T09:00", "note": "  "},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Notes are required.", response.data)
+
+    def test_corrected_sleep_audit_is_not_storyline_visible(self):
+        self.login(1)
+        self.post("fell_asleep", note="Original sleep note")
+        sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
+        response = self.client.post(
+            f"/shift/10/sleep/{sleep_event_id}/edit",
+            data={"event_local": "2026-08-02T09:00", "note": "Latest sleep note"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.rows(
+                "SELECT activity_type, storyline_visible "
+                "FROM activity_log ORDER BY activity_id"
+            ),
+            [("sleep_fell_asleep", 1), ("sleep_event_updated", 0)],
         )
 
 

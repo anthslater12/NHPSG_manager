@@ -2303,7 +2303,57 @@ def get_active_sleep_shift_context(conn, shift_id, user_id):
     return context
 
 
-def get_sleep_events(conn, shift_id):
+def get_sleep_edit_context(conn, shift_id, sleep_event_id, user_id):
+    """Return the active creator context for one editable Sleep event."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError("Only the recording Support Worker may edit Sleep.")
+
+    documentation_context = get_worker_documentation_shift_context(
+        conn, shift_id, actor["user_id"]
+    )
+    if documentation_context is None or (
+        documentation_context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
+        or documentation_context.get("shift_status") != "Open"
+    ):
+        raise PermissionError(
+            "Sleep editing requires the worker's open active shift."
+        )
+
+    event = conn.execute("""
+        SELECT se.*, c.client_name, s.shift_date, s.shift_type,
+               recorder.full_name AS recorded_by_name
+        FROM sleep_events se
+        JOIN clients c ON c.client_id = se.client_id
+        JOIN shifts s ON s.shift_id = se.shift_id
+                      AND s.client_id = se.client_id
+        JOIN users recorder ON recorder.user_id = se.recorded_by_user_id
+        WHERE se.sleep_event_id = ?
+          AND se.shift_id = ?
+          AND se.recorded_by_user_id = ?
+    """, (sleep_event_id, shift_id, actor["user_id"])).fetchone()
+    if event is None:
+        raise PermissionError(
+            "Only the recording Support Worker may edit this Sleep event."
+        )
+    if event["client_id"] != documentation_context["client_id"]:
+        raise PermissionError("Sleep client and shift context do not match.")
+
+    reviewed = conn.execute("""
+        SELECT 1
+        FROM acknowledgements
+        WHERE source_table = 'sleep_events'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        LIMIT 1
+    """, (sleep_event_id,)).fetchone()
+    if reviewed is not None:
+        raise PermissionError("Reviewed Sleep events cannot be corrected.")
+    return actor, documentation_context, event
+
+
+def get_sleep_events(conn, shift_id, viewer_user_id=None):
     events = [dict(event) for event in conn.execute("""
         SELECT se.*, u.full_name
         FROM sleep_events se
@@ -2315,6 +2365,15 @@ def get_sleep_events(conn, shift_id):
         event["event_local_display"] = behaviour_utc_to_vancouver(
             event["event_datetime"]
         ).strftime("%Y-%m-%d %I:%M %p")
+        event["can_correct"] = False
+        if viewer_user_id is not None:
+            try:
+                get_sleep_edit_context(
+                    conn, shift_id, event["sleep_event_id"], viewer_user_id
+                )
+                event["can_correct"] = True
+            except PermissionError:
+                pass
     return events
 
 
@@ -23924,7 +23983,7 @@ def sleep_events(shift_id):
                     conn.rollback()
                 error = str(caught_error)
 
-    events = get_sleep_events(conn, shift_id)
+    events = get_sleep_events(conn, shift_id, session["user_id"])
     conn.close()
     return render_template(
         "sleep_events.html",
@@ -23940,6 +23999,159 @@ def sleep_events(shift_id):
             documentation_context_alternatives
         )
     )
+
+
+def _sleep_edit_values(event):
+    return {
+        "event_local": behaviour_utc_to_vancouver(
+            event["event_datetime"]
+        ).strftime("%Y-%m-%dT%H:%M"),
+        "note": event["note"] or "",
+    }
+
+
+@app.route(
+    "/shift/<int:shift_id>/sleep/<int:sleep_event_id>/edit",
+    methods=["GET", "POST"],
+)
+def sleep_event_edit(shift_id, sleep_event_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    event = None
+    documentation_context = None
+    values = {}
+    try:
+        _actor, documentation_context, event = get_sleep_edit_context(
+            conn, shift_id, sleep_event_id, session["user_id"]
+        )
+        values = _sleep_edit_values(event)
+        if request.method == "GET":
+            return render_template(
+                "sleep_event_edit.html",
+                shift=documentation_context,
+                event=event,
+                values=values,
+                error=None,
+                documentation_context=(
+                    documentation_context
+                    if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                    else None
+                ),
+            )
+
+        submitted_event_local = request.form.get("event_local", "")
+        submitted_note = request.form.get("note", "")
+        values = {
+            "event_local": submitted_event_local,
+            "note": submitted_note,
+        }
+        note = submitted_note.strip()
+        if not note:
+            raise ValueError("Notes are required.")
+        local_naive = _parse_vancouver_local_input(submitted_event_local)
+        candidates = _valid_vancouver_utc_candidates(local_naive)
+        if len(candidates) != 1:
+            raise ValueError("Sleep event date and time is invalid.")
+        event_utc = candidates[0]
+        if event_utc > datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise ValueError("Sleep event cannot be unreasonably in the future.")
+        event_datetime = event_utc.isoformat().replace("+00:00", "Z")
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _actor, documentation_context, current = get_sleep_edit_context(
+                conn, shift_id, sleep_event_id, session["user_id"]
+            )
+            old_note = current["note"] or ""
+            if (
+                event_datetime == current["event_datetime"]
+                and note == old_note
+            ):
+                conn.rollback()
+                return render_template(
+                    "sleep_event_edit.html",
+                    shift=documentation_context,
+                    event=current,
+                    values=values,
+                    error=(
+                        "No changes were detected. The Sleep entry already "
+                        "matches the information entered."
+                    ),
+                    documentation_context=(
+                        documentation_context
+                        if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                        else None
+                    ),
+                ), 400
+
+            changed_fields = []
+            if event_datetime != current["event_datetime"]:
+                changed_fields.append("event_datetime")
+            if note != old_note:
+                changed_fields.append("note")
+            updated = conn.execute("""
+                UPDATE sleep_events
+                SET event_datetime = ?, note = ?
+                WHERE sleep_event_id = ?
+                  AND shift_id = ?
+                  AND client_id = ?
+                  AND recorded_by_user_id = ?
+            """, (
+                event_datetime, note, sleep_event_id, shift_id,
+                current["client_id"], session["user_id"],
+            ))
+            if updated.rowcount != 1:
+                raise PermissionError("Sleep event correction is no longer available.")
+            log_activity(
+                conn,
+                activity_class="SLEEP",
+                activity_type="sleep_event_updated",
+                summary="Sleep event updated",
+                user_id=session["user_id"],
+                client_id=current["client_id"],
+                shift_id=shift_id,
+                related_table="sleep_events",
+                related_id=sleep_event_id,
+                details=(
+                    f"Sleep event ID: {sleep_event_id}\n"
+                    f"User ID: {session['user_id']}\n"
+                    f"Client ID: {current['client_id']}\n"
+                    f"Shift ID: {shift_id}\n"
+                    f"Changed fields: {', '.join(changed_fields)}\n"
+                    f"Previous event datetime: {current['event_datetime']}\n"
+                    f"New event datetime: {event_datetime}"
+                ),
+                success=1,
+                event_datetime=event_datetime,
+                storyline_visible=False,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        flash("Sleep correction saved successfully.")
+        return redirect(url_for("sleep_events", shift_id=shift_id))
+    except PermissionError:
+        return "Access denied", 403
+    except (ValueError, sqlite3.IntegrityError) as error:
+        return render_template(
+            "sleep_event_edit.html",
+            shift=documentation_context,
+            event=event,
+            values=values,
+            error=str(error),
+            documentation_context=(
+                documentation_context
+                if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                else None
+            ),
+        ), 400
+    finally:
+        conn.close()
 
 
 @app.route("/client/<int:client_id>/storyline")

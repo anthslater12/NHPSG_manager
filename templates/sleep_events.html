@@ -21,13 +21,14 @@
     <h3>Recent Sleep history</h3>
     {% if events %}
         <table>
-            <tr><th>Event</th><th>Date and time</th><th>Notes</th><th>Recorded by</th></tr>
+            <tr><th>Event</th><th>Date and time</th><th>Notes</th><th>Recorded by</th><th>Action</th></tr>
             {% for event in events %}
                 <tr>
                     <td>{{ "Fell asleep" if event.event_type == "fell_asleep" else "Woke up" }}</td>
                     <td>{{ event.event_local_display }}</td>
                     <td>{{ event.note or "—" }}</td>
                     <td>{{ event.full_name }}</td>
+                    <td>{% if event.can_correct %}<a href="{{ url_for('sleep_event_edit', shift_id=event.shift_id, sleep_event_id=event.sleep_event_id) }}">Correct</a>{% else %}Not available{% endif %}</td>
                 </tr>
             {% endfor %}
         </table>

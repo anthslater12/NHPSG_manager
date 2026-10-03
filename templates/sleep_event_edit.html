@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% include "_documentation_context_banner.html" %}
+<div class="card">
+    <h2>Correct Sleep Entry</h2>
+    <p><strong>Client:</strong> {{ shift.client_name }}<br>
+       <strong>Shift:</strong> {{ shift.shift_date }} {{ shift.shift_type }}<br>
+       <strong>Event:</strong> {{ "Fell Asleep" if event.event_type == "fell_asleep" else "Woke Up" }}</p>
+    {% if error %}<p class="error-message">{{ error }}</p>{% endif %}
+    <form method="post">
+        <label for="event_local">Event date and time</label>
+        <input type="datetime-local" id="event_local" name="event_local" value="{{ values.event_local }}" required>
+        <label for="sleep-note">Notes</label>
+        <textarea id="sleep-note" name="note" rows="3" required>{{ values.note }}</textarea>
+        <button type="submit">Save Correction</button>
+    </form>
+    <p><a href="{{ url_for('sleep_events', shift_id=shift.shift_id) }}">Back to Sleep</a></p>
+</div>
+{% endblock %}
