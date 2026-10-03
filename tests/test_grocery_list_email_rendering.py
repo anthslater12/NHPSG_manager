@@ -95,6 +95,77 @@ class GroceryListEmailRenderingTests(unittest.TestCase):
         self.assertLess(html.index("First Section"), html.index("Second Section"))
         self.assertLess(html.index("Needed Item"), html.index("Later Item"))
 
+    def test_html_needed_highlight_excludes_zero_and_blank_values(self):
+        sections = [{
+            "snapshot_section_id": 1,
+            "name": "Needed Values",
+            "display_order": 0,
+            "items": [
+                {
+                    "snapshot_item_id": 1,
+                    "item_name": "Meaningful Needed",
+                    "stock_text": "Low",
+                    "needed_text": "1",
+                    "purchased": 0,
+                    "display_order": 0,
+                },
+                {
+                    "snapshot_item_id": 2,
+                    "item_name": "Blank Needed",
+                    "stock_text": "Available",
+                    "needed_text": "",
+                    "purchased": 0,
+                    "display_order": 1,
+                },
+                {
+                    "snapshot_item_id": 3,
+                    "item_name": "Whitespace Needed",
+                    "stock_text": "Available",
+                    "needed_text": "   ",
+                    "purchased": 0,
+                    "display_order": 2,
+                },
+                {
+                    "snapshot_item_id": 4,
+                    "item_name": "Zero Needed",
+                    "stock_text": "Available",
+                    "needed_text": "0",
+                    "purchased": 0,
+                    "display_order": 3,
+                },
+                {
+                    "snapshot_item_id": 5,
+                    "item_name": "Padded Zero Needed",
+                    "stock_text": "Available",
+                    "needed_text": "  0  ",
+                    "purchased": 0,
+                    "display_order": 4,
+                },
+            ],
+        }]
+
+        _presentation, _text, html = self.render(sections)
+
+        self.assertEqual(html.count("background-color: #fff8d6;"), 1)
+        self.assertRegex(
+            html,
+            r'<tr style="background-color: #fff8d6;">\s*'
+            r'<td[^>]*>Meaningful Needed</td>',
+        )
+        for item_name in (
+            "Blank Needed",
+            "Whitespace Needed",
+            "Zero Needed",
+            "Padded Zero Needed",
+        ):
+            self.assertNotRegex(
+                html,
+                rf'<tr style="background-color: #fff8d6;">\s*'
+                rf'<td[^>]*>{item_name}</td>',
+            )
+        self.assertIn(">0</td>", html)
+        self.assertIn(">  0  </td>", html)
+
     def test_html_uses_constrained_container_and_shared_section_column_widths(self):
         sections = [
             {
