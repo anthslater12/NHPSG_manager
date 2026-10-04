@@ -8805,10 +8805,7 @@ def ensure_grocery_list_weekly_snapshot(
     if now_utc.tzinfo is None or now_utc.utcoffset() is None:
         raise ValueError("now_utc must include a UTC offset.")
 
-    week_start = (
-        now_utc.astimezone(VANCOUVER_TIMEZONE).date()
-        - timedelta(days=now_utc.astimezone(VANCOUVER_TIMEZONE).weekday())
-    ).isoformat()
+    week_start = get_grocery_list_week_start(now_utc).isoformat()
     existing = conn.execute(
         "SELECT snapshot_id FROM grocery_list_snapshots "
         "WHERE grocery_list_id = ? "
@@ -8826,6 +8823,32 @@ def ensure_grocery_list_weekly_snapshot(
         captured_by_user_id,
         week_start=week_start,
     )
+
+
+def get_grocery_list_week_start(now_utc=None):
+    """Return the Monday starting the current Vancouver Grocery List week."""
+    if now_utc is None:
+        now_utc = get_application_now_utc()
+    elif isinstance(now_utc, str):
+        now_utc = parse_staff_notice_utc_datetime(now_utc)
+    elif not isinstance(now_utc, datetime):
+        raise ValueError("now_utc must be a UTC datetime or ISO-8601 string.")
+
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        raise ValueError("now_utc must include a UTC offset.")
+
+    local_date = now_utc.astimezone(VANCOUVER_TIMEZONE).date()
+    return local_date - timedelta(days=local_date.weekday())
+
+
+def format_grocery_list_week_ending_heading(now_utc=None):
+    """Return the user-facing heading for the current Grocery List week."""
+    week_ending = get_grocery_list_week_start(now_utc) + timedelta(days=6)
+    formatted_date = (
+        f"{week_ending.strftime('%A, %B')} "
+        f"{week_ending.day}, {week_ending.year}"
+    )
+    return f"Grocery List \u2014 Week Ending {formatted_date}"
 
 
 @app.template_filter("format_history_week_start")
@@ -35557,6 +35580,9 @@ def client_grocery_list(client_id):
         can_edit=access["can_edit"],
         can_manage_shares=access["can_manage_shares"],
         can_manage_recipients=can_manage_recipients,
+        grocery_list_week_ending_heading=(
+            format_grocery_list_week_ending_heading()
+        ),
     )
 
 
@@ -35756,12 +35782,15 @@ def _build_grocery_list_snapshot_presentation(
     return {
         "snapshot": dict(snapshot) if snapshot is not None else {},
         "sections": presentation_sections,
+        "week_ending_heading": format_grocery_list_week_ending_heading(
+            snapshot["captured_at_utc"] if snapshot is not None else None
+        ),
     }
 
 
 def _render_grocery_list_email_body(presentation):
     """Render an immutable Grocery List snapshot as plain text."""
-    lines = ["Grocery List", ""]
+    lines = [presentation["week_ending_heading"], ""]
 
     if not presentation["sections"]:
         lines.append("No sections have been added.")

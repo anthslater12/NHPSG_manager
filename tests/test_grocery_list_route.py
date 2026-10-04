@@ -2,7 +2,9 @@ import re
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import app
 
@@ -265,6 +267,21 @@ class GroceryListRouteTests(unittest.TestCase):
         self.assertIn(
             f'id="section-{item["section_id"]}"'.encode(),
             page.data,
+        )
+
+    def test_live_page_renders_current_week_ending_heading(self):
+        self.seed_content()
+        self.login(2)
+        with patch(
+            "app.get_application_now_utc",
+            return_value=datetime(2026, 9, 28, 7, tzinfo=timezone.utc),
+        ):
+            response = self.client.get("/client/10/grocery-list")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            b"Week Ending Sunday, October 4, 2026",
+            response.data,
         )
 
     def test_each_section_uses_the_same_edit_column_structure(self):

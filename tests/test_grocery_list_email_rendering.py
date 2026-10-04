@@ -83,17 +83,41 @@ class GroceryListEmailRenderingTests(unittest.TestCase):
             [item["needs_purchase"] for item in presentation["sections"][0]["items"]],
             [True, False, False],
         )
+        self.assertEqual(
+            presentation["week_ending_heading"],
+            "Grocery List \u2014 Week Ending Sunday, September 27, 2026",
+        )
         for heading in ("Item", "Stock", "Needed", "Purchased"):
             self.assertIn(f">{heading}</th>", html)
-        self.assertEqual(text.splitlines()[0], "Grocery List")
+        self.assertEqual(
+            text.splitlines()[0],
+            "Grocery List \u2014 Week Ending Sunday, September 27, 2026",
+        )
         self.assertEqual(html.count("<h1"), 1)
-        self.assertIn("Grocery List", html)
+        self.assertIn(
+            "Week Ending Sunday, September 27, 2026",
+            html,
+        )
         self.assertIn("Purchased", html)
         self.assertIn("Not Purchased", html)
         self.assertEqual(html.count("background-color: #fff8d6;"), 1)
         self.assertNotIn("None", html)
         self.assertLess(html.index("First Section"), html.index("Second Section"))
         self.assertLess(html.index("Needed Item"), html.index("Later Item"))
+
+    def test_week_ending_heading_uses_vancouver_local_week(self):
+        self.assertEqual(
+            app.format_grocery_list_week_ending_heading(
+                "2026-09-28T06:59:59Z"
+            ),
+            "Grocery List \u2014 Week Ending Sunday, September 27, 2026",
+        )
+        self.assertEqual(
+            app.format_grocery_list_week_ending_heading(
+                "2026-09-28T07:00:00Z"
+            ),
+            "Grocery List \u2014 Week Ending Sunday, October 4, 2026",
+        )
 
     def test_html_needed_highlight_excludes_zero_and_blank_values(self):
         sections = [{
