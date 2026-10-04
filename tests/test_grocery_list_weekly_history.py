@@ -480,17 +480,27 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
             conn, list_id, "WEEKLY", 1, week_start="2026-09-14"
         )
         app.create_grocery_list_snapshot(
+            conn, list_id, "WEEKLY", 1, week_start="2026-09-28"
+        )
+        app.create_grocery_list_snapshot(
             conn, list_id, "EMAIL", 1
         )
+        captured_at = conn.execute(
+            "SELECT captured_at_utc FROM grocery_list_snapshots "
+            "WHERE grocery_list_id = ? AND week_start = '2026-09-28'",
+            (list_id,),
+        ).fetchone()[0]
         empty_list = self.create_list(client_id=20, title="Empty History")
         conn.close()
         self.login(1)
         response = self.client.get("/client/10/grocery-list/history")
         self.assertEqual(response.status_code, 200)
         self.assertLess(
-            response.data.index(b"September 14, 2026"),
-            response.data.index(b"September 7, 2026"),
+            response.data.index(b"Week Ending Sunday, September 20, 2026"),
+            response.data.index(b"Week Ending Sunday, September 13, 2026"),
         )
+        self.assertIn(b"Week Ending Sunday, October 4, 2026", response.data)
+        self.assertNotIn(captured_at.encode(), response.data)
         self.assertNotIn(b"EMAIL", response.data)
         self.assertEqual(
             self.client.get(
@@ -513,6 +523,11 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
         snapshot_id = app.create_grocery_list_snapshot(
             conn, list_id, "WEEKLY", 1, week_start="2026-09-14"
         )
+        captured_at = conn.execute(
+            "SELECT captured_at_utc FROM grocery_list_snapshots "
+            "WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()[0]
         conn.close()
         self.login(1)
         response = self.client.get(
@@ -520,7 +535,8 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Client A", response.data)
-        self.assertIn(b"September 14, 2026", response.data)
+        self.assertIn(b"Week Ending Sunday, September 20, 2026", response.data)
+        self.assertNotIn(captured_at.encode(), response.data)
         self.assertIn(b"Stock Z", response.data)
         self.assertIn(b"Need A", response.data)
         self.assertIn(b"Yes", response.data)

@@ -6,8 +6,7 @@
     <h2>Grocery List History</h2>
     <p><strong>Client:</strong> {{ client.client_name }}</p>
     <p><strong>List:</strong> {{ grocery_list.title }}</p>
-    <p><strong>Week of:</strong> {{ snapshot.week_start | format_history_week_start }}</p>
-    <p><strong>Captured:</strong> {{ snapshot.captured_at_utc }}</p>
+    <p><strong>{{ snapshot.week_start | format_history_week_start }}</strong></p>
 
     {% if sections %}
         {% for section in sections %}

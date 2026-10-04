@@ -12,9 +12,8 @@
         {% for snapshot in snapshots %}
         <li>
             <a href="{{ url_for('client_grocery_list_history_detail', client_id=client.client_id, snapshot_id=snapshot.snapshot_id) }}">
-                Week of {{ snapshot.week_start | format_history_week_start }}
+                {{ snapshot.week_start | format_history_week_start }}
             </a>
-            <span>({{ snapshot.captured_at_utc }})</span>
         </li>
         {% endfor %}
     </ul>

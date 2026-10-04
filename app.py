@@ -8857,7 +8857,13 @@ def format_history_week_start(value):
         parsed = date.fromisoformat(value)
     except (TypeError, ValueError):
         return value
-    return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
+    if parsed.weekday() != 0:
+        return value
+    week_ending = parsed + timedelta(days=6)
+    return (
+        f"Week Ending {week_ending.strftime('%A, %B')} "
+        f"{week_ending.day}, {week_ending.year}"
+    )
 
 
 @app.context_processor
