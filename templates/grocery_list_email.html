@@ -34,7 +34,7 @@
                             </thead>
                             <tbody>
                                 {% for item in section["items"] %}
-                                    <tr{% if item.needed_text and item.needed_text.strip() not in ("", "0") %} style="background-color: #fff8d6;"{% endif %}>
+                                    <tr{% if item.purchased %} style="background-color: #e8f5e9;"{% elif item.needed_text and item.needed_text.strip() not in ("", "0") %} style="background-color: #fff8d6;"{% endif %}>
                                         <td style="padding: 8px; border: 1px solid #cbd5e1;">{{ item.item_name or '' }}</td>
                                         <td style="padding: 8px; border: 1px solid #cbd5e1;">{{ item.stock_text or '' }}</td>
                                         <td style="padding: 8px; border: 1px solid #cbd5e1;">{{ item.needed_text or '' }}</td>

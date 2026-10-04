@@ -165,12 +165,29 @@ class GroceryListEmailRenderingTests(unittest.TestCase):
                     "purchased": 0,
                     "display_order": 4,
                 },
+                {
+                    "snapshot_item_id": 6,
+                    "item_name": "Purchased Needed",
+                    "stock_text": "Available",
+                    "needed_text": "1",
+                    "purchased": 1,
+                    "display_order": 5,
+                },
+                {
+                    "snapshot_item_id": 7,
+                    "item_name": "Purchased Blank",
+                    "stock_text": "Available",
+                    "needed_text": "",
+                    "purchased": 1,
+                    "display_order": 6,
+                },
             ],
         }]
 
         _presentation, _text, html = self.render(sections)
 
         self.assertEqual(html.count("background-color: #fff8d6;"), 1)
+        self.assertEqual(html.count("background-color: #e8f5e9;"), 2)
         self.assertRegex(
             html,
             r'<tr style="background-color: #fff8d6;">\s*'
@@ -185,6 +202,12 @@ class GroceryListEmailRenderingTests(unittest.TestCase):
             self.assertNotRegex(
                 html,
                 rf'<tr style="background-color: #fff8d6;">\s*'
+                rf'<td[^>]*>{item_name}</td>',
+            )
+        for item_name in ("Purchased Needed", "Purchased Blank"):
+            self.assertRegex(
+                html,
+                rf'<tr style="background-color: #e8f5e9;">\s*'
                 rf'<td[^>]*>{item_name}</td>',
             )
         self.assertIn(">0</td>", html)

@@ -421,9 +421,16 @@ class GroceryListRouteTests(unittest.TestCase):
                    (?, 'Zero Needed', 'Available', '0', 0, 60,
                     '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
                    (?, 'Padded Zero Needed', 'Available', '  0  ', 0, 70,
+                    '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
+                   (?, 'Purchased Needed', 'Available', '1', 1, 80,
+                    '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2),
+                   (?, 'Purchased Blank', 'Available', NULL, 1, 90,
                     '2026-09-20T01:00:00Z', '2026-09-20T01:00:00Z', 2)
             """,
-            (section_id, section_id, section_id, section_id, section_id),
+            (
+                section_id, section_id, section_id, section_id,
+                section_id, section_id, section_id,
+            ),
         )
         conn.commit()
         conn.close()
@@ -449,13 +456,22 @@ class GroceryListRouteTests(unittest.TestCase):
         self.assertRegex(
             body,
             re.compile(
-                rb'<tr class="grocery-needed-row">\s*'
+                rb'<tr class="grocery-purchased-row">\s*'
                 rb'<td>Second Item</td>.*?'
                 rb'<span class="grocery-purchased-state">\s*'
                 rb'Purchased\s*</span>.*?</tr>',
                 re.DOTALL,
             ),
         )
+        for item_name in (b"Purchased Needed", b"Purchased Blank"):
+            self.assertRegex(
+                body,
+                re.compile(
+                    rb'<tr class="grocery-purchased-row">\s*<td>'
+                    + item_name + rb'</td>.*?</tr>',
+                    re.DOTALL,
+                ),
+            )
         self.assertNotRegex(
             body,
             rb'<tr class="grocery-needed-row">\s*<td>Blank Needed</td>',

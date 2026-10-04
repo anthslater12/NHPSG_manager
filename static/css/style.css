@@ -1746,6 +1746,10 @@ td,th{
     background: #fff8d6;
 }
 
+.grocery-items-table .grocery-purchased-row {
+    background: #e8f5e9;
+}
+
 .grocery-item-actions {
     white-space: normal;
 }
