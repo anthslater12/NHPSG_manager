@@ -225,6 +225,48 @@ class GroceryListRouteTests(unittest.TestCase):
         self.assertIn(b"Not Purchased", body)
         self.assertIn("—".encode(), body)
 
+    def test_purchased_toggle_returns_to_the_item_section(self):
+        self.seed_content()
+        conn = self.connect()
+        item = conn.execute(
+            "SELECT item_id, section_id FROM grocery_list_items "
+            "WHERE item_name = 'First Item'"
+        ).fetchone()
+        conn.close()
+
+        self.login(2)
+        purchased_url = (
+            f"/client/10/grocery-list/items/{item['item_id']}/purchased"
+        )
+        for purchased_value, expected_value in (("1", 1), ("0", 0)):
+            with self.subTest(purchased_value=purchased_value):
+                response = self.client.post(
+                    purchased_url,
+                    data={"purchased": purchased_value},
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    response.location,
+                    f"/client/10/grocery-list#section-{item['section_id']}",
+                )
+                conn = self.connect()
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT purchased FROM grocery_list_items "
+                        "WHERE item_id = ?",
+                        (item["item_id"],),
+                    ).fetchone()[0],
+                    expected_value,
+                )
+                conn.close()
+
+        page = self.client.get("/client/10/grocery-list")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(
+            f'id="section-{item["section_id"]}"'.encode(),
+            page.data,
+        )
+
     def test_each_section_uses_the_same_edit_column_structure(self):
         self.seed_content()
         self.login(2)

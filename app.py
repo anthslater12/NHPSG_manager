@@ -35720,8 +35720,14 @@ def _grocery_list_content_context(conn, client_id, user_id):
     return access["actor"], client, grocery_list, access
 
 
-def _grocery_list_section_redirect(client_id):
-    return redirect(url_for("client_grocery_list", client_id=client_id))
+def _grocery_list_section_redirect(client_id, section_id=None):
+    if section_id is None:
+        return redirect(url_for("client_grocery_list", client_id=client_id))
+    return redirect(url_for(
+        "client_grocery_list",
+        client_id=client_id,
+        _anchor=f"section-{section_id}",
+    ))
 
 
 def _build_grocery_list_email_subject():
@@ -36802,7 +36808,7 @@ def grocery_list_item_purchased(client_id, item_id):
             if purchased_value == "1"
             else "Item marked not purchased."
         )
-        return _grocery_list_section_redirect(client_id)
+        return _grocery_list_section_redirect(client_id, item["section_id"])
     except PermissionError:
         if conn.in_transaction:
             conn.rollback()

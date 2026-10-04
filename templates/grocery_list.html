@@ -173,7 +173,7 @@
     {% if sections %}
         <div class="grocery-section-list">
             {% for section in sections %}
-                <section class="grocery-section-card">
+                <section id="section-{{ section.section_id }}" class="grocery-section-card">
                     <header class="grocery-section-header">
                         <h3>{{ section.name }}</h3>
                         {% if can_edit %}
