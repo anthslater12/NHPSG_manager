@@ -16,11 +16,13 @@
 
     {% if resolution.state == "SCHEDULED_MULTIPLE" %}
         <p>Select the scheduled shift you are starting.</p>
-        <form method="post">
+        <form method="post" class="shift-selector-form">
+            <div class="shift-selector-options">
             {% for candidate in resolution.candidates %}
-                <label>
+                <label class="shift-selector-option" for="schedule-shift-{{ candidate.schedule_shift_id }}">
                     <input
                         type="radio"
+                        id="schedule-shift-{{ candidate.schedule_shift_id }}"
                         name="schedule_shift_id"
                         value="{{ candidate.schedule_shift_id }}"
                         required
@@ -28,9 +30,8 @@
                     {{ candidate.shift_type }} Shift
                     ({{ candidate.planned_start_time }} - {{ candidate.planned_end_time }})
                 </label>
-                <br>
             {% endfor %}
-            <br>
+            </div>
             <button type="submit">Confirm Shift</button>
         </form>
     {% else %}
@@ -38,11 +39,13 @@
             No published schedule is active for you right now. Select the
             shift you are starting.
         </p>
-        <form method="post">
+        <form method="post" class="shift-selector-form">
+            <div class="shift-selector-options">
             {% for shift_type in shift_type_options %}
-                <label>
+                <label class="shift-selector-option" for="shift-type-{{ shift_type|lower }}">
                     <input
                         type="radio"
+                        id="shift-type-{{ shift_type|lower }}"
                         name="shift_type"
                         value="{{ shift_type }}"
                         {% if shift_type == resolution.suggested_shift_type %}checked{% endif %}
@@ -50,9 +53,8 @@
                     >
                     {{ shift_type }} Shift
                 </label>
-                <br>
             {% endfor %}
-            <br>
+            </div>
             <button type="submit">Confirm Shift</button>
         </form>
     {% endif %}

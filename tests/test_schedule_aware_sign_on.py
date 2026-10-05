@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,6 +13,20 @@ if ROOT not in sys.path:
 
 import add_schedule_tables
 import app
+
+
+class ShiftSelectorParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.labels = []
+        self.inputs = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "label":
+            self.labels.append(attributes)
+        elif tag == "input" and attributes.get("type") == "radio":
+            self.inputs.append(attributes)
 
 
 class ScheduleAwareSignOnTests(unittest.TestCase):
@@ -371,10 +386,23 @@ class ScheduleAwareSignOnTests(unittest.TestCase):
         confirmation = self.client.get(response.headers["Location"])
         self.assertEqual(confirmation.status_code, 200)
         self.assertIn(b"Which shift are you starting?", confirmation.data)
-        self.assertIn(b'value="Afternoon"', confirmation.data)
-        self.assertIn(b"checked", confirmation.data)
-        self.assertIn(b'value="Day"', confirmation.data)
-        self.assertIn(b'value="Overnight"', confirmation.data)
+        parser = ShiftSelectorParser()
+        parser.feed(confirmation.data.decode())
+        self.assertEqual(
+            [label.get("for") for label in parser.labels],
+            ["shift-type-day", "shift-type-afternoon", "shift-type-overnight"],
+        )
+        self.assertEqual(
+            [radio.get("value") for radio in parser.inputs],
+            ["Day", "Afternoon", "Overnight"],
+        )
+        self.assertEqual(
+            [radio.get("name") for radio in parser.inputs],
+            ["shift_type", "shift_type", "shift_type"],
+        )
+        self.assertNotIn("checked", parser.inputs[0])
+        self.assertIn("checked", parser.inputs[1])
+        self.assertNotIn("checked", parser.inputs[2])
 
         with mock.patch.object(
             app,
