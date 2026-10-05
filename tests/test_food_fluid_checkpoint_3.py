@@ -495,11 +495,12 @@ class FoodFluidCheckpointThreeTests(unittest.TestCase):
         self.assertIn(b"&lt;b&gt;details&lt;/b&gt;", page)
         self.assertNotIn(b"checkpoint-three-token-", page)
 
-    def test_no_edit_or_void_controls_are_rendered(self):
+    def test_correction_control_is_rendered_without_void_control(self):
         self.insert_entry(item_description="Immutable record")
         self.login(1)
         page = self.client.get("/shift/10/food-fluid").data.decode()
-        self.assertNotIn("/edit", page)
+        self.assertIn("/shift/10/food-fluid/1/edit", page)
+        self.assertIn("Correct", page)
         self.assertNotIn("/void", page)
         self.assertNotIn("Void record", page)
 

@@ -2229,6 +2229,79 @@ def strip_food_fluid_ascii_whitespace(value):
     return value.strip(FOOD_FLUID_ASCII_WHITESPACE)
 
 
+def parse_food_fluid_form_values(form):
+    """Validate and normalize fields shared by record and correction forms."""
+    approved_fields = {
+        "event_local",
+        "repeated_hour_choice",
+        "interaction_type",
+        "item_description",
+        "outcome",
+        "physically_thrown",
+        "additional_details",
+    }
+    if not set(form).issubset(approved_fields):
+        raise ValueError("Food & Fluid form input is invalid.")
+
+    for field_name in (
+        "event_local",
+        "interaction_type",
+        "item_description",
+        "outcome",
+    ):
+        if len(form.getlist(field_name)) != 1:
+            raise ValueError("Food & Fluid form input is invalid.")
+    for field_name in ("repeated_hour_choice", "additional_details"):
+        if len(form.getlist(field_name)) > 1:
+            raise ValueError("Food & Fluid form input is invalid.")
+
+    thrown_values = form.getlist("physically_thrown")
+    if not thrown_values:
+        physically_thrown = 0
+    elif thrown_values == ["1"]:
+        physically_thrown = 1
+    else:
+        raise ValueError("Physically thrown input is invalid.")
+
+    event_local = strip_food_fluid_ascii_whitespace(form["event_local"])
+    repeated_hour_choice = strip_food_fluid_ascii_whitespace(
+        form.get("repeated_hour_choice", "")
+    )
+    interaction_type = strip_food_fluid_ascii_whitespace(
+        form["interaction_type"]
+    )
+    item_description = strip_food_fluid_ascii_whitespace(
+        form["item_description"]
+    )
+    outcome = strip_food_fluid_ascii_whitespace(form["outcome"])
+    additional_details = strip_food_fluid_ascii_whitespace(
+        form.get("additional_details", "")
+    ) or None
+
+    if interaction_type not in FOOD_FLUID_INTERACTION_TYPES:
+        raise ValueError("Interaction type must be Offered or Requested.")
+    if not item_description:
+        raise ValueError("Food or beverage item is required.")
+    if outcome not in FOOD_FLUID_OUTCOMES:
+        raise ValueError("A valid outcome is required.")
+    if outcome == "Item not available" and interaction_type != "Requested":
+        raise ValueError("Item not available is valid only for a request.")
+    if physically_thrown and outcome not in FOOD_FLUID_THROWN_OUTCOMES:
+        raise ValueError(
+            "Physically thrown is valid only when partially consumed or refused."
+        )
+
+    return {
+        "event_local": event_local,
+        "repeated_hour_choice": repeated_hour_choice,
+        "interaction_type": interaction_type,
+        "item_description": item_description,
+        "outcome": outcome,
+        "physically_thrown": physically_thrown,
+        "additional_details": additional_details,
+    }
+
+
 def get_active_food_fluid_shift_context(conn, shift_id, user_id):
     """Return authoritative context for an active Support Worker shift."""
     user = get_active_authenticated_user(conn, user_id)
@@ -3003,7 +3076,59 @@ def convert_food_fluid_event_input_to_utc(
     return event_at_utc
 
 
-def get_food_fluid_shift_entries(conn, shift_id, limit=None):
+def get_food_fluid_edit_context(conn, shift_id, entry_id, user_id):
+    """Return the active creator context for one editable Food & Fluid entry."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only the recording Support Worker may edit Food & Fluid."
+        )
+
+    food_fluid_context = get_active_food_fluid_shift_context(
+        conn, shift_id, actor["user_id"]
+    )
+    entry = conn.execute("""
+        SELECT ffe.*, c.client_name, s.shift_date, s.shift_type,
+               recorder.full_name AS recorded_by_name
+        FROM food_fluid_entries AS ffe
+        JOIN clients AS c
+          ON c.client_id = ffe.client_id
+        JOIN shifts AS s
+          ON s.shift_id = ffe.shift_id
+         AND s.client_id = ffe.client_id
+        JOIN users AS recorder
+          ON recorder.user_id = ffe.recorded_by_user_id
+        WHERE ffe.food_fluid_entry_id = ?
+          AND ffe.shift_id = ?
+          AND ffe.recorded_by_user_id = ?
+    """, (entry_id, shift_id, actor["user_id"])).fetchone()
+    if entry is None:
+        raise PermissionError(
+            "Only the recording Support Worker may edit this entry."
+        )
+    if entry["client_id"] != food_fluid_context["client_id"]:
+        raise PermissionError("Food & Fluid client and shift context do not match.")
+    if entry["status"] != "Recorded":
+        raise PermissionError("Voided Food & Fluid entries cannot be corrected.")
+
+    reviewed = conn.execute("""
+        SELECT 1
+        FROM acknowledgements
+        WHERE source_table = 'food_fluid_entries'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        LIMIT 1
+    """, (entry_id,)).fetchone()
+    if reviewed is not None:
+        raise PermissionError("Reviewed Food & Fluid entries cannot be corrected.")
+
+    return actor, food_fluid_context, entry
+
+
+def get_food_fluid_shift_entries(
+    conn, shift_id, limit=None, viewer_user_id=None
+):
     """Return Food & Fluid entries for one shift in display order."""
     sql = """
         SELECT
@@ -3060,6 +3185,18 @@ def get_food_fluid_shift_entries(conn, shift_id, limit=None):
             entry["voided_local_display"] = behaviour_utc_to_vancouver(
                 entry["voided_at_utc"]
             ).strftime("%Y-%m-%d %H:%M")
+        entry["can_correct"] = False
+        if viewer_user_id is not None:
+            try:
+                get_food_fluid_edit_context(
+                    conn,
+                    shift_id,
+                    entry["food_fluid_entry_id"],
+                    viewer_user_id,
+                )
+                entry["can_correct"] = True
+            except PermissionError:
+                pass
         entries.append(entry)
 
     return entries
@@ -24625,7 +24762,11 @@ def food_fluid_shift_list(shift_id):
                 active_context_loader=get_active_food_fluid_shift_context
             )
         )
-        entries = get_food_fluid_shift_entries(conn, shift_id)
+        entries = get_food_fluid_shift_entries(
+            conn,
+            shift_id,
+            viewer_user_id=session["user_id"],
+        )
         return render_template(
             "food_fluid_shift_list.html",
             shift=shift_context,
@@ -24690,86 +24831,15 @@ def food_fluid_entry_new(shift_id):
                 ).strftime("%Y-%m-%dT%H:%M")
             )
 
-        approved_fields = {
-            "event_local",
-            "repeated_hour_choice",
-            "interaction_type",
-            "item_description",
-            "outcome",
-            "physically_thrown",
-            "additional_details",
-        }
-        if not set(request.form).issubset(approved_fields):
-            raise ValueError("Food & Fluid form input is invalid.")
-
-        required_fields = (
-            "event_local",
-            "interaction_type",
-            "item_description",
-            "outcome",
-        )
-        for field_name in required_fields:
-            if len(request.form.getlist(field_name)) != 1:
-                raise ValueError("Food & Fluid form input is invalid.")
-
-        for field_name in (
-            "repeated_hour_choice",
-            "additional_details",
-        ):
-            if len(request.form.getlist(field_name)) > 1:
-                raise ValueError("Food & Fluid form input is invalid.")
-
-        thrown_values = request.form.getlist("physically_thrown")
-        if not thrown_values:
-            physically_thrown = 0
-        elif thrown_values == ["1"]:
-            physically_thrown = 1
-        else:
-            raise ValueError("Physically thrown input is invalid.")
-
         values = request.form.to_dict()
-        event_local = strip_food_fluid_ascii_whitespace(
-            request.form["event_local"]
-        )
-        repeated_hour_choice = strip_food_fluid_ascii_whitespace(
-            request.form.get("repeated_hour_choice", "")
-        )
-        interaction_type = strip_food_fluid_ascii_whitespace(
-            request.form["interaction_type"]
-        )
-        item_description = strip_food_fluid_ascii_whitespace(
-            request.form["item_description"]
-        )
-        outcome = strip_food_fluid_ascii_whitespace(
-            request.form["outcome"]
-        )
-        additional_details = strip_food_fluid_ascii_whitespace(
-            request.form.get("additional_details", "")
-        ) or None
-
-        if interaction_type not in FOOD_FLUID_INTERACTION_TYPES:
-            raise ValueError(
-                "Interaction type must be Offered or Requested."
-            )
-        if not item_description:
-            raise ValueError("Food or beverage item is required.")
-        if outcome not in FOOD_FLUID_OUTCOMES:
-            raise ValueError("A valid outcome is required.")
-        if (
-            outcome == "Item not available"
-            and interaction_type != "Requested"
-        ):
-            raise ValueError(
-                "Item not available is valid only for a request."
-            )
-        if (
-            physically_thrown
-            and outcome not in FOOD_FLUID_THROWN_OUTCOMES
-        ):
-            raise ValueError(
-                "Physically thrown is valid only when partially "
-                "consumed or refused."
-            )
+        parsed = parse_food_fluid_form_values(request.form)
+        event_local = parsed["event_local"]
+        repeated_hour_choice = parsed["repeated_hour_choice"]
+        interaction_type = parsed["interaction_type"]
+        item_description = parsed["item_description"]
+        outcome = parsed["outcome"]
+        physically_thrown = parsed["physically_thrown"]
+        additional_details = parsed["additional_details"]
 
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -24884,6 +24954,201 @@ def food_fluid_entry_new(shift_id):
             default_event_local=datetime.now(
                 VANCOUVER_TIMEZONE
             ).strftime("%Y-%m-%dT%H:%M")
+        ), 400
+    finally:
+        conn.close()
+
+
+def _food_fluid_edit_values(entry):
+    event_utc = parse_behaviour_utc(entry["event_at_utc"])
+    event_local = event_utc.astimezone(VANCOUVER_TIMEZONE)
+    local_naive = event_local.replace(tzinfo=None)
+    repeated_hour_choice = ""
+    candidates = _valid_vancouver_utc_candidates(local_naive)
+    if len(candidates) == 2:
+        for choice, candidate in zip(
+            ("first", "second"), candidates
+        ):
+            if candidate == event_utc:
+                repeated_hour_choice = choice
+                break
+
+    return {
+        "event_local": event_local.strftime("%Y-%m-%dT%H:%M"),
+        "repeated_hour_choice": repeated_hour_choice,
+        "interaction_type": entry["interaction_type"],
+        "item_description": entry["item_description"],
+        "outcome": entry["outcome"],
+        "physically_thrown": "1" if entry["physically_thrown"] else "",
+        "additional_details": entry["additional_details"] or "",
+    }
+
+
+@app.route(
+    "/shift/<int:shift_id>/food-fluid/<int:entry_id>/edit",
+    methods=["GET", "POST"],
+)
+def food_fluid_entry_edit(shift_id, entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    entry = None
+    shift_context = None
+    values = {}
+    try:
+        _actor, shift_context, entry = get_food_fluid_edit_context(
+            conn, shift_id, entry_id, session["user_id"]
+        )
+        values = _food_fluid_edit_values(entry)
+        if request.method == "GET":
+            return render_template(
+                "food_fluid_entry_edit.html",
+                shift=shift_context,
+                entry=entry,
+                values=values,
+                error=None,
+                interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+                outcomes=FOOD_FLUID_OUTCOMES,
+                documentation_context=(
+                    shift_context
+                    if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                    else None
+                ),
+            )
+
+        values = request.form.to_dict()
+        parsed = parse_food_fluid_form_values(request.form)
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _actor, shift_context, current = get_food_fluid_edit_context(
+                conn, shift_id, entry_id, session["user_id"]
+            )
+            event_at_utc = convert_food_fluid_event_input_to_utc(
+                shift_context,
+                parsed["event_local"],
+                parsed["repeated_hour_choice"] or None,
+            )
+            current_values = {
+                "event_at_utc": current["event_at_utc"],
+                "interaction_type": current["interaction_type"],
+                "item_description": current["item_description"],
+                "outcome": current["outcome"],
+                "physically_thrown": current["physically_thrown"],
+                "additional_details": current["additional_details"],
+            }
+            submitted_values = {
+                "event_at_utc": event_at_utc,
+                "interaction_type": parsed["interaction_type"],
+                "item_description": parsed["item_description"],
+                "outcome": parsed["outcome"],
+                "physically_thrown": parsed["physically_thrown"],
+                "additional_details": parsed["additional_details"],
+            }
+            if submitted_values == current_values:
+                conn.rollback()
+                return render_template(
+                    "food_fluid_entry_edit.html",
+                    shift=shift_context,
+                    entry=current,
+                    values=values,
+                    error=(
+                        "No changes were detected. The Food & Fluid entry "
+                        "already matches the information entered."
+                    ),
+                    interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+                    outcomes=FOOD_FLUID_OUTCOMES,
+                    documentation_context=(
+                        shift_context
+                        if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                        else None
+                    ),
+                ), 400
+
+            changed_fields = [
+                field_name
+                for field_name in submitted_values
+                if submitted_values[field_name] != current_values[field_name]
+            ]
+            updated = conn.execute("""
+                UPDATE food_fluid_entries
+                SET
+                    event_at_utc = ?,
+                    interaction_type = ?,
+                    item_description = ?,
+                    outcome = ?,
+                    physically_thrown = ?,
+                    additional_details = ?
+                WHERE food_fluid_entry_id = ?
+                  AND shift_id = ?
+                  AND client_id = ?
+                  AND recorded_by_user_id = ?
+                  AND status = 'Recorded'
+            """, (
+                submitted_values["event_at_utc"],
+                submitted_values["interaction_type"],
+                submitted_values["item_description"],
+                submitted_values["outcome"],
+                submitted_values["physically_thrown"],
+                submitted_values["additional_details"],
+                entry_id,
+                shift_id,
+                current["client_id"],
+                session["user_id"],
+            ))
+            if updated.rowcount != 1:
+                raise PermissionError(
+                    "Food & Fluid entry correction is no longer available."
+                )
+
+            log_activity(
+                conn,
+                activity_class="FOOD_FLUID",
+                activity_type="food_fluid_event_updated",
+                summary="Food & Fluid entry updated",
+                user_id=session["user_id"],
+                client_id=current["client_id"],
+                shift_id=shift_id,
+                related_table="food_fluid_entries",
+                related_id=entry_id,
+                details=(
+                    f"Food & Fluid entry ID: {entry_id}\n"
+                    f"User ID: {session['user_id']}\n"
+                    f"Client ID: {current['client_id']}\n"
+                    f"Shift ID: {shift_id}\n"
+                    f"Changed fields: {', '.join(changed_fields)}\n"
+                    f"Previous values: {current_values}\n"
+                    f"New values: {submitted_values}"
+                ),
+                success=1,
+                event_datetime=event_at_utc,
+                storyline_visible=False,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        flash("Food & Fluid correction saved successfully.")
+        return redirect(url_for("food_fluid_shift_list", shift_id=shift_id))
+    except PermissionError:
+        return "Access denied", 403
+    except (ValueError, sqlite3.IntegrityError) as error:
+        return render_template(
+            "food_fluid_entry_edit.html",
+            shift=shift_context,
+            entry=entry,
+            values=values,
+            error=str(error),
+            interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+            outcomes=FOOD_FLUID_OUTCOMES,
+            documentation_context=(
+                shift_context
+                if session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+                else None
+            ),
         ), 400
     finally:
         conn.close()

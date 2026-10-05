@@ -45,6 +45,7 @@
                     <th>Submitted</th>
                     <th>Status</th>
                     <th>Void Details</th>
+                    <th>Action</th>
                 </tr>
 
                 {% for entry in entries %}
@@ -84,6 +85,19 @@
                                 {{ entry.voided_local_display }}
                             {% else %}
                                 —
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if entry.can_correct %}
+                                <a href="{{ url_for(
+                                    'food_fluid_entry_edit',
+                                    shift_id=entry.shift_id,
+                                    entry_id=entry.food_fluid_entry_id
+                                ) }}">
+                                    Correct
+                                </a>
+                            {% else %}
+                                Not available
                             {% endif %}
                         </td>
                     </tr>
