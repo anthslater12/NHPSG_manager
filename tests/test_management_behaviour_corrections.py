@@ -177,6 +177,28 @@ class ManagementBehaviourCorrectionTests(unittest.TestCase):
         self.assertIn("Previous version: 2", audit["details"])
         self.assertIn("New version: 3", audit["details"])
 
+    def test_detail_places_correct_entry_after_table_and_hides_it_from_consultant(self):
+        occurrence = self.create_completed(token="Z" * 43)
+        detail_url = f"/manager-review/behaviour/{occurrence['behaviour_occurrence_id']}"
+
+        self.login(3, "Admin")
+        manager_page = self.client.get(detail_url)
+        self.assertEqual(manager_page.status_code, 200)
+        table_end = manager_page.data.index(b"</table>")
+        correct_entry = manager_page.data.index(b"Correct Entry")
+        reviews = manager_page.data.index(b"<h3>Reviews</h3>")
+        self.assertLess(table_end, correct_entry)
+        self.assertLess(correct_entry, reviews)
+        self.assertIn(
+            self.management_url(occurrence["behaviour_occurrence_id"]).encode(),
+            manager_page.data,
+        )
+
+        self.login(6, "Behaviour Consultant")
+        consultant_page = self.client.get(detail_url)
+        self.assertEqual(consultant_page.status_code, 200)
+        self.assertNotIn(b"Correct Entry", consultant_page.data)
+
     def test_all_management_roles_are_allowed_and_session_role_is_ignored(self):
         for user_id, role, token in (
             (3, "Admin", "A" * 43),

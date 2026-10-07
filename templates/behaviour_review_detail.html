@@ -17,6 +17,21 @@
 
     <p><a href="{{ url_for('manager_review_hub') }}">&larr; Back to Management Review</a></p>
 
+    <table class="management-detail-table">
+        <tr><th>Client</th><td>{{ occurrence.client_name }}</td></tr>
+        <tr><th>Shift</th><td>{% if occurrence.shift_id %}{% if occurrence.shift_date %}{{ occurrence.shift_date }} {{ occurrence.shift_type }}{% else %}Shift #{{ occurrence.shift_id }}{% endif %}{% else %}Not linked to a shift{% endif %}</td></tr>
+        <tr><th>Occurred</th><td>{{ occurrence.local_time }}</td></tr>
+        <tr><th>Recorded By</th><td>{{ occurrence.recorder_name }}</td></tr>
+        <tr><th>Record Format</th><td>{{ occurrence.record_format }}</td></tr>
+        <tr><th>Status</th><td>{{ occurrence.status }}</td></tr>
+        <tr><th>Recorded At</th><td>{{ occurrence.recorded_at_display }}</td></tr>
+        {% if occurrence.status == 'Voided' %}
+            <tr><th>Voided By</th><td>{{ occurrence.voided_by_name }}</td></tr>
+            <tr><th>Voided At</th><td>{{ occurrence.voided_at_display }}</td></tr>
+            <tr><th>Void Reason</th><td>{{ occurrence.void_reason }}</td></tr>
+        {% endif %}
+    </table>
+
     {% if can_management_correct %}
         <p>
             <a
@@ -32,21 +47,6 @@
     {% if occurrence.status == 'In Progress' %}
         <p class="warning-message" role="status">This Behaviour record is In Progress and has not been finalized.</p>
     {% endif %}
-
-    <table class="management-detail-table">
-        <tr><th>Client</th><td>{{ occurrence.client_name }}</td></tr>
-        <tr><th>Shift</th><td>{% if occurrence.shift_id %}{% if occurrence.shift_date %}{{ occurrence.shift_date }} {{ occurrence.shift_type }}{% else %}Shift #{{ occurrence.shift_id }}{% endif %}{% else %}Not linked to a shift{% endif %}</td></tr>
-        <tr><th>Occurred</th><td>{{ occurrence.local_time }}</td></tr>
-        <tr><th>Recorded By</th><td>{{ occurrence.recorder_name }}</td></tr>
-        <tr><th>Record Format</th><td>{{ occurrence.record_format }}</td></tr>
-        <tr><th>Status</th><td>{{ occurrence.status }}</td></tr>
-        <tr><th>Recorded At</th><td>{{ occurrence.recorded_at_display }}</td></tr>
-        {% if occurrence.status == 'Voided' %}
-            <tr><th>Voided By</th><td>{{ occurrence.voided_by_name }}</td></tr>
-            <tr><th>Voided At</th><td>{{ occurrence.voided_at_display }}</td></tr>
-            <tr><th>Void Reason</th><td>{{ occurrence.void_reason }}</td></tr>
-        {% endif %}
-    </table>
 
     {% if occurrence.record_format == 'ABC' %}
         <section class="setting-events-review">
