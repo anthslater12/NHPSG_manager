@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="card">
+    <h2>Correct Activity Entry</h2>
+
+    <table class="management-detail-table">
+        <tr><th>Client</th><td>{{ activity.client_name }}</td></tr>
+        <tr><th>Shift</th><td>{{ activity.shift_type }} Shift</td></tr>
+        <tr><th>Shift Date</th><td>{{ activity.shift_date }}</td></tr>
+        <tr><th>Original Worker</th><td>{{ activity.recorded_by_name }}</td></tr>
+        <tr><th>Current Status</th><td>{{ activity.status }}</td></tr>
+    </table>
+
+    {% if error %}
+        <p class="error-message">{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        <input
+            type="hidden"
+            name="action"
+            value="save"
+        >
+        <input
+            type="hidden"
+            name="expected_version"
+            value="{{ values.get('expected_version', activity.version_number) }}"
+        >
+
+        <div class="form-row">
+            <div class="form-field">
+                <label for="start_time">Start Time</label>
+                <input
+                    type="time"
+                    id="start_time"
+                    name="start_time"
+                    value="{{ values.get('start_time', '') }}"
+                    required
+                >
+            </div>
+
+            <div class="form-field">
+                <label for="end_time">End Time</label>
+                <input
+                    type="time"
+                    id="end_time"
+                    name="end_time"
+                    value="{{ values.get('end_time') or '' }}"
+                >
+            </div>
+        </div>
+
+        <fieldset>
+            <legend>Activity Categories</legend>
+            <label>
+                <input
+                    type="checkbox"
+                    name="a_selected"
+                    value="1"
+                    style="width:auto;"
+                    {% if values.get('a_selected') == '1' %}checked{% endif %}
+                >
+                A
+            </label>
+            <label>
+                <input
+                    type="checkbox"
+                    name="t_selected"
+                    value="1"
+                    style="width:auto;"
+                    {% if values.get('t_selected') == '1' %}checked{% endif %}
+                >
+                T
+            </label>
+            <label>
+                <input
+                    type="checkbox"
+                    name="ls_selected"
+                    value="1"
+                    style="width:auto;"
+                    {% if values.get('ls_selected') == '1' %}checked{% endif %}
+                >
+                LS
+            </label>
+        </fieldset>
+
+        <label for="activity_description">Activity Description</label>
+        <textarea
+            id="activity_description"
+            name="activity_description"
+            rows="5"
+        >{{ values.get('activity_description') or '' }}</textarea>
+
+        <button type="submit">Save Correction</button>
+        <a
+            class="button secondary"
+            href="{{ url_for(
+                'activity_review_detail',
+                activity_id=activity.shift_activity_id
+            ) }}"
+        >Back to Activity Review</a>
+    </form>
+</div>
+
+{% endblock %}

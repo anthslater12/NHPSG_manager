@@ -45,6 +45,18 @@
         <tr><th>Created</th><td>{{ entry.created_at_display }}</td></tr>
     </table>
 
+    {% if can_management_correct %}
+        <p>
+            <a
+                class="button"
+                href="{{ url_for(
+                    'management_activity_correction',
+                    activity_id=entry.shift_activity_id
+                ) }}"
+            >Correct Entry</a>
+        </p>
+    {% endif %}
+
     <h3>Reviews</h3>
 
     {% if reviews %}

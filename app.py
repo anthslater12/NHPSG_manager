@@ -221,6 +221,11 @@ ACTION_CREATION_ROLES = frozenset((
     "Director",
     "Behaviour Consultant",
 ))
+MANAGEMENT_CORRECTION_ROLES = frozenset((
+    "Admin",
+    "Program Manager",
+    "Director",
+))
 BEHAVIOUR_OCCURRENCE_STATUSES = frozenset((
     "In Progress",
     "Completed",
@@ -9639,6 +9644,78 @@ def get_shift_activity_edit_context(
     ):
         raise PermissionError("Activity client and shift context do not match.")
     return actor, context, activity
+
+
+def get_management_activity_correction_context(conn, activity_id, user_id):
+    """Return a historical Activity available for management correction."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in MANAGEMENT_CORRECTION_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to correct Activities."
+        )
+
+    activity = conn.execute("""
+        SELECT
+            sa.*,
+            s.client_id AS activity_client_id,
+            s.shift_date,
+            s.shift_type,
+            s.status AS current_shift_status,
+            c.client_name,
+            recorder.full_name AS recorded_by_name
+        FROM shift_activities sa
+        JOIN shifts s ON s.shift_id = sa.shift_id
+        JOIN clients c ON c.client_id = s.client_id
+        JOIN users recorder ON recorder.user_id = sa.recorded_by_user_id
+        WHERE sa.shift_activity_id = ?
+    """, (activity_id,)).fetchone()
+    if activity is None:
+        raise LookupError("Activity not found.")
+    if activity["current_shift_status"] == SHIFT_CANCELLED_STATUS:
+        raise PermissionError(
+            "Cancelled Activities cannot be corrected."
+        )
+
+    return actor, activity
+
+
+def invalidate_activity_reviews_for_management_correction(
+    conn, activity_id, actor_user_id
+):
+    """Invalidate active Activity Reviews without deleting their audit rows."""
+    review_rows = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+        WHERE source_table = 'shift_activities'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        ORDER BY acknowledgement_id
+    """, (activity_id,)).fetchall()
+    review_ids = [row["acknowledgement_id"] for row in review_rows]
+    if not review_ids:
+        return review_ids
+
+    invalidated_at_utc = serialize_behaviour_utc(
+        datetime.now(timezone.utc).replace(microsecond=0)
+    )
+    conn.execute("""
+        UPDATE acknowledgements
+        SET active = 0,
+            invalidated_at_utc = ?,
+            invalidated_by_user_id = ?,
+            invalidation_reason = ?
+        WHERE source_table = 'shift_activities'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+    """, (
+        invalidated_at_utc,
+        actor_user_id,
+        "Activity corrected by management",
+        activity_id,
+    ))
+    return review_ids
 
 def _get_active_worker_client_documentation_contexts(
     conn, user_id, client_id
@@ -28554,10 +28631,166 @@ def activity_review_detail(activity_id):
         can_create_actions=(
             actor["role"] in ACTION_CREATION_ROLES
         ),
+        can_management_correct=(
+            actor["role"] in MANAGEMENT_CORRECTION_ROLES
+        ),
         storyline_return_context=_storyline_return_context(
             request.args, entry["client_id"]
         )
     )
+
+
+@app.route(
+    "/manager-review/activities/<int:activity_id>/correct",
+    methods=["GET", "POST"]
+)
+def management_activity_correction(activity_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    values = {}
+    activity = None
+    try:
+        actor, activity = get_management_activity_correction_context(
+            conn, activity_id, session["user_id"]
+        )
+        if request.method == "GET":
+            return render_template(
+                "activity_management_correction.html",
+                activity=activity,
+                values=_shift_activity_edit_form_values(activity),
+                error=None,
+            )
+
+        values = request.form.to_dict()
+        parsed = parse_shift_activity_edit_form(request.form)
+        if parsed["action"] != "save":
+            raise ValueError("Management Activity correction action is invalid.")
+
+        mutable_values = {
+            field_name: parsed[field_name]
+            for field_name in SHIFT_ACTIVITY_EDITABLE_FIELDS
+        }
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, current = get_management_activity_correction_context(
+                conn, activity_id, session["user_id"]
+            )
+            if current["version_number"] != parsed["expected_version"]:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before saving."
+                )
+
+            candidate = dict(current)
+            candidate.update(mutable_values)
+            if is_shift_activity_finalized(current["status"]):
+                validate_shift_activity_final_candidate(candidate)
+
+            changes = {
+                field_name: {"old": current[field_name], "new": new_value}
+                for field_name, new_value in mutable_values.items()
+                if current[field_name] != new_value
+            }
+            if not changes:
+                conn.rollback()
+                return render_template(
+                    "activity_management_correction.html",
+                    activity=current,
+                    values=values,
+                    error=(
+                        "No changes were detected. The Activity already "
+                        "matches the information entered."
+                    ),
+                ), 400
+
+            assignments = [
+                f"{field_name} = ?" for field_name in changes
+            ]
+            parameters = [change["new"] for change in changes.values()]
+            previous_version = current["version_number"]
+            resulting_version = previous_version + 1
+            assignments.append("version_number = ?")
+            parameters.append(resulting_version)
+            parameters.extend((activity_id, previous_version, current["status"]))
+            updated = conn.execute(
+                "UPDATE shift_activities SET " + ", ".join(assignments) + " "
+                "WHERE shift_activity_id = ? AND version_number = ? "
+                "AND status = ?",
+                parameters,
+            )
+            if updated.rowcount != 1:
+                raise ShiftActivityConcurrencyConflictError(
+                    "This Activity was changed elsewhere. Reload before saving."
+                )
+
+            invalidated_review_ids = (
+                invalidate_activity_reviews_for_management_correction(
+                    conn, activity_id, actor["user_id"]
+                )
+            )
+            change_text = "\n".join(
+                f"{field_name}: {change['old']!r} -> {change['new']!r}"
+                for field_name, change in changes.items()
+            )
+            review_text = (
+                ", ".join(str(review_id) for review_id in invalidated_review_ids)
+                if invalidated_review_ids else "None"
+            )
+            details = (
+                f"Activity ID: {activity_id}\n"
+                f"Client ID: {current['activity_client_id']}\n"
+                f"Shift ID: {current['shift_id']}\n"
+                f"Management correction actor user ID: {actor['user_id']}\n"
+                f"Original recorder user ID: {current['recorded_by_user_id']}\n"
+                "Changed fields:\n"
+                f"{change_text}\n"
+                f"Previous version: {previous_version}\n"
+                f"New version: {resulting_version}\n"
+                f"Invalidated Review acknowledgement IDs: {review_text}\n"
+                f"Invalidated Review count: {len(invalidated_review_ids)}"
+            )
+            log_activity(
+                conn,
+                activity_class="ACTIVITY",
+                activity_type="management_shift_activity_updated",
+                summary="Activity corrected by management",
+                user_id=actor["user_id"],
+                client_id=current["activity_client_id"],
+                shift_id=current["shift_id"],
+                related_table="shift_activities",
+                related_id=activity_id,
+                details=details,
+                success=1,
+                storyline_visible=False,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        flash("Activity correction saved successfully.")
+        return redirect(url_for(
+            "activity_review_detail",
+            activity_id=activity_id,
+        ))
+    except ShiftActivityConcurrencyConflictError as error:
+        return str(error), 409
+    except PermissionError:
+        return "Access denied", 403
+    except LookupError as error:
+        return str(error), 404
+    except (ValueError, sqlite3.IntegrityError) as error:
+        return render_template(
+            "activity_management_correction.html",
+            activity=activity,
+            values=values,
+            error=str(error),
+        ), 400
+    finally:
+        conn.close()
 
 
 @app.route(
