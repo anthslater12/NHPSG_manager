@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-{% include "_documentation_context_banner.html" %}
-<div class="card"><h2>{% if correction_mode %}Correct Behaviour Record{% elif edit_mode %}Continue Behaviour Record{% else %}Record Behaviour{% endif %}</h2>
+{% if not management_correction %}{% include "_documentation_context_banner.html" %}{% endif %}
+<div class="card"><h2>{% if management_correction %}Correct Behaviour Entry{% elif correction_mode %}Correct Behaviour Record{% elif edit_mode %}Continue Behaviour Record{% else %}Record Behaviour{% endif %}</h2>
+{% if management_correction %}<p><a href="{{ url_for('behaviour_review_detail', occurrence_id=management_occurrence_id) }}">&larr; Back to Behaviour Management Review</a></p>{% endif %}
 {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
 <form method="post"{% if form_action %} action="{{ form_action }}"{% endif %}>
 {% if edit_mode %}<input type="hidden" name="expected_version" value="{{ expected_version }}">{% else %}<input type="hidden" name="submission_token" value="{{ submission_token }}">{% endif %}

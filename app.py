@@ -5770,7 +5770,8 @@ def _render_behaviour_record(
     documentation_context=None, documentation_context_alternatives=None,
     form_action=None, edit_mode=False, expected_version=None,
     lifecycle_action=None, setting_event_options=None, correction_mode=False,
-    behaviour_shift_occurrences=None
+    behaviour_shift_occurrences=None, management_correction=False,
+    management_occurrence_id=None
 ):
     clients = conn.execute("SELECT client_id, client_name FROM clients WHERE active = 1 ORDER BY client_name").fetchall()
     if selected_client_id is not None:
@@ -5805,6 +5806,8 @@ def _render_behaviour_record(
         expected_version=expected_version,
         lifecycle_action=lifecycle_action,
         correction_mode=correction_mode,
+        management_correction=management_correction,
+        management_occurrence_id=management_occurrence_id,
         behaviour_shift_occurrences=behaviour_shift_occurrences or [],
         documentation_context=documentation_context,
         documentation_context_alternatives=(
@@ -8172,20 +8175,47 @@ def _behaviour_edit_form_values(occurrence, setting_event_selections=()):
     methods=["GET", "POST"]
 )
 def behaviour_occurrence_edit(shift_id, occurrence_id):
+    return _behaviour_occurrence_edit_impl(
+        shift_id, occurrence_id, management_mode=False
+    )
+
+
+@app.route(
+    "/manager-review/behaviour/<int:occurrence_id>/correct",
+    methods=["GET", "POST"]
+)
+def management_behaviour_correction(occurrence_id):
+    return _behaviour_occurrence_edit_impl(
+        None, occurrence_id, management_mode=True
+    )
+
+
+def _behaviour_occurrence_edit_impl(
+    shift_id, occurrence_id, management_mode=False
+):
     """Allow the active creator to edit an unreviewed Behaviour occurrence."""
     if "user_id" not in session:
         return redirect(url_for("login"))
 
     conn = get_db()
     try:
-        actor, documentation_context, occurrence = (
-            get_behaviour_edit_context(
-                conn, shift_id, occurrence_id, session["user_id"]
+        if management_mode:
+            actor, occurrence = get_management_behaviour_correction_context(
+                conn, occurrence_id, session["user_id"]
             )
-        )
+            documentation_context = None
+            shift_id = occurrence["shift_id"]
+        else:
+            actor, documentation_context, occurrence = (
+                get_behaviour_edit_context(
+                    conn, shift_id, occurrence_id, session["user_id"]
+                )
+            )
         correction_mode = occurrence["status"] in (
             "Completed", "Recorded"
         )
+        if management_mode:
+            correction_mode = True
         setting_event_options = load_behaviour_setting_event_options(
             conn, include_inactive=True
         )
@@ -8211,13 +8241,22 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 submission_token=None,
                 documentation_context=documentation_context,
                 form_action=url_for(
-                    "behaviour_occurrence_edit",
-                    shift_id=shift_id, occurrence_id=occurrence_id
+                    "management_behaviour_correction"
+                    if management_mode else "behaviour_occurrence_edit",
+                    **(
+                        {"occurrence_id": occurrence_id}
+                        if management_mode else
+                        {"shift_id": shift_id, "occurrence_id": occurrence_id}
+                    )
                 ),
                 edit_mode=True,
                 expected_version=occurrence["version_number"],
                 setting_event_options=setting_event_form_options,
                 correction_mode=correction_mode,
+                management_correction=management_mode,
+                management_occurrence_id=(
+                    occurrence_id if management_mode else None
+                ),
             )
             return response
 
@@ -8349,11 +8388,17 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
 
         conn.execute("BEGIN IMMEDIATE")
         try:
-            actor, documentation_context, current = (
-                get_behaviour_edit_context(
-                    conn, shift_id, occurrence_id, session["user_id"]
+            if management_mode:
+                actor, current = get_management_behaviour_correction_context(
+                    conn, occurrence_id, session["user_id"]
                 )
-            )
+                documentation_context = None
+            else:
+                actor, documentation_context, current = (
+                    get_behaviour_edit_context(
+                        conn, shift_id, occurrence_id, session["user_id"]
+                    )
+                )
             if current["version_number"] != expected_version:
                 raise BehaviourConcurrencyConflictError(
                     "This Behaviour record was changed elsewhere. Reload before saving."
@@ -8403,14 +8448,22 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                     shift_context=True,
                     documentation_context=documentation_context,
                     form_action=url_for(
-                        "behaviour_occurrence_edit",
-                        shift_id=shift_id,
-                        occurrence_id=occurrence_id,
+                        "management_behaviour_correction"
+                        if management_mode else "behaviour_occurrence_edit",
+                        **(
+                            {"occurrence_id": occurrence_id}
+                            if management_mode else
+                            {"shift_id": shift_id, "occurrence_id": occurrence_id}
+                        )
                     ),
                     edit_mode=True,
                     expected_version=current["version_number"],
                     setting_event_options=setting_event_form_options,
                     correction_mode=correction_mode,
+                    management_correction=management_mode,
+                    management_occurrence_id=(
+                        occurrence_id if management_mode else None
+                    ),
                 ), 400
 
             completed_at_utc = None
@@ -8429,19 +8482,30 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 parameters += [completed_at_utc, actor["user_id"]]
             assignments.append("version_number = ?")
             parameters.append(resulting_version)
-            parameters += [occurrence_id, shift_id, actor["user_id"]]
+            parameters += [occurrence_id, shift_id]
+            if not management_mode:
+                parameters.append(actor["user_id"])
             if correction_mode:
                 parameters += [current["status"]]
             parameters.append(expected_version)
-            status_clause = (
-                "AND status = ?" if correction_mode
-                else "AND status = 'In Progress'"
-            )
+            if management_mode:
+                update_where = (
+                    "WHERE behaviour_occurrence_id = ? AND shift_id = ? "
+                    "AND status = ? AND version_number = ?"
+                )
+            else:
+                status_clause = (
+                    "AND status = ?" if correction_mode
+                    else "AND status = 'In Progress'"
+                )
+                update_where = (
+                    "WHERE behaviour_occurrence_id = ? AND shift_id = ? "
+                    "AND recorded_by_user_id = ? " + status_clause + " "
+                    "AND version_number = ?"
+                )
             updated = conn.execute(
                 "UPDATE behaviour_occurrences SET " + ", ".join(assignments) + " "
-                "WHERE behaviour_occurrence_id = ? AND shift_id = ? "
-                "AND recorded_by_user_id = ? " + status_clause + " "
-                "AND version_number = ?",
+                + update_where,
                 parameters
             )
             if updated.rowcount != 1:
@@ -8487,13 +8551,38 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                         + update_details + "\n"
                         f"Resulting version: {resulting_version}"
                     )
+                if management_mode:
+                    invalidated_review_ids = (
+                        invalidate_behaviour_reviews_for_management_correction(
+                            conn, occurrence_id, actor["user_id"]
+                        )
+                    )
+                    review_text = (
+                        ", ".join(str(review_id) for review_id in invalidated_review_ids)
+                        if invalidated_review_ids else "None"
+                    )
+                    update_details = (
+                        f"Occurrence ID: {occurrence_id}\n"
+                        f"Client ID: {current['client_id']}\n"
+                        f"Shift ID: {shift_id}\n"
+                        f"Management correction actor user ID: {actor['user_id']}\n"
+                        f"Original recorder user ID: {current['recorded_by_user_id']}\n"
+                        + update_details + "\n"
+                        f"Previous version: {expected_version}\n"
+                        f"New version: {resulting_version}\n"
+                        f"Invalidated Review acknowledgement IDs: {review_text}\n"
+                        f"Invalidated Review count: {len(invalidated_review_ids)}"
+                    )
                 log_activity(
-                    conn, "BEHAVIOUR", "behaviour_occurrence_updated",
+                    conn, "BEHAVIOUR",
+                    "management_behaviour_occurrence_updated"
+                    if management_mode else "behaviour_occurrence_updated",
                     "Behaviour occurrence updated", user_id=actor["user_id"],
                     client_id=current["client_id"], shift_id=shift_id,
                     related_table="behaviour_occurrences", related_id=occurrence_id,
                     details=update_details, success=1,
-                    storyline_visible=True, event_datetime=occurrence_utc
+                    storyline_visible=not management_mode,
+                    event_datetime=occurrence_utc
                 )
             conn.commit()
         except Exception:
@@ -8502,11 +8591,15 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
             raise
         if action == "save":
             if correction_mode:
-                flash("Behaviour correction saved successfully.")
-                return redirect(url_for(
-                    "behaviour_record",
-                    shift_id=shift_id,
-                ))
+                flash(
+                    "Behaviour correction saved successfully."
+                )
+                if management_mode:
+                    return redirect(url_for(
+                        "behaviour_review_detail",
+                        occurrence_id=occurrence_id,
+                    ))
+                return redirect(url_for("behaviour_record", shift_id=shift_id))
             flash("Behaviour progress saved.")
             return redirect(url_for(
                 "behaviour_occurrence_edit",
@@ -8517,6 +8610,8 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
         return redirect(url_for("shift_dashboard", shift_id=shift_id))
     except BehaviourConcurrencyConflictError as error:
         return str(error), 409
+    except LookupError as error:
+        return str(error), 404
     except PermissionError:
         return "Access denied", 403
     except ValueError as error:
@@ -8529,14 +8624,22 @@ def behaviour_occurrence_edit(shift_id, occurrence_id):
                 shift_context=True,
                 documentation_context=documentation_context,
                 form_action=url_for(
-                    "behaviour_occurrence_edit",
-                    shift_id=shift_id,
-                    occurrence_id=occurrence_id,
+                    "management_behaviour_correction"
+                    if management_mode else "behaviour_occurrence_edit",
+                    **(
+                        {"occurrence_id": occurrence_id}
+                        if management_mode else
+                        {"shift_id": shift_id, "occurrence_id": occurrence_id}
+                    )
                 ),
                 edit_mode=True,
                 expected_version=occurrence["version_number"],
                 setting_event_options=setting_event_form_options,
                 correction_mode=correction_mode,
+                management_correction=management_mode,
+                management_occurrence_id=(
+                    occurrence_id if management_mode else None
+                ),
             )
             return response, 400
         return str(error), 400
@@ -9244,6 +9347,81 @@ def get_behaviour_edit_context(conn, shift_id, occurrence_id, user_id):
             "Reviewed Behaviour occurrences cannot be corrected."
         )
     return actor, documentation_context, occurrence
+
+
+def get_management_behaviour_correction_context(conn, occurrence_id, user_id):
+    """Return a historical Behaviour record available for management correction."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in MANAGEMENT_CORRECTION_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to correct Behaviour occurrences."
+        )
+
+    occurrence = conn.execute("""
+        SELECT bo.*, c.client_name,
+               s.client_id AS shift_client_id,
+               s.shift_date, s.shift_type, s.status AS current_shift_status,
+               recorder.full_name AS recorder_name
+        FROM behaviour_occurrences bo
+        JOIN clients c ON c.client_id = bo.client_id
+        JOIN shifts s ON s.shift_id = bo.shift_id
+        JOIN users recorder ON recorder.user_id = bo.recorded_by_user_id
+        WHERE bo.behaviour_occurrence_id = ?
+    """, (occurrence_id,)).fetchone()
+    if occurrence is None:
+        raise LookupError("Behaviour occurrence not found.")
+    if occurrence["client_id"] != occurrence["shift_client_id"]:
+        raise PermissionError(
+            "Behaviour occurrence client and source shift client do not match."
+        )
+    if occurrence["current_shift_status"] == SHIFT_CANCELLED_STATUS:
+        raise PermissionError(
+            "Cancelled Behaviour occurrences cannot be corrected."
+        )
+    if occurrence["status"] == "Voided":
+        raise PermissionError(
+            "Voided Behaviour occurrences cannot be corrected."
+        )
+    return actor, occurrence
+
+
+def invalidate_behaviour_reviews_for_management_correction(
+    conn, occurrence_id, actor_user_id
+):
+    """Invalidate active Behaviour Reviews without deleting their audit rows."""
+    review_rows = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+        WHERE source_table = 'behaviour_occurrences'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        ORDER BY acknowledgement_id
+    """, (occurrence_id,)).fetchall()
+    review_ids = [row["acknowledgement_id"] for row in review_rows]
+    if not review_ids:
+        return review_ids
+
+    invalidated_at_utc = serialize_behaviour_utc(
+        datetime.now(timezone.utc).replace(microsecond=0)
+    )
+    conn.execute("""
+        UPDATE acknowledgements
+        SET active = 0,
+            invalidated_at_utc = ?,
+            invalidated_by_user_id = ?,
+            invalidation_reason = ?
+        WHERE source_table = 'behaviour_occurrences'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+    """, (
+        invalidated_at_utc,
+        actor_user_id,
+        "Behaviour corrected by management",
+        occurrence_id,
+    ))
+    return review_ids
 
 
 def get_behaviour_in_progress_resume_records(conn, shift_id, user_id):
@@ -27854,6 +28032,14 @@ def behaviour_review_detail(occurrence_id):
         linked_actions=linked_actions,
         can_create_actions=(
             actor["role"] in ACTION_CREATION_ROLES
+        ),
+        can_management_correct=(
+            actor["role"] in MANAGEMENT_CORRECTION_ROLES
+            and occurrence["status"] != "Voided"
+            and (
+                not shift_context
+                or shift_context.get("status") != SHIFT_CANCELLED_STATUS
+            )
         ),
         storyline_return_context=_storyline_return_context(
             request.args, occurrence["client_id"]

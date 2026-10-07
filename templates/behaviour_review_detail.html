@@ -17,6 +17,18 @@
 
     <p><a href="{{ url_for('manager_review_hub') }}">&larr; Back to Management Review</a></p>
 
+    {% if can_management_correct %}
+        <p>
+            <a
+                class="button"
+                href="{{ url_for(
+                    'management_behaviour_correction',
+                    occurrence_id=occurrence.behaviour_occurrence_id
+                ) }}"
+            >Correct Entry</a>
+        </p>
+    {% endif %}
+
     {% if occurrence.status == 'In Progress' %}
         <p class="warning-message" role="status">This Behaviour record is In Progress and has not been finalized.</p>
     {% endif %}
