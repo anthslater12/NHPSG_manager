@@ -367,6 +367,43 @@ class ManagementSleepCorrectionTests(unittest.TestCase):
         )
         self.assertEqual(storyline.status_code, 200)
         self.assertEqual(storyline.data.count(b'class="storyline-event"'), 1)
+        self.assertIn(b"09:30", storyline.data)
+        self.assertIn(b"Corrected sleep note", storyline.data)
+        self.assertNotIn(b"08:30", storyline.data)
+        self.assertNotIn(b"Settled after music", storyline.data)
+        self.assertNotIn(b"management_sleep_event_updated", storyline.data)
+        self.assertEqual(
+            self.row(
+                "SELECT storyline_visible FROM activity_log "
+                "WHERE activity_type = 'management_sleep_event_updated'"
+            )["storyline_visible"],
+            0,
+        )
+
+    def test_management_woke_up_correction_rehydrates_storyline_source(self):
+        self.add_sleep_event(2, event_type="woke_up")
+        sleep_review.SleepStorylineReviewTests.add_storyline_event(
+            self, "sleep_woke_up", 2
+        )
+        self.login(2, "Admin")
+        response = self.client.post(
+            self.edit_url(2),
+            data=self.correction_data(
+                event_local="2026-08-02T10:15",
+                note="Corrected wake note",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+
+        storyline = self.client.get(
+            "/client/1/storyline?filter=Sleep&date=2026-08-02"
+        )
+        self.assertEqual(storyline.status_code, 200)
+        self.assertEqual(storyline.data.count(b'class="storyline-event"'), 1)
+        self.assertIn(b"10:15", storyline.data)
+        self.assertIn(b"Corrected wake note", storyline.data)
+        self.assertNotIn(b"08:30", storyline.data)
+        self.assertNotIn(b"Settled after music", storyline.data)
         self.assertNotIn(b"management_sleep_event_updated", storyline.data)
         self.assertEqual(
             self.row(

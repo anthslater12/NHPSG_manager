@@ -645,6 +645,83 @@ class SleepStorylineReviewTests(unittest.TestCase):
         self.assertNotIn(b"View details", response.data)
         self.assertNotIn(b"Review required", response.data)
 
+    def test_support_worker_sleep_correction_rehydrates_storyline_source(self):
+        self.add_sleep_event(1, note="Original sleep note")
+        self.add_storyline_event("sleep_fell_asleep", 1)
+        self.login(1, "Support Worker")
+        correction = self.client.post(
+            "/shift/10/sleep/1/edit",
+            data={
+                "event_local": "2026-08-02T09:30",
+                "note": "Corrected sleep note",
+            },
+        )
+        self.assertEqual(correction.status_code, 302)
+
+        self.login(2, "Program Manager")
+        page = self.client.get(
+            "/client/1/storyline?filter=Sleep&date=2026-08-02"
+        )
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.data.count(b'class="storyline-event"'), 1)
+        self.assertIn(b"09:30", page.data)
+        self.assertIn(b"Corrected sleep note", page.data)
+        self.assertNotIn(b"08:30", page.data)
+        self.assertNotIn(b"Original sleep note", page.data)
+
+    def test_sleep_correction_rehydrates_across_vancouver_local_date(self):
+        self.add_sleep_event(1, note="Before midnight")
+        self.add_storyline_event("sleep_woke_up", 1)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE sleep_events SET event_datetime = ?, note = ? "
+            "WHERE sleep_event_id = 1",
+            ("2026-08-03T06:30:00Z", "Before midnight"),
+        )
+        conn.execute(
+            "UPDATE activity_log SET event_datetime = ?, details = ? "
+            "WHERE activity_type = 'sleep_woke_up' AND related_id = 1",
+            ("2026-08-03T06:30:00Z", "Note: Before midnight"),
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(1, "Support Worker")
+        correction = self.client.post(
+            "/shift/10/sleep/1/edit",
+            data={
+                "event_local": "2026-08-03T00:15",
+                "note": "After midnight",
+            },
+        )
+        self.assertEqual(correction.status_code, 302)
+
+        self.login(2, "Program Manager")
+        old_day = self.client.get(
+            "/client/1/storyline?filter=Sleep&date=2026-08-02"
+        )
+        self.assertEqual(old_day.status_code, 200)
+        self.assertEqual(old_day.data.count(b'class="storyline-event"'), 0)
+        self.assertNotIn(b"Before midnight", old_day.data)
+
+        new_day = self.client.get(
+            "/client/1/storyline?filter=Sleep&date=2026-08-03"
+        )
+        self.assertEqual(new_day.status_code, 200)
+        self.assertEqual(new_day.data.count(b'class="storyline-event"'), 1)
+        self.assertIn(b"00:15", new_day.data)
+        self.assertIn(b"After midnight", new_day.data)
+
+    def test_missing_sleep_source_keeps_safe_storyline_fallback(self):
+        self.add_storyline_event("sleep_fell_asleep", 999)
+        self.login(2, "Program Manager")
+        response = self.client.get(
+            "/client/1/storyline?filter=Sleep&date=2026-08-02"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Client fell asleep", response.data)
+        self.assertIn(b"Note: Settled after music", response.data)
+
     def test_storyline_context_survives_review_post(self):
         self.add_sleep_event(1)
         self.login(2, "Admin")

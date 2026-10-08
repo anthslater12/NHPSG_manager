@@ -25009,6 +25009,40 @@ def client_storyline(client_id):
             row["shift_activity_id"]: dict(row)
             for row in current_activity_rows
         }
+    current_sleep_events = {}
+    sleep_event_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] in {
+                "sleep_fell_asleep", "sleep_woke_up"
+            }
+            and event["related_table"] == "sleep_events"
+            and event["related_id"] is not None
+        )
+    }
+    if sleep_event_ids:
+        sleep_event_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'sleep_events'"
+        ).fetchone()
+        if sleep_event_table is not None:
+            placeholders = ", ".join("?" for _ in sleep_event_ids)
+            try:
+                current_sleep_rows = conn.execute(
+                    "SELECT se.* FROM sleep_events se "
+                    "JOIN shifts s ON s.shift_id = se.shift_id "
+                    "AND s.client_id = se.client_id "
+                    "WHERE se.client_id = ? AND se.sleep_event_id IN ("
+                    + placeholders + ")",
+                    (client_id, *sorted(sleep_event_ids)),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                current_sleep_rows = []
+            current_sleep_events = {
+                row["sleep_event_id"]: dict(row)
+                for row in current_sleep_rows
+            }
     candidates = [
         (
             event["activity_type"], event["related_table"],
@@ -25132,6 +25166,27 @@ def client_storyline(client_id):
                 event["event_datetime"] = current_event_datetime
                 if current_activity["status"] in ("In Progress", "Completed"):
                     event["storyline_status"] = current_activity["status"]
+        current_sleep_event = (
+            current_sleep_events.get(event["related_id"])
+            if (
+                event["activity_type"] in {
+                    "sleep_fell_asleep", "sleep_woke_up"
+                }
+                and event["related_table"] == "sleep_events"
+            )
+            else None
+        )
+        if current_sleep_event is not None:
+            event["event_datetime"] = current_sleep_event["event_datetime"]
+            event["summary"] = (
+                "Client fell asleep"
+                if current_sleep_event["event_type"] == "fell_asleep"
+                else "Client woke up"
+            )
+            current_note = str(current_sleep_event.get("note") or "").strip()
+            event["storyline_details"] = (
+                f"Note: {current_note}" if current_note else None
+            )
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []
