@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Correct Sleep Entry</h2>
+    <p>
+        <strong>Client:</strong> {{ event.client_name }}<br>
+        <strong>Shift:</strong> {{ event.shift_date }} {{ event.shift_type }}<br>
+        <strong>Original Worker:</strong> {{ event.recorded_by_name }}<br>
+        <strong>Event:</strong> {{ event.event_type_display }}<br>
+        <strong>Current Event Date and Time:</strong> {{ event.event_local_display }}
+    </p>
+    {% if error %}<p class="error-message">{{ error }}</p>{% endif %}
+    <form method="post">
+        <label for="event_local">Event date and time</label>
+        <input
+            type="datetime-local"
+            id="event_local"
+            name="event_local"
+            value="{{ values.event_local }}"
+            required
+        >
+        <label for="sleep-note">Notes</label>
+        <textarea id="sleep-note" name="note" rows="3" required>{{ values.note }}</textarea>
+        <button type="submit">Save Correction</button>
+    </form>
+    <p>
+        <a href="{{ url_for('sleep_review_detail', sleep_event_id=event.sleep_event_id) }}">
+            Back to Sleep Management Review
+        </a>
+    </p>
+</div>
+{% endblock %}

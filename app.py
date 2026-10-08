@@ -2464,6 +2464,7 @@ def get_sleep_management_event(conn, sleep_event_id):
             se.note,
             se.created_at,
             c.client_name,
+            s.status AS shift_status,
             s.shift_date,
             s.shift_type,
             recorder.full_name AS recorded_by_name
@@ -2489,6 +2490,90 @@ def get_sleep_management_event(conn, sleep_event_id):
         else "Woke Up"
     )
     return event
+
+
+def get_management_sleep_correction_context(conn, sleep_event_id, user_id):
+    """Return a historical Sleep event available for management correction."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in MANAGEMENT_CORRECTION_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to correct Sleep events."
+        )
+
+    row = conn.execute("""
+        SELECT
+            se.*,
+            s.client_id AS shift_client_id,
+            s.shift_date,
+            s.shift_type,
+            s.status AS shift_status,
+            c.client_name,
+            recorder.full_name AS recorded_by_name
+        FROM sleep_events se
+        JOIN shifts s ON s.shift_id = se.shift_id
+        JOIN clients c ON c.client_id = se.client_id
+        JOIN users recorder ON recorder.user_id = se.recorded_by_user_id
+        WHERE se.sleep_event_id = ?
+    """, (sleep_event_id,)).fetchone()
+    if row is None:
+        raise LookupError("Sleep event not found.")
+
+    if row["client_id"] != row["shift_client_id"]:
+        raise PermissionError(
+            "Sleep event client and source shift client do not match."
+        )
+    if row["shift_status"] == SHIFT_CANCELLED_STATUS:
+        raise PermissionError("Cancelled Sleep events cannot be corrected.")
+
+    event = dict(row)
+    event["event_local_display"] = behaviour_utc_to_vancouver(
+        event["event_datetime"]
+    ).strftime("%Y-%m-%d %I:%M %p")
+    event["event_type_display"] = (
+        "Fell Asleep"
+        if event["event_type"] == "fell_asleep"
+        else "Woke Up"
+    )
+    return actor, event
+
+
+def invalidate_sleep_reviews_for_management_correction(
+    conn, sleep_event_id, actor_user_id
+):
+    """Invalidate active Sleep Reviews without deleting their audit rows."""
+    review_rows = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+        WHERE source_table = 'sleep_events'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        ORDER BY acknowledgement_id
+    """, (sleep_event_id,)).fetchall()
+    review_ids = [row["acknowledgement_id"] for row in review_rows]
+    if not review_ids:
+        return review_ids
+
+    invalidated_at_utc = serialize_behaviour_utc(
+        datetime.now(timezone.utc).replace(microsecond=0)
+    )
+    conn.execute("""
+        UPDATE acknowledgements
+        SET active = 0,
+            invalidated_at_utc = ?,
+            invalidated_by_user_id = ?,
+            invalidation_reason = ?
+        WHERE source_table = 'sleep_events'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+    """, (
+        invalidated_at_utc,
+        actor_user_id,
+        "Sleep corrected by management",
+        sleep_event_id,
+    ))
+    return review_ids
 
 
 STORYLINE_FILTERS = {
@@ -24568,6 +24653,163 @@ def sleep_event_edit(shift_id, sleep_event_id):
         conn.close()
 
 
+@app.route(
+    "/manager-review/sleep/<int:sleep_event_id>/correct",
+    methods=["GET", "POST"],
+)
+def management_sleep_correction(sleep_event_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    event = None
+    values = {}
+    try:
+        actor, event = get_management_sleep_correction_context(
+            conn, sleep_event_id, session["user_id"]
+        )
+        if request.method == "GET":
+            return render_template(
+                "sleep_management_correction.html",
+                event=event,
+                values=_sleep_edit_values(event),
+                error=None,
+            )
+
+        submitted_event_local = request.form.get("event_local", "")
+        submitted_note = request.form.get("note", "")
+        values = {
+            "event_local": submitted_event_local,
+            "note": submitted_note,
+        }
+        note = submitted_note.strip()
+        if not note:
+            raise ValueError("Notes are required.")
+
+        local_naive = _parse_vancouver_local_input(submitted_event_local)
+        candidates = _valid_vancouver_utc_candidates(local_naive)
+        if len(candidates) != 1:
+            raise ValueError("Sleep event date and time is invalid.")
+        event_utc = candidates[0]
+        if event_utc > datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise ValueError("Sleep event cannot be unreasonably in the future.")
+        event_datetime = event_utc.isoformat().replace("+00:00", "Z")
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, current = get_management_sleep_correction_context(
+                conn, sleep_event_id, session["user_id"]
+            )
+            old_note = current["note"] or ""
+            if (
+                event_datetime == current["event_datetime"]
+                and note == old_note
+            ):
+                conn.rollback()
+                return render_template(
+                    "sleep_management_correction.html",
+                    event=current,
+                    values=values,
+                    error=(
+                        "No changes were detected. The Sleep entry already "
+                        "matches the information entered."
+                    ),
+                ), 400
+
+            changed_fields = []
+            change_lines = []
+            if event_datetime != current["event_datetime"]:
+                changed_fields.append("event_datetime")
+                change_lines.append(
+                    f"event_datetime: {current['event_datetime']!r} -> {event_datetime!r}"
+                )
+            if note != old_note:
+                changed_fields.append("note")
+                change_lines.append(f"note: {old_note!r} -> {note!r}")
+
+            updated = conn.execute("""
+                UPDATE sleep_events
+                SET event_datetime = ?, note = ?
+                WHERE sleep_event_id = ?
+                  AND client_id = ?
+                  AND shift_id = ?
+                  AND recorded_by_user_id = ?
+                  AND event_type = ?
+            """, (
+                event_datetime,
+                note,
+                sleep_event_id,
+                current["client_id"],
+                current["shift_id"],
+                current["recorded_by_user_id"],
+                current["event_type"],
+            ))
+            if updated.rowcount != 1:
+                raise PermissionError(
+                    "Sleep event correction is no longer available."
+                )
+
+            invalidated_review_ids = (
+                invalidate_sleep_reviews_for_management_correction(
+                    conn, sleep_event_id, actor["user_id"]
+                )
+            )
+            review_text = (
+                ", ".join(str(review_id) for review_id in invalidated_review_ids)
+                if invalidated_review_ids else "None"
+            )
+            change_text = "\n".join(change_lines)
+            details = (
+                f"Sleep event ID: {sleep_event_id}\n"
+                f"Client ID: {current['client_id']}\n"
+                f"Shift ID: {current['shift_id']}\n"
+                f"Management correction actor user ID: {actor['user_id']}\n"
+                f"Original recorder user ID: {current['recorded_by_user_id']}\n"
+                f"Changed fields: {', '.join(changed_fields)}\n"
+                f"{change_text}\n"
+                f"Invalidated Review acknowledgement IDs: {review_text}\n"
+                f"Invalidated Review count: {len(invalidated_review_ids)}"
+            )
+            log_activity(
+                conn,
+                activity_class="SLEEP",
+                activity_type="management_sleep_event_updated",
+                summary="Sleep event corrected by management",
+                user_id=actor["user_id"],
+                client_id=current["client_id"],
+                shift_id=current["shift_id"],
+                related_table="sleep_events",
+                related_id=sleep_event_id,
+                details=details,
+                success=1,
+                storyline_visible=False,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        flash("Sleep correction saved successfully.")
+        return redirect(url_for(
+            "sleep_review_detail",
+            sleep_event_id=sleep_event_id,
+        ))
+    except PermissionError:
+        return "Access denied", 403
+    except LookupError as error:
+        return str(error), 404
+    except (ValueError, sqlite3.IntegrityError) as error:
+        return render_template(
+            "sleep_management_correction.html",
+            event=event,
+            values=values,
+            error=str(error),
+        ), 400
+    finally:
+        conn.close()
+
+
 @app.route("/client/<int:client_id>/storyline")
 def client_storyline(client_id):
     if "user_id" not in session:
@@ -28385,6 +28627,10 @@ def sleep_review_detail(sleep_event_id):
         current_user_reviewed=current_user_review is not None,
         management_notes=management_notes,
         linked_actions=linked_actions,
+        can_management_correct=(
+            actor["role"] in MANAGEMENT_CORRECTION_ROLES
+            and event["shift_status"] != SHIFT_CANCELLED_STATUS
+        ),
         can_create_actions=(
             actor["role"] in ACTION_CREATION_ROLES
         ),
