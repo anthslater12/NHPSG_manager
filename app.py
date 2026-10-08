@@ -3323,6 +3323,7 @@ def get_food_fluid_management_entry(conn, entry_id):
             c.client_name,
             s.shift_date,
             s.shift_type,
+            s.status AS shift_status,
             recorder.full_name AS recorded_by_name,
             voider.full_name AS voided_by_name
         FROM food_fluid_entries AS ffe
@@ -3352,6 +3353,118 @@ def get_food_fluid_management_entry(conn, entry_id):
         else None
     )
     return entry
+
+
+def get_management_food_fluid_correction_context(conn, entry_id, user_id):
+    """Return a historical Food & Fluid entry for management correction."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in MANAGEMENT_CORRECTION_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to correct Food & Fluid entries."
+        )
+
+    row = conn.execute("""
+        SELECT
+            ffe.*,
+            s.shift_id AS source_shift_id,
+            s.client_id AS shift_client_id,
+            s.shift_date,
+            s.shift_type,
+            s.status AS shift_status,
+            c.client_name,
+            c.client_id AS source_client_id,
+            (
+                SELECT original_staff.actual_start_time
+                FROM shift_staff AS original_staff
+                WHERE original_staff.shift_id = ffe.shift_id
+                  AND original_staff.user_id = ffe.recorded_by_user_id
+                ORDER BY original_staff.shift_staff_id
+                LIMIT 1
+            ) AS actual_start_time,
+            (
+                SELECT original_staff.actual_end_at_utc
+                FROM shift_staff AS original_staff
+                WHERE original_staff.shift_id = ffe.shift_id
+                  AND original_staff.user_id = ffe.recorded_by_user_id
+                ORDER BY original_staff.shift_staff_id
+                LIMIT 1
+            ) AS actual_end_at_utc,
+            recorder.full_name AS recorded_by_name,
+            recorder.user_id AS source_recorder_user_id
+        FROM food_fluid_entries AS ffe
+        LEFT JOIN shifts AS s ON s.shift_id = ffe.shift_id
+        LEFT JOIN clients AS c ON c.client_id = ffe.client_id
+        LEFT JOIN users AS recorder
+          ON recorder.user_id = ffe.recorded_by_user_id
+        WHERE ffe.food_fluid_entry_id = ?
+    """, (entry_id,)).fetchone()
+    if row is None:
+        raise LookupError("Food & Fluid entry not found.")
+    if (
+        row["source_shift_id"] is None
+        or row["shift_client_id"] is None
+        or row["source_client_id"] is None
+        or row["source_recorder_user_id"] is None
+    ):
+        raise PermissionError(
+            "Food & Fluid entry source relationships are incomplete."
+        )
+    if (
+        row["client_id"] != row["shift_client_id"]
+        or row["client_id"] != row["source_client_id"]
+    ):
+        raise PermissionError(
+            "Food & Fluid entry client and source shift client do not match."
+        )
+    if row["shift_status"] == SHIFT_CANCELLED_STATUS:
+        raise PermissionError(
+            "Cancelled Food & Fluid entries cannot be corrected."
+        )
+    if row["status"] != "Recorded":
+        raise PermissionError(
+            "Voided Food & Fluid entries cannot be corrected."
+        )
+
+    return actor, dict(row)
+
+
+def invalidate_food_fluid_reviews_for_management_correction(
+    conn, entry_id, actor_user_id
+):
+    """Invalidate active Food & Fluid Reviews without deleting their rows."""
+    review_rows = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+        WHERE source_table = 'food_fluid_entries'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        ORDER BY acknowledgement_id
+    """, (entry_id,)).fetchall()
+    review_ids = [row["acknowledgement_id"] for row in review_rows]
+    if not review_ids:
+        return review_ids
+
+    invalidated_at_utc = serialize_behaviour_utc(
+        datetime.now(timezone.utc).replace(microsecond=0)
+    )
+    conn.execute("""
+        UPDATE acknowledgements
+        SET active = 0,
+            invalidated_at_utc = ?,
+            invalidated_by_user_id = ?,
+            invalidation_reason = ?
+        WHERE source_table = 'food_fluid_entries'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+    """, (
+        invalidated_at_utc,
+        actor_user_id,
+        "Food & Fluid entry corrected by management",
+        entry_id,
+    ))
+    return review_ids
 
 
 def get_food_fluid_management_entries(conn):
@@ -29697,11 +29810,190 @@ def food_fluid_review_detail(entry_id):
         can_create_actions=(
             actor["role"] in ACTION_CREATION_ROLES
         ),
+        can_management_correct=(
+            actor["role"] in MANAGEMENT_CORRECTION_ROLES
+            and entry["status"] == "Recorded"
+            and entry["shift_status"] != SHIFT_CANCELLED_STATUS
+        ),
         state_filter=get_food_fluid_review_filter(),
         storyline_return_context=_storyline_return_context(
             request.args, entry["client_id"]
         )
     )
+
+
+@app.route(
+    "/manager-review/food-fluid/<int:entry_id>/correct",
+    methods=["GET", "POST"]
+)
+def management_food_fluid_correction(entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    entry = None
+    values = {}
+    try:
+        actor, entry = get_management_food_fluid_correction_context(
+            conn, entry_id, session["user_id"]
+        )
+        if request.method == "GET":
+            return render_template(
+                "food_fluid_management_correction.html",
+                entry=entry,
+                values=_food_fluid_edit_values(entry),
+                error=None,
+                interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+                outcomes=FOOD_FLUID_OUTCOMES,
+            )
+
+        values = request.form.to_dict()
+        parsed = parse_food_fluid_form_values(request.form)
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor, current = get_management_food_fluid_correction_context(
+                conn, entry_id, session["user_id"]
+            )
+            event_at_utc = convert_food_fluid_event_input_to_utc(
+                current,
+                parsed["event_local"],
+                parsed["repeated_hour_choice"] or None,
+            )
+            current_values = {
+                "event_at_utc": current["event_at_utc"],
+                "interaction_type": current["interaction_type"],
+                "item_description": current["item_description"],
+                "outcome": current["outcome"],
+                "physically_thrown": current["physically_thrown"],
+                "additional_details": current["additional_details"],
+            }
+            submitted_values = {
+                "event_at_utc": event_at_utc,
+                "interaction_type": parsed["interaction_type"],
+                "item_description": parsed["item_description"],
+                "outcome": parsed["outcome"],
+                "physically_thrown": parsed["physically_thrown"],
+                "additional_details": parsed["additional_details"],
+            }
+            if submitted_values == current_values:
+                conn.rollback()
+                return render_template(
+                    "food_fluid_management_correction.html",
+                    entry=current,
+                    values=values,
+                    error=(
+                        "No changes were detected. The Food & Fluid entry "
+                        "already matches the information entered."
+                    ),
+                    interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+                    outcomes=FOOD_FLUID_OUTCOMES,
+                ), 400
+
+            changed_fields = [
+                field_name
+                for field_name in submitted_values
+                if submitted_values[field_name] != current_values[field_name]
+            ]
+            updated = conn.execute("""
+                UPDATE food_fluid_entries
+                SET
+                    event_at_utc = ?,
+                    interaction_type = ?,
+                    item_description = ?,
+                    outcome = ?,
+                    physically_thrown = ?,
+                    additional_details = ?
+                WHERE food_fluid_entry_id = ?
+                  AND client_id = ?
+                  AND shift_id = ?
+                  AND recorded_by_user_id = ?
+                  AND status = 'Recorded'
+            """, (
+                submitted_values["event_at_utc"],
+                submitted_values["interaction_type"],
+                submitted_values["item_description"],
+                submitted_values["outcome"],
+                submitted_values["physically_thrown"],
+                submitted_values["additional_details"],
+                entry_id,
+                current["client_id"],
+                current["shift_id"],
+                current["recorded_by_user_id"],
+            ))
+            if updated.rowcount != 1:
+                raise PermissionError(
+                    "Food & Fluid entry correction is no longer available."
+                )
+
+            invalidated_review_ids = (
+                invalidate_food_fluid_reviews_for_management_correction(
+                    conn, entry_id, actor["user_id"]
+                )
+            )
+            change_text = "\n".join(
+                f"{field_name}: {current_values[field_name]!r} -> "
+                f"{submitted_values[field_name]!r}"
+                for field_name in changed_fields
+            )
+            review_text = (
+                ", ".join(str(review_id) for review_id in invalidated_review_ids)
+                if invalidated_review_ids else "None"
+            )
+            details = (
+                f"Food & Fluid entry ID: {entry_id}\n"
+                f"Client ID: {current['client_id']}\n"
+                f"Shift ID: {current['shift_id']}\n"
+                f"Management correction actor user ID: {actor['user_id']}\n"
+                f"Original recorder user ID: {current['recorded_by_user_id']}\n"
+                f"Changed fields: {', '.join(changed_fields)}\n"
+                f"Previous values: {current_values}\n"
+                f"New values: {submitted_values}\n"
+                f"{change_text}\n"
+                f"Invalidated Review acknowledgement IDs: {review_text}\n"
+                f"Invalidated Review count: {len(invalidated_review_ids)}"
+            )
+            log_activity(
+                conn,
+                activity_class="FOOD_FLUID",
+                activity_type="management_food_fluid_event_updated",
+                summary="Food & Fluid entry corrected by management",
+                user_id=actor["user_id"],
+                client_id=current["client_id"],
+                shift_id=current["shift_id"],
+                related_table="food_fluid_entries",
+                related_id=entry_id,
+                details=details,
+                success=1,
+                event_datetime=submitted_values["event_at_utc"],
+                storyline_visible=False,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        flash("Food & Fluid correction saved successfully.")
+        return redirect(url_for(
+            "food_fluid_review_detail",
+            entry_id=entry_id,
+        ))
+    except PermissionError:
+        return "Access denied", 403
+    except LookupError as error:
+        return str(error), 404
+    except (ValueError, sqlite3.IntegrityError) as error:
+        return render_template(
+            "food_fluid_management_correction.html",
+            entry=entry,
+            values=values,
+            error=str(error),
+            interaction_types=FOOD_FLUID_INTERACTION_TYPES,
+            outcomes=FOOD_FLUID_OUTCOMES,
+        ), 400
+    finally:
+        conn.close()
 
 
 @app.route(

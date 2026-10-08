@@ -112,6 +112,18 @@
         {% endif %}
     </table>
 
+    {% if can_management_correct %}
+        <p>
+            <a
+                class="button"
+                href="{{ url_for(
+                    'management_food_fluid_correction',
+                    entry_id=entry.food_fluid_entry_id
+                ) }}"
+            >Correct Entry</a>
+        </p>
+    {% endif %}
+
 </div>
 
 <div class="card">
