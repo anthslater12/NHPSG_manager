@@ -25122,6 +25122,42 @@ def client_storyline(client_id):
             row["shift_activity_id"]: dict(row)
             for row in current_activity_rows
         }
+    current_food_fluid_entries = {}
+    food_fluid_entry_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] in {
+                "food_fluid_entry_created", "food_fluid_entry_voided"
+            }
+            and event["related_table"] == "food_fluid_entries"
+            and event["related_id"] is not None
+        )
+    }
+    if food_fluid_entry_ids:
+        food_fluid_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'food_fluid_entries'"
+        ).fetchone()
+        if food_fluid_table is not None:
+            placeholders = ", ".join("?" for _ in food_fluid_entry_ids)
+            try:
+                current_food_fluid_rows = conn.execute(
+                    "SELECT ffe.* FROM food_fluid_entries ffe "
+                    "JOIN shifts s ON s.shift_id = ffe.shift_id "
+                    "AND s.client_id = ffe.client_id "
+                    "WHERE ffe.client_id = ? AND ffe.food_fluid_entry_id IN ("
+                    + placeholders + ")",
+                    (client_id, *sorted(food_fluid_entry_ids)),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                current_food_fluid_rows = []
+        else:
+            current_food_fluid_rows = []
+        current_food_fluid_entries = {
+            row["food_fluid_entry_id"]: dict(row)
+            for row in current_food_fluid_rows
+        }
     current_sleep_events = {}
     sleep_event_ids = {
         event["related_id"]
@@ -25279,6 +25315,43 @@ def client_storyline(client_id):
                 event["event_datetime"] = current_event_datetime
                 if current_activity["status"] in ("In Progress", "Completed"):
                     event["storyline_status"] = current_activity["status"]
+        current_food_fluid_entry = (
+            current_food_fluid_entries.get(event["related_id"])
+            if (
+                event["activity_type"] in {
+                    "food_fluid_entry_created", "food_fluid_entry_voided"
+                }
+                and event["related_table"] == "food_fluid_entries"
+            )
+            else None
+        )
+        if current_food_fluid_entry is not None:
+            interaction_type = current_food_fluid_entry.get("interaction_type")
+            item_description = current_food_fluid_entry.get("item_description")
+            event["event_datetime"] = current_food_fluid_entry.get(
+                "event_at_utc"
+            ) or event["event_datetime"]
+            if event["activity_type"] == "food_fluid_entry_voided":
+                event["summary"] = (
+                    "Voided " + format_food_fluid_storyline_summary(
+                        interaction_type, item_description
+                    )
+                )
+                event["storyline_details"] = format_food_fluid_void_storyline_details(
+                    current_food_fluid_entry.get("outcome"),
+                    current_food_fluid_entry.get("void_reason")
+                )
+            else:
+                event["summary"] = format_food_fluid_storyline_summary(
+                    interaction_type, item_description
+                )
+                event["storyline_details"] = (
+                    format_food_fluid_storyline_details(
+                        current_food_fluid_entry.get("outcome"),
+                        current_food_fluid_entry.get("additional_details"),
+                        current_food_fluid_entry.get("physically_thrown", 0)
+                    )
+                )
         current_sleep_event = (
             current_sleep_events.get(event["related_id"])
             if (

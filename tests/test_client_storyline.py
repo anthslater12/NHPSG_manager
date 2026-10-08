@@ -259,6 +259,45 @@ class ClientStorylineTests(unittest.TestCase):
             "%Y-%m-%dT%H:%M:%SZ"
         )
 
+    def add_food_fluid_source(
+        self, entry_id, event_at_utc, interaction_type="Offered",
+        item_description="Juice", outcome="Consumed",
+        additional_details=None, physically_thrown=0, void_reason=None
+    ):
+        conn = sqlite3.connect(self.path)
+        for column, definition in (
+            ("event_at_utc", "TEXT"),
+            ("interaction_type", "TEXT"),
+            ("item_description", "TEXT"),
+            ("outcome", "TEXT"),
+            ("physically_thrown", "INTEGER"),
+            ("additional_details", "TEXT"),
+            ("void_reason", "TEXT"),
+        ):
+            try:
+                conn.execute(
+                    f"ALTER TABLE food_fluid_entries ADD COLUMN {column} "
+                    f"{definition}"
+                )
+            except sqlite3.OperationalError as error:
+                if "duplicate column name" not in str(error).lower():
+                    raise
+        conn.execute(
+            """
+            INSERT INTO food_fluid_entries
+            (food_fluid_entry_id, client_id, shift_id, event_at_utc,
+             interaction_type, item_description, outcome, physically_thrown,
+             additional_details, void_reason)
+            VALUES (?, 1, 10, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry_id, event_at_utc, interaction_type, item_description,
+                outcome, physically_thrown, additional_details, void_reason,
+            )
+        )
+        conn.commit()
+        conn.close()
+
     def test_authorized_worker_sees_only_visible_events_for_client(self):
         self.login()
         self.add_event("sleep_fell_asleep", "Client fell asleep")
@@ -1737,6 +1776,59 @@ class ClientStorylineTests(unittest.TestCase):
         page = self.client.get("/client/1/storyline").data
         self.assertIn(b"Food &amp; Fluid entry recorded", page)
         self.assertNotIn(b"Event UTC", page)
+
+    def test_food_fluid_storyline_rehydration_moves_event_to_corrected_local_date(self):
+        old_date = self.today - timedelta(days=1)
+        original = self.event_utc(old_date, 23, 30)
+        corrected = self.event_utc(self.today, 0, 15)
+        self.add_food_fluid_source(
+            503, corrected, item_description="Snack", outcome="Eaten"
+        )
+        self.add_event(
+            "food_fluid_entry_created", "Offered - Old snack",
+            when=f"{old_date} 23:30:00", event_datetime=original,
+            details="Outcome: Old outcome", related_table="food_fluid_entries",
+            related_id=503, shift_id=10
+        )
+
+        self.login()
+        old_page = self.client.get(
+            f"/client/1/storyline?date={old_date.isoformat()}"
+        ).data
+        new_page = self.client.get(
+            f"/client/1/storyline?date={self.today.isoformat()}"
+        ).data
+
+        self.assertNotIn(b"Old snack", old_page)
+        self.assertNotIn(b"Snack", old_page)
+        self.assertEqual(new_page.count(b'class="storyline-event"'), 1)
+        self.assertIn(b"Offered \xe2\x80\x94 Snack", new_page)
+        self.assertIn(b"00:15", new_page)
+
+    def test_food_fluid_storyline_missing_source_keeps_original_audit(self):
+        original = self.event_utc(self.today, 11, 0)
+        self.add_food_fluid_source(504, original)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "DELETE FROM food_fluid_entries WHERE food_fluid_entry_id = 504"
+        )
+        conn.commit()
+        conn.close()
+        self.add_event(
+            "food_fluid_entry_created", "Legacy Food Record",
+            when=f"{self.today} 11:00:00", event_datetime=original,
+            details="Outcome: Legacy", related_table="food_fluid_entries",
+            related_id=504, shift_id=10
+        )
+
+        self.login()
+        page = self.client.get(
+            f"/client/1/storyline?date={self.today.isoformat()}"
+        ).data
+
+        self.assertEqual(page.count(b'class="storyline-event"'), 1)
+        self.assertIn(b"Legacy Food Record", page)
+        self.assertIn(b"Outcome: Legacy", page)
 
     def test_activity_summary_categories_and_escaped_long_description_render_safely(self):
         self.login()

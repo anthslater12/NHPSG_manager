@@ -387,6 +387,13 @@ class ManagementFoodFluidCorrectionTests(unittest.TestCase):
         )
         self.assertEqual(storyline.status_code, 200)
         self.assertEqual(storyline.data.count(b'class="storyline-event"'), 1)
+        self.assertIn(b"Current source item", storyline.data)
+        self.assertIn(b"09:30", storyline.data)
+        self.assertIn(b"Outcome: Partially consumed", storyline.data)
+        self.assertIn(b"Additional details: Management corrected details", storyline.data)
+        self.assertNotIn(b"alert(1)", storyline.data)
+        self.assertNotIn(b"All consumed", storyline.data)
+        self.assertNotIn(b"private detail", storyline.data)
         self.assertNotIn(b"management_food_fluid_event_updated", storyline.data)
         self.assertEqual(
             self.rows(

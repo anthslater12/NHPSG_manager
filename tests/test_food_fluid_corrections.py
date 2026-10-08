@@ -224,6 +224,66 @@ class FoodFluidCorrectionTests(unittest.TestCase):
         self.assertEqual(activity["storyline_visible"], 0)
         self.assertIn("Changed fields:", activity["details"])
 
+    def test_real_worker_correction_rehydrates_the_single_storyline_event(self):
+        conn = self.connect()
+        conn.execute(
+            "ALTER TABLE activity_log ADD COLUMN event_datetime TEXT"
+        )
+        conn.execute(
+            "UPDATE food_fluid_entries SET event_at_utc = ?, "
+            "interaction_type = ?, item_description = ?, outcome = ?, "
+            "additional_details = ? WHERE food_fluid_entry_id = 1",
+            (
+                "2024-01-15T16:00:00Z", "Offered", "Original meal",
+                "All consumed", "Original details",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO activity_log
+            (activity_datetime, activity_class, activity_type, user_id,
+             client_id, shift_id, related_table, related_id, summary,
+             details, success, storyline_visible, event_datetime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2024-01-15 08:00:00", "FOOD_FLUID",
+                "food_fluid_entry_created", 4, 1, 10,
+                "food_fluid_entries", 1, "Offered - Original meal",
+                "Outcome: All consumed\nAdditional details: Original details",
+                1, 1, "2024-01-15T16:00:00Z",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        self.login(4)
+        response = self.client.post(
+            "/shift/10/food-fluid/1/edit",
+            data=self.correction_payload(),
+        )
+        self.assertEqual(response.status_code, 302)
+
+        storyline = self.client.get(
+            "/client/1/storyline?filter=Food+%26+Fluid&date=2024-01-15"
+        )
+        self.assertEqual(storyline.status_code, 200)
+        self.assertEqual(
+            storyline.data.count(b'class="storyline-event"'), 1
+        )
+        self.assertIn(b"Corrected meal", storyline.data)
+        self.assertIn(b"10:00", storyline.data)
+        self.assertIn(b"Outcome: Partially consumed", storyline.data)
+        self.assertIn(b"Additional details: Corrected details", storyline.data)
+        self.assertNotIn(b"Original meal", storyline.data)
+        self.assertNotIn(b"Original outcome", storyline.data)
+        self.assertNotIn(b"Original details", storyline.data)
+        self.assertNotIn(b"food_fluid_event_updated", storyline.data)
+
+        updated_audit = self.activity_rows()[-1]
+        self.assertEqual(updated_audit["activity_type"], "food_fluid_event_updated")
+        self.assertEqual(updated_audit["storyline_visible"], 0)
+
     def test_correction_allows_retrospective_event_before_actual_start(self):
         conn = self.connect()
         conn.execute(
