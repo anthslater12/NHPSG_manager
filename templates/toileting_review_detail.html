@@ -82,6 +82,15 @@
 
     </table>
 
+    {% if can_management_correct %}
+        <p>
+            <a class="button" href="{{ url_for(
+                'management_toileting_correction',
+                entry_id=entry.toileting_event_id
+            ) }}">Correct Entry</a>
+        </p>
+    {% endif %}
+
     <h3>BM Information</h3>
 
     {% if entry.event_type in ["BM", "Both"] %}

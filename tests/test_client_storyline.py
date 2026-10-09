@@ -56,7 +56,10 @@ class ClientStorylineTests(unittest.TestCase):
                 recorded_by_user_id INTEGER, location TEXT, location_other TEXT,
                 bm_size TEXT, bm_consistency TEXT,
                 behaviour_before TEXT, behaviour_during TEXT,
-                behaviour_after TEXT, behaviour_comments TEXT
+                behaviour_after TEXT, behaviour_comments TEXT,
+                correction_of_event_id INTEGER,
+                correction_reason TEXT,
+                active INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE food_fluid_entries (
                 food_fluid_entry_id INTEGER PRIMARY KEY, client_id INTEGER,
@@ -324,7 +327,9 @@ class ClientStorylineTests(unittest.TestCase):
             related_table="toileting_events", related_id=7
         )
         self.login(2, "Program Manager")
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get(
+            "/client/1/storyline?date=2026-08-02"
+        ).data
         self.assertIn(b"View details", page)
         self.assertIn(b"Review required", page)
         self.assertIn(b'id="storyline-event-', page)
@@ -343,12 +348,16 @@ class ClientStorylineTests(unittest.TestCase):
         """)
         conn.commit()
         conn.close()
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get(
+            "/client/1/storyline?date=2026-08-02"
+        ).data
         self.assertIn(b"You have reviewed this", page)
         self.assertNotIn(b"Review required", page)
 
         self.login(3, "Support Worker")
-        page = self.client.get("/client/1/storyline").data
+        page = self.client.get(
+            "/client/1/storyline?date=2026-08-02"
+        ).data
         self.assertNotIn(b"View details", page)
         self.assertNotIn(b"You have reviewed this", page)
 

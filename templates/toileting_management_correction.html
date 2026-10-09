@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Correct Toileting Entry</h2>
+    <p>
+        <a href="{{ url_for('toileting_review_detail', entry_id=entry.toileting_event_id) }}">
+            Back to Toileting Management Review
+        </a>
+    </p>
+
+    {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
+
+    <form method="post">
+        <div class="form-row">
+            <div class="form-field">
+                <label for="event_type">Event Type</label>
+                <select id="event_type" name="event_type" required>
+                    <option value="BM" {% if values.event_type == "BM" %}selected{% endif %}>BM</option>
+                    <option value="Urination" {% if values.event_type == "Urination" %}selected{% endif %}>Urination</option>
+                    <option value="Both" {% if values.event_type == "Both" %}selected{% endif %}>BM and Urination</option>
+                </select>
+            </div>
+            <div class="form-field">
+                <label for="event_datetime">Event Date and Time</label>
+                <input id="event_datetime" name="event_datetime" type="datetime-local" value="{{ values.event_datetime|default('') }}" required>
+            </div>
+            <div class="form-field">
+                <label for="location">Location</label>
+                <select id="location" name="location" required>
+                    {% for location in ["Bathroom", "Bedroom", "Living Room", "Kitchen", "Community", "Vehicle", "Other"] %}
+                        <option value="{{ location }}" {% if values.location == location %}selected{% endif %}>{{ location }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        <label for="location_other">Other location</label>
+        <input id="location_other" name="location_other" maxlength="200" value="{{ values.location_other|default('') }}">
+
+        <h3>BM Details</h3>
+        <div class="form-row">
+            <div class="form-field"><label for="bm_size">BM Size</label><select id="bm_size" name="bm_size"><option value="">Select size</option>{% for value in ["Small", "Medium", "Large"] %}<option value="{{ value }}" {% if values.bm_size == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+            <div class="form-field"><label for="bm_consistency">BM Consistency</label><select id="bm_consistency" name="bm_consistency"><option value="">Select consistency</option>{% for value in ["Hard", "Firm", "Soft", "Loose", "Watery"] %}<option value="{{ value }}" {% if values.bm_consistency == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+            <div class="form-field"><label for="bm_unusual">Anything Unusual?</label><select id="bm_unusual" name="bm_unusual"><option value="">Select</option><option value="No" {% if values.bm_unusual == "No" %}selected{% endif %}>No</option><option value="Yes" {% if values.bm_unusual == "Yes" %}selected{% endif %}>Yes</option></select></div>
+        </div>
+        <label for="bm_unusual_details">BM observations</label>
+        <textarea id="bm_unusual_details" name="bm_unusual_details" rows="3">{{ values.bm_unusual_details|default('') }}</textarea>
+
+        <h3>Urination Details</h3>
+        <div class="form-row">
+            <div class="form-field"><label for="urine_volume">Urine Volume</label><select id="urine_volume" name="urine_volume"><option value="">Select volume</option>{% for value in ["Small", "Medium", "Large"] %}<option value="{{ value }}" {% if values.urine_volume == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+            <div class="form-field"><label for="urine_unusual">Anything Unusual?</label><select id="urine_unusual" name="urine_unusual"><option value="">Select</option><option value="No" {% if values.urine_unusual == "No" %}selected{% endif %}>No</option><option value="Yes" {% if values.urine_unusual == "Yes" %}selected{% endif %}>Yes</option></select></div>
+        </div>
+        <label for="urine_unusual_details">Urination observations</label>
+        <textarea id="urine_unusual_details" name="urine_unusual_details" rows="3">{{ values.urine_unusual_details|default('') }}</textarea>
+
+        <h3>Behaviour</h3>
+        <label for="behaviour_before">Before</label><input id="behaviour_before" name="behaviour_before" value="{{ values.behaviour_before|default('') }}">
+        <label for="behaviour_during">During</label><input id="behaviour_during" name="behaviour_during" value="{{ values.behaviour_during|default('') }}">
+        <label for="behaviour_after">After</label><input id="behaviour_after" name="behaviour_after" value="{{ values.behaviour_after|default('') }}">
+        <label for="behaviour_comments">Behaviour comments</label><textarea id="behaviour_comments" name="behaviour_comments" rows="3">{{ values.behaviour_comments|default('') }}</textarea>
+
+        <label for="general_comments">General comments</label>
+        <textarea id="general_comments" name="general_comments" rows="4">{{ values.general_comments|default('') }}</textarea>
+
+        <label for="correction_reason">Correction reason</label>
+        <textarea id="correction_reason" name="correction_reason" rows="3" required>{{ correction_reason|default('') }}</textarea>
+        <p><button type="submit">Save Correction</button></p>
+    </form>
+</div>
+{% endblock %}

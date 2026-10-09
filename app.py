@@ -2785,6 +2785,394 @@ def format_toileting_local_datetime_display(value):
         return "Date/time unavailable"
 
 
+TOILETING_FORM_FIELDS = (
+    "event_type", "event_datetime", "location", "location_other",
+    "bm_size", "bm_consistency", "bm_unusual", "bm_unusual_details",
+    "urine_volume", "urine_unusual", "urine_unusual_details",
+    "behaviour_before", "behaviour_during", "behaviour_after",
+    "behaviour_comments", "general_comments",
+)
+
+
+def _toileting_form_values(form):
+    """Read the shared Toileting form values with existing semantics."""
+    return {
+        field: form.get(field, "").strip()
+        for field in TOILETING_FORM_FIELDS
+    }
+
+
+def _validate_toileting_form_values(values):
+    """Validate the fields accepted by the normal Toileting form."""
+    valid_event_types = ("BM", "Urination", "Both")
+    valid_locations = (
+        "Bathroom", "Bedroom", "Living Room", "Kitchen", "Community",
+        "Vehicle", "Other",
+    )
+    valid_bm_sizes = ("", "Small", "Medium", "Large")
+    valid_bm_consistencies = ("", "Hard", "Firm", "Soft", "Loose", "Watery")
+    valid_unusual_values = ("", "No", "Yes")
+    valid_urine_volumes = ("", "Small", "Medium", "Large")
+
+    event_datetime = values["event_datetime"]
+    event_datetime_is_valid = False
+    if event_datetime:
+        try:
+            parsed_event_datetime = datetime.strptime(
+                event_datetime, "%Y-%m-%dT%H:%M"
+            )
+            event_datetime_is_valid = (
+                parsed_event_datetime.strftime("%Y-%m-%dT%H:%M")
+                == event_datetime
+            )
+        except ValueError:
+            event_datetime_is_valid = False
+
+    if values["event_type"] not in valid_event_types:
+        return "Please select a valid event type."
+    if not event_datetime:
+        return "Event date and time is required."
+    if not event_datetime_is_valid:
+        return "Please enter a valid event date and time."
+    if not values["location"]:
+        return "Location is required."
+    if values["location"] not in valid_locations:
+        return "Please select a valid location."
+    if values["location"] == "Other" and not values["location_other"]:
+        return "Enter a custom location when Other is selected."
+    if values["location"] == "Other" and len(values["location_other"]) > 200:
+        return "Custom location must be 200 characters or fewer."
+    if (
+        values["event_type"] in ("BM", "Both")
+        and values["bm_size"] not in valid_bm_sizes
+    ):
+        return "Please select a valid BM size."
+    if (
+        values["event_type"] in ("BM", "Both")
+        and values["bm_consistency"] not in valid_bm_consistencies
+    ):
+        return "Please select a valid BM consistency."
+    if (
+        values["event_type"] in ("BM", "Both")
+        and values["bm_unusual"] not in valid_unusual_values
+    ):
+        return "Please select a valid BM observation option."
+    if (
+        values["event_type"] in ("BM", "Both")
+        and values["bm_unusual"] == "Yes"
+        and not values["bm_unusual_details"]
+    ):
+        return (
+            "Additional BM observations are required when "
+            "Anything Unusual is Yes."
+        )
+    if (
+        values["event_type"] in ("Urination", "Both")
+        and values["urine_volume"] not in valid_urine_volumes
+    ):
+        return "Please select a valid urine volume."
+    if (
+        values["event_type"] in ("Urination", "Both")
+        and values["urine_unusual"] not in valid_unusual_values
+    ):
+        return "Please select a valid urination observation option."
+    if (
+        values["event_type"] in ("Urination", "Both")
+        and values["urine_unusual"] == "Yes"
+        and not values["urine_unusual_details"]
+    ):
+        return (
+            "Additional urination observations are required when "
+            "Anything Unusual is Yes."
+        )
+    for field in ("pain_or_distress", "other_concern"):
+        if values.get(field, "") not in ("", "0", "1"):
+            return "Please select a valid concern option."
+    return None
+
+
+def _normalize_toileting_form_values(values):
+    """Apply the existing event-type-dependent Toileting semantics."""
+    values = dict(values)
+    if values["event_type"] == "Urination":
+        values.update({
+            "bm_size": None,
+            "bm_consistency": None,
+            "bm_unusual": None,
+            "bm_unusual_details": None,
+        })
+    elif values["event_type"] == "BM":
+        values.update({
+            "urine_volume": None,
+            "urine_unusual": None,
+            "urine_unusual_details": None,
+        })
+    if values.get("bm_unusual") != "Yes":
+        values["bm_unusual_details"] = None
+    if values.get("urine_unusual") != "Yes":
+        values["urine_unusual_details"] = None
+    if values.get("location") != "Other":
+        values["location_other"] = None
+    for field in ("pain_or_distress", "other_concern"):
+        raw_value = values.get(field)
+        values[field] = (
+            int(raw_value) if raw_value not in ("", None) else None
+        )
+    return values
+
+
+TOILETING_CORRECTION_VALUE_FIELDS = (
+    "event_type", "event_datetime", "location", "location_other",
+    "bm_size", "bm_consistency", "bm_unusual_details", "urine_volume",
+    "urine_unusual_details", "behaviour_before", "behaviour_during",
+    "behaviour_after", "behaviour_comments", "general_comments",
+)
+
+TOILETING_PRESERVED_FIELDS = (
+    "bm_colour", "estimated_bristol_type", "bm_blood_observed",
+    "bm_mucus_observed", "bm_unusual_colour", "urine_colour",
+    "urine_blood_observed", "urine_strong_odour", "urine_unusual_colour",
+    "pain_or_distress", "other_concern", "concern_details",
+)
+
+TOILETING_CORRECTION_CHAIN_MAX_GENERATIONS = 100
+
+TOILETING_STORAGE_VALUE_FIELDS = (
+    *TOILETING_CORRECTION_VALUE_FIELDS,
+    *TOILETING_PRESERVED_FIELDS,
+)
+
+TOILETING_BOOLEAN_PRESERVED_FIELDS = {
+    "bm_blood_observed",
+    "bm_mucus_observed",
+    "bm_unusual_colour",
+    "urine_blood_observed",
+    "urine_strong_odour",
+    "urine_unusual_colour",
+}
+
+
+class ToiletingCorrectionChainError(ValueError):
+    """Raised when a Toileting correction chain is not internally valid."""
+
+
+def _toileting_source_row(conn, event_id):
+    return conn.execute("""
+        SELECT
+            te.*,
+            s.client_id AS shift_client_id,
+            s.status AS shift_status,
+            c.client_id AS source_client_id,
+            recorder.user_id AS source_recorder_user_id
+        FROM toileting_events te
+        LEFT JOIN shifts s ON s.shift_id = te.shift_id
+        LEFT JOIN clients c ON c.client_id = te.client_id
+        LEFT JOIN users recorder
+          ON recorder.user_id = te.recorded_by_user_id
+        WHERE te.toileting_event_id = ?
+    """, (event_id,)).fetchone()
+
+
+def resolve_toileting_correction_chain(conn, event_id):
+    """Resolve a valid Toileting chain and return its active leaf."""
+    rows_by_id = {}
+    visited = set()
+    current_id = event_id
+    while current_id is not None:
+        if current_id in visited:
+            raise ToiletingCorrectionChainError("Toileting correction loop detected.")
+        if len(visited) >= TOILETING_CORRECTION_CHAIN_MAX_GENERATIONS:
+            raise ToiletingCorrectionChainError("Toileting correction chain is too long.")
+        visited.add(current_id)
+        row = _toileting_source_row(conn, current_id)
+        if row is None:
+            raise ToiletingCorrectionChainError("Toileting correction predecessor is missing.")
+        rows_by_id[current_id] = dict(row)
+        current_id = row["correction_of_event_id"]
+
+    # The backwards walk ends with the root already stored in rows_by_id.
+    root_id = next(
+        row_id for row_id, row in rows_by_id.items()
+        if row["correction_of_event_id"] is None
+    )
+    current_id = root_id
+    ordered_ids = [root_id]
+    while True:
+        children = conn.execute(
+            "SELECT toileting_event_id FROM toileting_events "
+            "WHERE correction_of_event_id = ? ORDER BY toileting_event_id",
+            (current_id,)
+        ).fetchall()
+        if len(children) > 1:
+            raise ToiletingCorrectionChainError(
+                "Toileting correction chain has multiple children."
+            )
+        if not children:
+            break
+        if len(ordered_ids) >= TOILETING_CORRECTION_CHAIN_MAX_GENERATIONS:
+            raise ToiletingCorrectionChainError("Toileting correction chain is too long.")
+        child_id = children[0]["toileting_event_id"]
+        if child_id in ordered_ids:
+            raise ToiletingCorrectionChainError("Toileting correction loop detected.")
+        child = _toileting_source_row(conn, child_id)
+        if child is None:
+            raise ToiletingCorrectionChainError("Toileting correction child is missing.")
+        rows_by_id[child_id] = dict(child)
+        ordered_ids.append(child_id)
+        current_id = child_id
+
+    ordered_rows = [rows_by_id[row_id] for row_id in ordered_ids]
+    for row in ordered_rows:
+        if (
+            row["source_client_id"] is None
+            or row["source_recorder_user_id"] is None
+            or row["shift_client_id"] is None
+            or row["client_id"] != row["source_client_id"]
+            or row["client_id"] != row["shift_client_id"]
+        ):
+            raise ToiletingCorrectionChainError(
+                "Toileting correction source relationships do not match."
+            )
+    root_recorder_user_id = ordered_rows[0]["recorded_by_user_id"]
+    if any(
+        row["recorded_by_user_id"] != root_recorder_user_id
+        for row in ordered_rows
+    ):
+        raise ToiletingCorrectionChainError(
+            "Toileting correction recorder relationships do not match."
+        )
+    for predecessor, child in zip(ordered_rows, ordered_rows[1:]):
+        if (
+            child["correction_of_event_id"] != predecessor["toileting_event_id"]
+            or child["client_id"] != predecessor["client_id"]
+            or child["shift_id"] != predecessor["shift_id"]
+        ):
+            raise ToiletingCorrectionChainError(
+                "Toileting correction chain relationships do not match."
+            )
+    active_rows = [row for row in ordered_rows if row["active"] == 1]
+    if len(active_rows) != 1 or active_rows[0] is not ordered_rows[-1]:
+        raise ToiletingCorrectionChainError(
+            "Toileting correction chain does not have one active leaf."
+        )
+    return {
+        "root": ordered_rows[0],
+        "leaf": ordered_rows[-1],
+        "rows": ordered_rows,
+        "ids": ordered_ids,
+    }
+
+
+def _toileting_form_values_from_row(row):
+    values = {
+        field: row.get(field, "") or ""
+        for field in TOILETING_FORM_FIELDS
+        if field not in ("bm_unusual", "urine_unusual")
+    }
+    values["bm_unusual"] = (
+        "Yes" if row.get("bm_unusual_details") else "No"
+        if row.get("event_type") in ("BM", "Both") else ""
+    )
+    values["urine_unusual"] = (
+        "Yes" if row.get("urine_unusual_details") else "No"
+        if row.get("event_type") in ("Urination", "Both") else ""
+    )
+    for field in ("pain_or_distress", "other_concern"):
+        raw_value = row.get(field)
+        values[field] = "" if raw_value is None else str(raw_value)
+    return values
+
+
+def _toileting_preserved_value(row, field):
+    value = row.get(field)
+    if field in TOILETING_BOOLEAN_PRESERVED_FIELDS:
+        return 0 if value is None else int(value)
+    return value
+
+
+def _toileting_storage_values_for_correction(values, current_row):
+    """Normalize submitted values and preserve only applicable source fields."""
+    normalized = _normalize_toileting_form_values(values)
+    source_event_type = current_row.get("event_type")
+    target_event_type = normalized["event_type"]
+    preserve_bm = (
+        source_event_type in ("BM", "Both")
+        and target_event_type in ("BM", "Both")
+    )
+    preserve_urine = (
+        source_event_type in ("Urination", "Both")
+        and target_event_type in ("Urination", "Both")
+    )
+    for field in (
+        "bm_colour", "estimated_bristol_type", "bm_blood_observed",
+        "bm_mucus_observed", "bm_unusual_colour",
+    ):
+        normalized[field] = (
+            _toileting_preserved_value(current_row, field)
+            if preserve_bm
+            else (0 if field in TOILETING_BOOLEAN_PRESERVED_FIELDS else None)
+        )
+    for field in (
+        "urine_colour", "urine_blood_observed", "urine_strong_odour",
+        "urine_unusual_colour",
+    ):
+        normalized[field] = (
+            _toileting_preserved_value(current_row, field)
+            if preserve_urine
+            else (0 if field in TOILETING_BOOLEAN_PRESERVED_FIELDS else None)
+        )
+    for field in ("pain_or_distress", "other_concern", "concern_details"):
+        normalized[field] = current_row.get(field)
+    return normalized
+
+
+def _toileting_storage_values_from_row(row):
+    return _toileting_storage_values_for_correction(
+        _toileting_form_values_from_row(row), row
+    )
+
+
+def _toileting_operational_signature(values):
+    return tuple(values.get(field) for field in TOILETING_STORAGE_VALUE_FIELDS)
+
+
+def invalidate_toileting_reviews_for_management_correction(
+    conn, event_id, actor_user_id
+):
+    review_rows = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+        WHERE source_table = 'toileting_events'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        ORDER BY acknowledgement_id
+    """, (event_id,)).fetchall()
+    review_ids = [row["acknowledgement_id"] for row in review_rows]
+    if not review_ids:
+        return review_ids
+    invalidated_at_utc = serialize_behaviour_utc(
+        datetime.now(timezone.utc).replace(microsecond=0)
+    )
+    conn.execute("""
+        UPDATE acknowledgements
+        SET active = 0,
+            invalidated_at_utc = ?,
+            invalidated_by_user_id = ?,
+            invalidation_reason = ?
+        WHERE source_table = 'toileting_events'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+    """, (
+        invalidated_at_utc,
+        actor_user_id,
+        "Toileting event corrected by management",
+        event_id,
+    ))
+    return review_ids
+
+
 def format_behaviour_storyline_details(category_text, notes=None):
     details = "Categories:\n" + category_text.replace(", ", "\n")
     if notes and notes.strip():
@@ -24184,142 +24572,31 @@ def toileting_event_new(shift_id):
             ""
         ).strip()
 
-        error = None
-
-        valid_event_types = [
-            "BM",
-            "Urination",
-            "Both"
-        ]
-
-        valid_locations = [
-            "Bathroom",
-            "Bedroom",
-            "Living Room",
-            "Kitchen",
-            "Community",
-            "Vehicle",
-            "Other"
-        ]
-
-        valid_bm_sizes = [
-            "",
-            "Small",
-            "Medium",
-            "Large"
-        ]
-
-        valid_bm_consistencies = [
-            "",
-            "Hard",
-            "Firm",
-            "Soft",
-            "Loose",
-            "Watery"
-        ]
-
-        valid_unusual_values = [
-            "",
-            "No",
-            "Yes"
-        ]
-
-        valid_urine_volumes = [
-            "",
-            "Small",
-            "Medium",
-            "Large"
-        ]
-
-        event_datetime_is_valid = False
-
-        if event_datetime:
-            try:
-                parsed_event_datetime = datetime.strptime(
-                    event_datetime,
-                    "%Y-%m-%dT%H:%M"
-                )
-
-                event_datetime_is_valid = (
-                    parsed_event_datetime.strftime(
-                        "%Y-%m-%dT%H:%M"
-                    ) == event_datetime
-                )
-            except ValueError:
-                event_datetime_is_valid = False
-
-        if event_type not in valid_event_types:
-            error = "Please select a valid event type."
-
-        elif not event_datetime:
-            error = "Event date and time is required."
-
-        elif not event_datetime_is_valid:
-            error = "Please enter a valid event date and time."
-
-        elif not location:
-            error = "Location is required."
-
-        elif location not in valid_locations:
-            error = "Please select a valid location."
-
-        elif location == "Other" and not location_other:
-            error = "Enter a custom location when Other is selected."
-
-        elif location == "Other" and len(location_other) > 200:
-            error = "Custom location must be 200 characters or fewer."
-
-        elif (
-            event_type in ["BM", "Both"]
-            and bm_size not in valid_bm_sizes
-        ):
-            error = "Please select a valid BM size."
-
-        elif (
-            event_type in ["BM", "Both"]
-            and bm_consistency not in valid_bm_consistencies
-        ):
-            error = "Please select a valid BM consistency."
-
-        elif (
-            event_type in ["BM", "Both"]
-            and bm_unusual not in valid_unusual_values
-        ):
-            error = "Please select a valid BM observation option."
-
-        elif (
-            event_type in ["BM", "Both"]
-            and bm_unusual == "Yes"
-            and not bm_unusual_details
-        ):
-            error = (
-                "Additional BM observations are required when "
-                "Anything Unusual is Yes."
+        values = {
+            field: value
+            for field, value in (
+                ("event_type", event_type),
+                ("event_datetime", event_datetime),
+                ("location", location),
+                ("location_other", location_other),
+                ("bm_size", bm_size),
+                ("bm_consistency", bm_consistency),
+                ("bm_unusual", bm_unusual),
+                ("bm_unusual_details", bm_unusual_details),
+                ("urine_volume", urine_volume),
+                ("urine_unusual", urine_unusual),
+                ("urine_unusual_details", urine_unusual_details),
+                ("behaviour_before", behaviour_before),
+                ("behaviour_during", behaviour_during),
+                ("behaviour_after", behaviour_after),
+                ("behaviour_comments", behaviour_comments),
+                ("general_comments", general_comments),
+                ("pain_or_distress", ""),
+                ("other_concern", ""),
+                ("concern_details", ""),
             )
-
-        elif (
-            event_type in ["Urination", "Both"]
-            and urine_volume not in valid_urine_volumes
-        ):
-            error = "Please select a valid urine volume."
-
-        elif (
-            event_type in ["Urination", "Both"]
-            and urine_unusual not in valid_unusual_values
-        ):
-            error = (
-                "Please select a valid urination observation option."
-            )
-
-        elif (
-            event_type in ["Urination", "Both"]
-            and urine_unusual == "Yes"
-            and not urine_unusual_details
-        ):
-            error = (
-                "Additional urination observations are required when "
-                "Anything Unusual is Yes."
-            )
+        }
+        error = _validate_toileting_form_values(values)
 
         if error:
             conn.close()
@@ -25192,6 +25469,29 @@ def client_storyline(client_id):
                 row["sleep_event_id"]: dict(row)
                 for row in current_sleep_rows
             }
+    current_toileting_events = {}
+    toileting_event_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] == "toileting_event_created"
+            and event["related_table"] == "toileting_events"
+            and event["related_id"] is not None
+        )
+    }
+    for toileting_event_id in toileting_event_ids:
+        try:
+            toileting_chain = resolve_toileting_correction_chain(
+                conn, toileting_event_id
+            )
+        except (
+            ToiletingCorrectionChainError,
+            sqlite3.OperationalError,
+            KeyError,
+            IndexError,
+        ):
+            continue
+        current_toileting_events[toileting_event_id] = toileting_chain["leaf"]
     candidates = [
         (
             event["activity_type"], event["related_table"],
@@ -25373,6 +25673,36 @@ def client_storyline(client_id):
             event["storyline_details"] = (
                 f"Note: {current_note}" if current_note else None
             )
+        current_toileting_event = (
+            current_toileting_events.get(event["related_id"])
+            if (
+                event["activity_type"] == "toileting_event_created"
+                and event["related_table"] == "toileting_events"
+            )
+            else None
+        )
+        if current_toileting_event is not None:
+            event["event_datetime"] = (
+                convert_vancouver_occurrence_input_to_utc(
+                    current_toileting_event["event_datetime"]
+                )
+            )
+            event["summary"] = (
+                f"Toileting event recorded: "
+                f"{current_toileting_event['event_type']}"
+            )
+            toileting_lines = format_toileting_storyline_details(
+                current_toileting_event.get("location"),
+                current_toileting_event.get("bm_size"),
+                current_toileting_event.get("bm_consistency"),
+                current_toileting_event.get("behaviour_before"),
+                current_toileting_event.get("behaviour_during"),
+                current_toileting_event.get("behaviour_after"),
+                current_toileting_event.get("behaviour_comments"),
+                current_toileting_event.get("general_comments"),
+                location_other=current_toileting_event.get("location_other"),
+            )
+            event["storyline_details"] = "\n".join(toileting_lines) or None
         event["storyline_detail_lines"] = (
             event["storyline_details"].splitlines()
             if event["storyline_details"] else []
@@ -30570,6 +30900,12 @@ def toileting_review_list():
 
     conn = get_db()
 
+    toileting_columns = {
+        row[1] for row in conn.execute(
+            'PRAGMA table_info("toileting_events")'
+        ).fetchall()
+    }
+    active_filter = "AND te.active = 1" if "active" in toileting_columns else ""
     entries = conn.execute("""
         SELECT
             te.toileting_event_id AS entry_id,
@@ -30603,9 +30939,13 @@ def toileting_review_list():
 
         JOIN shifts s
             ON te.shift_id = s.shift_id
+           AND s.client_id = te.client_id
 
         JOIN clients c
             ON te.client_id = c.client_id
+
+        WHERE 1 = 1
+        """ + active_filter + """
 
         ORDER BY
             te.event_datetime DESC,
@@ -30680,6 +31020,227 @@ def toileting_review_list():
         reviews_by_entry=reviews_by_entry,
         reviewed_by_current_user=reviewed_by_current_user
     )
+
+
+def _toileting_correction_template_values(values):
+    return {
+        field: values.get(field, "") if values else ""
+        for field in TOILETING_FORM_FIELDS
+    }
+
+
+@app.route(
+    "/manager-review/toileting/<int:entry_id>/correct",
+    methods=["GET", "POST"]
+)
+def management_toileting_correction(entry_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    entry = None
+    values = {}
+    try:
+        actor = get_active_authenticated_user(conn, session["user_id"])
+        if actor["role"] not in MANAGEMENT_CORRECTION_ROLES:
+            raise PermissionError(
+                "Current user is not allowed to correct Toileting events."
+            )
+        chain = resolve_toileting_correction_chain(conn, entry_id)
+        if chain["leaf"]["toileting_event_id"] != entry_id:
+            return redirect(url_for(
+                "toileting_review_detail",
+                entry_id=chain["leaf"]["toileting_event_id"]
+            ))
+        entry = chain["leaf"]
+        if entry["shift_status"] == SHIFT_CANCELLED_STATUS:
+            raise PermissionError(
+                "Cancelled shifts cannot have Toileting events corrected."
+            )
+        if request.method == "GET":
+            return render_template(
+                "toileting_management_correction.html",
+                entry=entry,
+                values=_toileting_correction_template_values(
+                    _toileting_form_values_from_row(entry)
+                ),
+                correction_reason="",
+                error=None,
+            )
+
+        values = _toileting_form_values(request.form)
+        correction_reason = request.form.get("correction_reason", "").strip()
+        values = _toileting_correction_template_values(values)
+        values["correction_reason"] = correction_reason
+        validation_error = _validate_toileting_form_values(values)
+        if validation_error:
+            raise ValueError(validation_error)
+        if not correction_reason:
+            raise ValueError("Correction reason is required.")
+        submitted = _normalize_toileting_form_values(values)
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            actor = get_active_authenticated_user(conn, session["user_id"])
+            if actor["role"] not in MANAGEMENT_CORRECTION_ROLES:
+                raise PermissionError(
+                    "Current user is not allowed to correct Toileting events."
+                )
+            current_chain = resolve_toileting_correction_chain(conn, entry_id)
+            current = current_chain["leaf"]
+            if current["toileting_event_id"] != entry_id:
+                raise PermissionError(
+                    "This Toileting event has already been corrected."
+                )
+            if current["shift_status"] == SHIFT_CANCELLED_STATUS:
+                raise PermissionError(
+                    "Cancelled shifts cannot have Toileting events corrected."
+                )
+            current_values = _toileting_storage_values_from_row(current)
+            submitted_values = _toileting_storage_values_for_correction(
+                submitted, current
+            )
+            if (
+                _toileting_operational_signature(submitted_values)
+                == _toileting_operational_signature(current_values)
+            ):
+                conn.rollback()
+                return render_template(
+                    "toileting_management_correction.html",
+                    entry=current,
+                    values=values,
+                    correction_reason=correction_reason,
+                    error=(
+                        "No changes were detected. The Toileting event already "
+                        "matches the information entered."
+                    ),
+                ), 400
+
+            changed_fields = [
+                field for field in TOILETING_STORAGE_VALUE_FIELDS
+                if submitted_values.get(field) != current_values.get(field)
+            ]
+            previous_lines = [
+                f"{field}: {current_values.get(field)!r}"
+                for field in changed_fields
+            ]
+            corrected_lines = [
+                f"{field}: {submitted_values.get(field)!r}"
+                for field in changed_fields
+            ]
+            review_ids = invalidate_toileting_reviews_for_management_correction(
+                conn, entry_id, actor["user_id"]
+            )
+            deactivated = conn.execute(
+                "UPDATE toileting_events SET active = 0 "
+                "WHERE toileting_event_id = ? AND active = 1",
+                (entry_id,)
+            )
+            if deactivated.rowcount != 1:
+                raise PermissionError(
+                    "This Toileting event is no longer available for correction."
+                )
+            insert_columns = [
+                "shift_id", "client_id", "recorded_by_user_id", "event_type",
+                "event_datetime", "location", "location_other", "bm_size",
+                "bm_consistency", "bm_colour", "estimated_bristol_type",
+                "bm_blood_observed", "bm_mucus_observed", "bm_unusual_colour",
+                "urine_volume", "urine_colour", "urine_blood_observed",
+                "urine_strong_odour", "urine_unusual_colour", "pain_or_distress",
+                "other_concern", "concern_details", "behaviour_before",
+                "behaviour_during", "behaviour_after", "behaviour_comments",
+                "general_comments", "correction_of_event_id", "correction_reason",
+                "active", "bm_unusual_details", "urine_unusual_details"
+            ]
+            inserted_values = [
+                current["shift_id"], current["client_id"],
+                current["recorded_by_user_id"], submitted["event_type"],
+                submitted_values["event_datetime"], submitted_values["location"],
+                submitted_values["location_other"], submitted_values["bm_size"],
+                submitted_values["bm_consistency"], submitted_values["bm_colour"],
+                submitted_values["estimated_bristol_type"],
+                submitted_values["bm_blood_observed"],
+                submitted_values["bm_mucus_observed"],
+                submitted_values["bm_unusual_colour"],
+                submitted_values["urine_volume"], submitted_values["urine_colour"],
+                submitted_values["urine_blood_observed"],
+                submitted_values["urine_strong_odour"],
+                submitted_values["urine_unusual_colour"],
+                submitted_values["pain_or_distress"], submitted_values["other_concern"],
+                submitted_values["concern_details"], submitted_values["behaviour_before"],
+                submitted_values["behaviour_during"], submitted_values["behaviour_after"],
+                submitted_values["behaviour_comments"], submitted_values["general_comments"],
+                entry_id, correction_reason, 1,
+                submitted_values["bm_unusual_details"],
+                submitted_values["urine_unusual_details"]
+            ]
+            placeholders = ", ".join("?" for _ in insert_columns)
+            cursor = conn.execute(
+                "INSERT INTO toileting_events (" + ", ".join(insert_columns)
+                + ") VALUES (" + placeholders + ")",
+                inserted_values,
+            )
+            new_entry_id = cursor.lastrowid
+            review_text = ", ".join(str(value) for value in review_ids) or "None"
+            details = (
+                f"Toileting event ID: {new_entry_id}\n"
+                f"Corrected predecessor event ID: {entry_id}\n"
+                f"Root event ID: {current_chain['root']['toileting_event_id']}\n"
+                f"Client ID: {current['client_id']}\n"
+                f"Shift ID: {current['shift_id']}\n"
+                f"Management correction actor user ID: {actor['user_id']}\n"
+                f"Original recorder user ID: {current['recorded_by_user_id']}\n"
+                f"Correction reason: {correction_reason}\n"
+                f"Changed fields: {', '.join(changed_fields)}\n"
+                f"Previous values:\n{chr(10).join(previous_lines)}\n"
+                f"Corrected values:\n{chr(10).join(corrected_lines)}\n"
+                f"Invalidated Review acknowledgement IDs: {review_text}\n"
+                f"Invalidated Review count: {len(review_ids)}"
+            )
+            log_activity(
+                conn,
+                activity_class="TOILETING",
+                activity_type="management_toileting_event_updated",
+                summary="Toileting event corrected by management",
+                user_id=actor["user_id"],
+                client_id=current["client_id"],
+                shift_id=current["shift_id"],
+                related_table="toileting_events",
+                related_id=new_entry_id,
+                details=details,
+                success=1,
+                event_datetime=convert_vancouver_occurrence_input_to_utc(
+                    submitted["event_datetime"]
+                ),
+                storyline_visible=False,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+        flash("Toileting correction saved successfully.")
+        return redirect(url_for(
+            "toileting_review_detail", entry_id=new_entry_id
+        ))
+    except PermissionError:
+        return "Access denied", 403
+    except ToiletingCorrectionChainError:
+        return "Access denied", 403
+    except LookupError as error:
+        return str(error), 404
+    except (ValueError, sqlite3.IntegrityError) as error:
+        return render_template(
+            "toileting_management_correction.html",
+            entry=entry,
+            values=values,
+            correction_reason=values.get("correction_reason", "")
+            if values else "",
+            error=str(error),
+        ), 400
+    finally:
+        conn.close()
 
 @app.route("/manager-review/housekeeping")
 def housekeeping_review_list():
@@ -31276,6 +31837,25 @@ def toileting_review_detail(entry_id):
         conn.close()
         return "Access denied", 403
 
+    try:
+        toileting_chain = resolve_toileting_correction_chain(conn, entry_id)
+    except ToiletingCorrectionChainError:
+        conn.close()
+        return "Toileting event correction chain is invalid.", 409
+    current_entry_id = toileting_chain["leaf"]["toileting_event_id"]
+    if current_entry_id != entry_id:
+        conn.close()
+        return redirect(url_for(
+            "toileting_review_detail",
+            entry_id=current_entry_id,
+            **(
+                _storyline_return_context(
+                    request.args,
+                    toileting_chain["leaf"]["client_id"]
+                ) or {}
+            )
+        ))
+
     entry = conn.execute("""
         SELECT
             te.*,
@@ -31285,6 +31865,7 @@ def toileting_review_detail(entry_id):
             s.shift_date,
             s.shift_type,
             s.client_id,
+            s.status AS shift_status,
 
             c.client_name
 
@@ -31295,11 +31876,13 @@ def toileting_review_detail(entry_id):
 
         JOIN shifts s
             ON te.shift_id = s.shift_id
+           AND s.client_id = te.client_id
 
         JOIN clients c
             ON te.client_id = c.client_id
 
         WHERE te.toileting_event_id = ?
+          AND te.active = 1
     """, (entry_id,)).fetchone()
 
     if entry is None:
@@ -31340,7 +31923,7 @@ def toileting_review_detail(entry_id):
         ORDER BY
             ack.acknowledged_at ASC,
             ack.acknowledgement_id ASC
-    """, (entry_id,)).fetchall()
+    """, (current_entry_id,)).fetchall()
 
     current_user_review = conn.execute("""
         SELECT acknowledgement_id
@@ -31353,14 +31936,14 @@ def toileting_review_detail(entry_id):
           AND acknowledgement_type = 'Review'
           AND active = 1
     """, (
-        entry_id,
+        current_entry_id,
         session["user_id"]
     )).fetchone()
 
     management_notes = get_management_notes(
         conn,
         source_table="toileting_events",
-        source_id=entry_id
+        source_ids=toileting_chain["ids"]
     )
 
     linked_actions = conn.execute("""
@@ -31381,10 +31964,13 @@ def toileting_review_detail(entry_id):
 
         WHERE ai.source_table =
               'toileting_events'
-          AND ai.source_id = ?
+          AND ai.source_id IN (""" + ", ".join(
+              "?" for _ in toileting_chain["ids"]
+          ) + """
+          )
 
         ORDER BY ai.created_at DESC
-    """, (entry_id,)).fetchall()
+    """, tuple(toileting_chain["ids"])).fetchall()
 
     shift_staff = conn.execute("""
         SELECT
@@ -31419,6 +32005,10 @@ def toileting_review_detail(entry_id):
         can_create_actions=(
             actor["role"] in ACTION_CREATION_ROLES
         ),
+        can_management_correct=(
+            actor["role"] in MANAGEMENT_CORRECTION_ROLES
+            and entry["shift_status"] != SHIFT_CANCELLED_STATUS
+        ),
         shift_staff=shift_staff,
         storyline_return_context=storyline_return_context
     )
@@ -31438,6 +32028,21 @@ def add_toileting_management_note(entry_id):
     except PermissionError:
         conn.close()
         return "Access denied", 403
+
+    try:
+        toileting_chain = resolve_toileting_correction_chain(conn, entry_id)
+    except (sqlite3.OperationalError, KeyError, IndexError):
+        conn.close()
+        return "Toileting event correction chain could not be verified.", 500
+    except ToiletingCorrectionChainError:
+        conn.close()
+        return "Toileting event correction chain is invalid.", 409
+    if toileting_chain["leaf"]["toileting_event_id"] != entry_id:
+        conn.close()
+        return redirect(url_for(
+            "toileting_review_detail",
+            entry_id=toileting_chain["leaf"]["toileting_event_id"]
+        ))
 
     note_text = request.form.get(
         "note_text",
@@ -31512,6 +32117,21 @@ def toileting_action_new(entry_id):
     except PermissionError:
         conn.close()
         return "Access denied", 403
+
+    try:
+        toileting_chain = resolve_toileting_correction_chain(conn, entry_id)
+    except (sqlite3.OperationalError, KeyError, IndexError):
+        conn.close()
+        return "Toileting event correction chain could not be verified.", 500
+    except ToiletingCorrectionChainError:
+        conn.close()
+        return "Toileting event correction chain is invalid.", 409
+    if toileting_chain["leaf"]["toileting_event_id"] != entry_id:
+        conn.close()
+        return redirect(url_for(
+            "toileting_review_detail",
+            entry_id=toileting_chain["leaf"]["toileting_event_id"]
+        ))
 
     entry = conn.execute("""
         SELECT
@@ -32139,10 +32759,29 @@ def review_toileting_entry(entry_id):
         conn.close()
         return "Access denied", 403
 
+    try:
+        toileting_chain = resolve_toileting_correction_chain(conn, entry_id)
+    except (sqlite3.OperationalError, KeyError, IndexError):
+        conn.close()
+        return "Toileting event correction chain could not be verified.", 500
+    except ToiletingCorrectionChainError:
+        conn.close()
+        return "Toileting event correction chain is invalid.", 409
+    if toileting_chain["leaf"]["toileting_event_id"] != entry_id:
+        conn.close()
+        return "This Toileting event has been corrected; review the current entry.", 409
+
+    toileting_columns = {
+        row[1] for row in conn.execute(
+            'PRAGMA table_info("toileting_events")'
+        ).fetchall()
+    }
+    active_filter = "AND active = 1" if "active" in toileting_columns else ""
     entry = conn.execute("""
         SELECT toileting_event_id, client_id
         FROM toileting_events
         WHERE toileting_event_id = ?
+        """ + active_filter + """
     """, (entry_id,)).fetchone()
 
     if entry is None:
@@ -32280,8 +32919,15 @@ def create_acknowledgement(
 def get_management_notes(
     conn,
     source_table,
-    source_id
+    source_id=None,
+    source_ids=None
 ):
+    if source_ids is None:
+        source_ids = [source_id]
+    source_ids = [value for value in source_ids if value is not None]
+    if not source_ids:
+        return []
+    placeholders = ", ".join("?" for _ in source_ids)
     return conn.execute("""
         SELECT
             mn.management_note_id,
@@ -32303,15 +32949,14 @@ def get_management_notes(
             ON mn.created_by_user_id = created_by.user_id
 
         WHERE mn.source_table = ?
-          AND mn.source_id = ?
+          AND mn.source_id IN (""" + placeholders + """)
           AND mn.active = 1
 
         ORDER BY
             mn.created_at ASC,
             mn.management_note_id ASC
     """, (
-        source_table,
-        source_id
+        source_table, *source_ids
     )).fetchall()
 
 def add_management_note(

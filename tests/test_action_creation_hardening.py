@@ -70,11 +70,16 @@ class ActionCreationHardeningTests(unittest.TestCase):
             CREATE TABLE toileting_events (
                 toileting_event_id INTEGER PRIMARY KEY,
                 shift_id INTEGER NOT NULL,
+                client_id INTEGER NOT NULL,
+                recorded_by_user_id INTEGER NOT NULL,
                 event_type TEXT,
                 event_datetime TEXT,
                 location TEXT,
                 location_other TEXT,
-                general_comments TEXT
+                general_comments TEXT,
+                correction_of_event_id INTEGER,
+                correction_reason TEXT,
+                active INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE action_items (
                 action_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,8 +133,8 @@ class ActionCreationHardeningTests(unittest.TestCase):
             INSERT INTO shift_housekeeping_task_entries VALUES
                 (41, 10, 40, 'Completed', 'Housekeeping comment');
             INSERT INTO toileting_events VALUES
-                (50, 10, 'Urination', '2026-08-02T10:00:00Z',
-                 'Bathroom', NULL, 'Toileting comment');
+                (50, 10, 1, 1, 'Urination', '2026-08-02T10:00:00Z',
+                 'Bathroom', NULL, 'Toileting comment', NULL, NULL, 1);
         """)
         conn.commit()
         conn.close()
