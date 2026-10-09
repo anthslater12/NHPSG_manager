@@ -146,10 +146,12 @@ class IncidentManagementEngagementTests(unittest.TestCase):
                  'High', 'Incident details', 'Called nurse', 1);
             INSERT INTO activity_log
                 (activity_type, activity_class, user_id, client_id,
-                 related_table, related_id, summary, storyline_visible)
+                 related_table, related_id, summary, storyline_visible,
+                 event_datetime)
             VALUES
                 ('incident_created', 'INCIDENT', 1, 1,
-                 'incident_reports', 41, 'Incident created', 1);
+                 'incident_reports', 41, 'Incident created', 1,
+                 '2026-08-02T17:00:00Z');
         """)
         conn.commit()
         conn.close()
@@ -938,7 +940,7 @@ class IncidentManagementEngagementTests(unittest.TestCase):
         )
 
         storyline = self.client.get(
-            "/client/1/storyline?filter=Incident"
+            "/client/1/storyline?filter=Incident&date=2026-08-02"
         )
         self.assertEqual(storyline.status_code, 200)
         self.assertEqual(storyline.data.count(b"Incident created"), 1)
