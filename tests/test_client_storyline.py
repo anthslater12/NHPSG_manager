@@ -826,7 +826,7 @@ class ClientStorylineTests(unittest.TestCase):
 
         self.login(2, "Program Manager")
         page = self.client.get("/client/1/storyline").data
-        self.assertIn(b"Valid incident", page)
+        self.assertIn(b"Incident created: Medical", page)
         self.assertIn(b"/manager-review/incidents/41", page)
         self.assertIn(b"Review required", page)
         for summary in (
@@ -2312,7 +2312,7 @@ class ClientStorylineTests(unittest.TestCase):
         page = self.client.get("/client/1/storyline").data
         self.assertIn(b"/manager-review/behaviour/45", page)
         self.assertIn(b"/manager-review/incidents/45", page)
-        self.assertIn(b"Incident recorded", page)
+        self.assertIn(b"Incident created: Medical", page)
         self.assertNotIn(b">Edit<", page)
 
         self.assertEqual(

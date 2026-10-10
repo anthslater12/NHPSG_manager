@@ -2773,6 +2773,300 @@ def filter_incident_storyline_details(details):
     )
 
 
+INCIDENT_CORRECTION_TYPES = (
+    "Aggression",
+    "Self Injury",
+    "Property Damage",
+    "Medical",
+    "Behaviour",
+    "Other",
+)
+INCIDENT_CORRECTION_FIELDS = (
+    "incident_date",
+    "incident_time",
+    "location",
+    "incident_type",
+    "description",
+    "actions_taken",
+    "witnesses",
+    "injuries",
+    "injury_details",
+)
+INCIDENT_CORRECTION_TEXT_FIELDS = tuple(
+    field for field in INCIDENT_CORRECTION_FIELDS
+    if field != "injuries"
+)
+INCIDENT_CORRECTION_STATE_FIELDS = INCIDENT_CORRECTION_FIELDS + (
+    "occurrence_utc",
+)
+
+
+class IncidentCorrectionStaleError(Exception):
+    """Raised when an Incident changed after its correction form was loaded."""
+
+
+def _incident_correction_snapshot(row):
+    """Return the canonical worker-editable Incident source values."""
+    snapshot = {}
+    for field in INCIDENT_CORRECTION_FIELDS:
+        value = row[field]
+        if field == "injuries":
+            snapshot[field] = int(bool(value))
+        else:
+            snapshot[field] = "" if value is None else str(value)
+    return snapshot
+
+
+def _incident_correction_state(row):
+    state = _incident_correction_snapshot(row)
+    state["occurrence_utc"] = str(
+        row.get("_authoritative_event_datetime") or ""
+    )
+    return state
+
+
+def _latest_incident_occurrence_audit_datetime(conn, incident_id):
+    row = conn.execute("""
+        SELECT event_datetime
+        FROM activity_log
+        WHERE related_table = 'incident_reports'
+          AND related_id = ?
+          AND activity_type IN (
+              'incident_created', 'incident_management_corrected'
+          )
+          AND event_datetime IS NOT NULL
+        ORDER BY activity_id DESC
+        LIMIT 1
+    """, (incident_id,)).fetchone()
+    return row["event_datetime"] if row else None
+
+
+def _incident_repeated_hour_choice_for_source(incident):
+    local_input = (
+        f"{incident.get('incident_date', '')}T"
+        f"{incident.get('incident_time', '')}"
+    )
+    try:
+        local_naive = _parse_vancouver_local_input(local_input)
+        candidates = _valid_vancouver_utc_candidates(local_naive)
+        authoritative = parse_behaviour_utc(
+            incident.get("_authoritative_event_datetime")
+        )
+    except (TypeError, ValueError):
+        return ""
+
+    if len(candidates) != 2:
+        return ""
+    for choice, candidate in zip(("first", "second"), candidates):
+        if candidate == authoritative:
+            return choice
+    return ""
+
+
+def _incident_correction_occurrence_utc(form, incident, current_snapshot):
+    incident_date = form.get("incident_date", "")
+    incident_time = form.get("incident_time", "")
+    local_input = f"{incident_date}T{incident_time}"
+    repeated_hour_choice = form.get("repeated_hour_choice", "").strip()
+
+    try:
+        local_naive = _parse_vancouver_local_input(local_input)
+        candidates = _valid_vancouver_utc_candidates(local_naive)
+    except ValueError:
+        return convert_vancouver_occurrence_input_to_utc(
+            local_input, repeated_hour_choice or None
+        )
+
+    if len(candidates) == 2 and not repeated_hour_choice:
+        same_source_wall_time = (
+            incident_date == current_snapshot["incident_date"]
+            and incident_time == current_snapshot["incident_time"]
+        )
+        authoritative_value = incident.get("_authoritative_event_datetime")
+        if same_source_wall_time and authoritative_value:
+            try:
+                authoritative = parse_behaviour_utc(authoritative_value)
+            except ValueError:
+                authoritative = None
+            if authoritative in candidates:
+                if authoritative > datetime.now(timezone.utc):
+                    raise ValueError("Occurrence time cannot be in the future.")
+                return serialize_behaviour_utc(authoritative)
+
+    return convert_vancouver_occurrence_input_to_utc(
+        local_input, repeated_hour_choice or None
+    )
+
+
+def _incident_correction_values_from_form(
+    form, incident, current_snapshot
+):
+    """Return submitted source values and the validated occurrence instant."""
+    values = {
+        field: form.get(field, "")
+        for field in INCIDENT_CORRECTION_TEXT_FIELDS
+    }
+    values["injuries"] = int("injuries" in form)
+
+    if not values["incident_date"] or not values["incident_time"]:
+        raise ValueError("Incident date and time are required.")
+    if values["incident_type"] not in INCIDENT_CORRECTION_TYPES:
+        raise ValueError("A valid incident type is required.")
+
+    occurrence_utc = _incident_correction_occurrence_utc(
+        form, incident, current_snapshot
+    )
+    return values, occurrence_utc
+
+
+def _incident_correction_original_snapshot(form):
+    """Read the original source snapshot carried by a correction form."""
+    snapshot = {}
+    for field in INCIDENT_CORRECTION_TEXT_FIELDS:
+        original_name = f"original_{field}"
+        if original_name not in form:
+            raise ValueError("The original Incident state is required.")
+        snapshot[field] = form.get(original_name, "")
+
+    original_injuries = form.get("original_injuries")
+    if original_injuries not in ("0", "1"):
+        raise ValueError("The original Incident state is invalid.")
+    snapshot["injuries"] = int(original_injuries)
+    if "original_occurrence_utc" not in form:
+        raise ValueError("The original Incident state is required.")
+    snapshot["occurrence_utc"] = form.get("original_occurrence_utc", "")
+    return snapshot
+
+
+def get_management_incident_correction_context(conn, incident_id, user_id):
+    """Return an active management actor and a complete valid Incident source."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] not in MANAGEMENT_CORRECTION_ROLES:
+        raise PermissionError(
+            "Current user is not allowed to correct Incidents."
+        )
+
+    incident = conn.execute("""
+        SELECT *
+        FROM incident_reports
+        WHERE incident_id = ?
+    """, (incident_id,)).fetchone()
+    if incident is None:
+        raise LookupError("Incident not found.")
+
+    client_exists = conn.execute(
+        "SELECT 1 FROM clients WHERE client_id = ?",
+        (incident["client_id"],)
+    ).fetchone()
+    reporter_exists = conn.execute(
+        "SELECT 1 FROM users WHERE user_id = ?",
+        (incident["reported_by_user_id"],)
+    ).fetchone()
+    if client_exists is None or reporter_exists is None:
+        raise PermissionError("Incident source relationships are invalid.")
+
+    incident = dict(incident)
+    incident["_authoritative_event_datetime"] = (
+        _latest_incident_occurrence_audit_datetime(conn, incident_id)
+    )
+    return actor, dict(incident)
+
+
+def _incident_correction_form_values(form, fallback):
+    values = {
+        field: form.get(field, fallback[field])
+        for field in INCIDENT_CORRECTION_TEXT_FIELDS
+    }
+    values["injuries"] = (
+        int("injuries" in form)
+        if form
+        else int(fallback["injuries"])
+    )
+    values["correction_reason"] = form.get("correction_reason", "")
+    values["repeated_hour_choice"] = form.get("repeated_hour_choice", "")
+    return values
+
+
+def _incident_correction_audit_details(
+    incident_id,
+    client_id,
+    reported_by_user_id,
+    actor_user_id,
+    correction_reason,
+    changed_fields,
+    before,
+    after,
+    invalidated_review_ids,
+):
+    lines = [
+        f"Incident ID: {incident_id}",
+        f"Client ID: {client_id}",
+        f"Original reporter user ID: {reported_by_user_id}",
+        f"Management correction actor user ID: {actor_user_id}",
+        f"Correction reason: {correction_reason}",
+        "Changed fields: " + (
+            ", ".join(changed_fields) if changed_fields else "None"
+        ),
+        "Before snapshot:",
+    ]
+    lines.extend(
+        f"{field}: {before[field]!r}"
+        for field in INCIDENT_CORRECTION_STATE_FIELDS
+    )
+    lines.append("After snapshot:")
+    lines.extend(
+        f"{field}: {after[field]!r}"
+        for field in INCIDENT_CORRECTION_STATE_FIELDS
+    )
+    lines.extend((
+        "Invalidated Review acknowledgement IDs: " + (
+            ", ".join(str(value) for value in invalidated_review_ids)
+            if invalidated_review_ids else "None"
+        ),
+        f"Invalidated Review count: {len(invalidated_review_ids)}",
+    ))
+    return "\n".join(lines)
+
+
+def invalidate_incident_reviews_for_management_correction(
+    conn, incident_id, actor_user_id
+):
+    """Deactivate active Incident Reviews while preserving their audit rows."""
+    review_rows = conn.execute("""
+        SELECT acknowledgement_id
+        FROM acknowledgements
+        WHERE source_table = 'incident_reports'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        ORDER BY acknowledgement_id
+    """, (incident_id,)).fetchall()
+    review_ids = [row["acknowledgement_id"] for row in review_rows]
+    if not review_ids:
+        return review_ids
+
+    invalidated_at_utc = serialize_behaviour_utc(
+        datetime.now(timezone.utc).replace(microsecond=0)
+    )
+    conn.execute("""
+        UPDATE acknowledgements
+        SET active = 0,
+            invalidated_at_utc = ?,
+            invalidated_by_user_id = ?,
+            invalidation_reason = ?
+        WHERE source_table = 'incident_reports'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+    """, (
+        invalidated_at_utc,
+        actor_user_id,
+        "Incident corrected by management",
+        incident_id,
+    ))
+    return review_ids
+
+
 def format_toileting_local_datetime_display(value):
     """Format the stored Vancouver-local Toileting datetime for management UI."""
     if not isinstance(value, str) or not value.strip():
@@ -25469,6 +25763,47 @@ def client_storyline(client_id):
                 row["sleep_event_id"]: dict(row)
                 for row in current_sleep_rows
             }
+    current_incidents = {}
+    incident_ids = {
+        event["related_id"]
+        for event in events
+        if (
+            event["activity_type"] == "incident_created"
+            and event["related_table"] == "incident_reports"
+            and event["related_id"] is not None
+        )
+    }
+    if incident_ids:
+        incidents_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'incident_reports'"
+        ).fetchone()
+        if incidents_table is not None:
+            placeholders = ", ".join("?" for _ in incident_ids)
+            try:
+                current_incident_rows = conn.execute(
+                    "SELECT ir.*, ("
+                    "SELECT al.event_datetime FROM activity_log al "
+                    "WHERE al.related_table = 'incident_reports' "
+                    "AND al.related_id = ir.incident_id "
+                    "AND al.activity_type IN ("
+                    "'incident_created', 'incident_management_corrected'"
+                    ") AND al.event_datetime IS NOT NULL "
+                    "ORDER BY al.activity_id DESC LIMIT 1"
+                    ") AS _authoritative_event_datetime "
+                    "FROM incident_reports ir "
+                    "WHERE ir.client_id = ? AND ir.incident_id IN ("
+                    + placeholders + ")",
+                    (client_id, *sorted(incident_ids)),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                current_incident_rows = []
+        else:
+            current_incident_rows = []
+        current_incidents = {
+            row["incident_id"]: dict(row)
+            for row in current_incident_rows
+        }
     current_toileting_events = {}
     toileting_event_ids = {
         event["related_id"]
@@ -25673,6 +26008,61 @@ def client_storyline(client_id):
             event["storyline_details"] = (
                 f"Note: {current_note}" if current_note else None
             )
+        current_incident = (
+            current_incidents.get(event["related_id"])
+            if (
+                event["activity_type"] == "incident_created"
+                and event["related_table"] == "incident_reports"
+            )
+            else None
+        )
+        if current_incident is not None:
+            try:
+                event["summary"] = (
+                    f"Incident created: {current_incident['incident_type']}"
+                )
+                event["storyline_details"] = format_incident_storyline_details(
+                    current_incident["location"],
+                    current_incident["injuries"],
+                    current_incident["injury_details"],
+                    current_incident["actions_taken"],
+                    current_incident["description"],
+                    current_incident["follow_up_required"],
+                )
+                authoritative = current_incident.get(
+                    "_authoritative_event_datetime"
+                )
+                if authoritative:
+                    parse_behaviour_utc(authoritative)
+                    event["event_datetime"] = authoritative
+                else:
+                    event["event_datetime"] = (
+                        convert_vancouver_occurrence_input_to_utc(
+                            f"{current_incident['incident_date']}T"
+                            f"{current_incident['incident_time']}"
+                        )
+                    )
+            except (KeyError, TypeError, ValueError):
+                # Preserve the audit timestamp/details when source data is
+                # malformed, while retaining valid current-source content.
+                if current_incident is not None:
+                    try:
+                        event["summary"] = (
+                            f"Incident created: "
+                            f"{current_incident['incident_type']}"
+                        )
+                        event["storyline_details"] = (
+                            format_incident_storyline_details(
+                                current_incident["location"],
+                                current_incident["injuries"],
+                                current_incident["injury_details"],
+                                current_incident["actions_taken"],
+                                current_incident["description"],
+                                current_incident["follow_up_required"],
+                            )
+                        )
+                    except (KeyError, TypeError):
+                        pass
         current_toileting_event = (
             current_toileting_events.get(event["related_id"])
             if (
@@ -28428,6 +28818,9 @@ def incident_review_detail(incident_id):
         can_access_management_review=(
             actor["role"] in STORYLINE_REVIEW_AUTHORITY_ROLES
         ),
+        can_correct_incident=(
+            actor["role"] in MANAGEMENT_CORRECTION_ROLES
+        ),
         management_user=management_user,
         can_create_actions=can_create_actions,
         management_notes=management_notes,
@@ -28436,6 +28829,191 @@ def incident_review_detail(incident_id):
             request.args, incident["client_id"]
         )
     )
+
+
+@app.route(
+    "/manager-review/incidents/<int:incident_id>/correct",
+    methods=["GET", "POST"]
+)
+def incident_management_correction(incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    incident = None
+    try:
+        actor, incident = get_management_incident_correction_context(
+            conn, incident_id, session["user_id"]
+        )
+        current_snapshot = _incident_correction_state(incident)
+
+        if request.method == "GET":
+            values = {
+                **current_snapshot,
+                "correction_reason": "",
+                "repeated_hour_choice": (
+                    _incident_repeated_hour_choice_for_source(incident)
+                ),
+            }
+            return render_template(
+                "incident_management_correction.html",
+                incident=incident,
+                values=values,
+                original_snapshot=current_snapshot,
+                error=None,
+            )
+
+        values = _incident_correction_form_values(
+            request.form, current_snapshot
+        )
+        submitted_snapshot, occurrence_utc = (
+            _incident_correction_values_from_form(
+                request.form, incident, current_snapshot
+            )
+        )
+        submitted_state = {
+            **submitted_snapshot,
+            "occurrence_utc": occurrence_utc,
+        }
+        original_snapshot = _incident_correction_original_snapshot(
+            request.form
+        )
+        correction_reason = request.form.get("correction_reason", "").strip()
+        if not correction_reason:
+            raise ValueError("Correction reason is required.")
+
+        conn.execute("BEGIN IMMEDIATE")
+        actor, incident = get_management_incident_correction_context(
+            conn, incident_id, session["user_id"]
+        )
+        current_snapshot = _incident_correction_state(incident)
+        if current_snapshot != original_snapshot:
+            raise IncidentCorrectionStaleError(
+                "This Incident changed after the correction form was opened. "
+                "Reload the form and try again."
+            )
+
+        if current_snapshot == submitted_state:
+            conn.rollback()
+            return render_template(
+                "incident_management_correction.html",
+                incident=incident,
+                values=values,
+                original_snapshot=current_snapshot,
+                error=(
+                    "No changes were detected. The Incident already matches "
+                    "the information entered."
+                ),
+            ), 400
+
+        changed_fields = [
+            field for field in INCIDENT_CORRECTION_FIELDS
+            if current_snapshot[field] != submitted_state[field]
+        ]
+        if current_snapshot["occurrence_utc"] != submitted_state[
+            "occurrence_utc"
+        ]:
+            changed_fields.append("occurrence_utc")
+        invalidated_review_ids = (
+            invalidate_incident_reviews_for_management_correction(
+                conn, incident_id, actor["user_id"]
+            )
+        )
+        conn.execute("""
+            UPDATE incident_reports
+            SET incident_date = ?,
+                incident_time = ?,
+                location = ?,
+                incident_type = ?,
+                description = ?,
+                actions_taken = ?,
+                witnesses = ?,
+                injuries = ?,
+                injury_details = ?
+            WHERE incident_id = ?
+        """, (
+            submitted_state["incident_date"],
+            submitted_state["incident_time"],
+            submitted_state["location"],
+            submitted_state["incident_type"],
+            submitted_state["description"],
+            submitted_state["actions_taken"],
+            submitted_state["witnesses"],
+            submitted_state["injuries"],
+            submitted_state["injury_details"],
+            incident_id,
+        ))
+        log_activity(
+            conn,
+            activity_class="INCIDENT",
+            activity_type="incident_management_corrected",
+            summary="Incident corrected",
+            user_id=actor["user_id"],
+            client_id=incident["client_id"],
+            shift_id=None,
+            related_table="incident_reports",
+            related_id=incident_id,
+            details=_incident_correction_audit_details(
+                incident_id,
+                incident["client_id"],
+                incident["reported_by_user_id"],
+                actor["user_id"],
+                correction_reason,
+                changed_fields,
+                current_snapshot,
+                submitted_state,
+                invalidated_review_ids,
+            ),
+            success=1,
+            storyline_visible=False,
+            event_datetime=occurrence_utc,
+        )
+        conn.commit()
+        flash("Incident correction saved successfully.")
+        return redirect(url_for(
+            "incident_review_detail",
+            incident_id=incident_id,
+        ))
+    except IncidentCorrectionStaleError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return render_template(
+            "incident_management_correction.html",
+            incident=incident,
+            values=_incident_correction_form_values(
+                request.form,
+                _incident_correction_snapshot(incident)
+                if incident is not None else {},
+            ),
+            original_snapshot=_incident_correction_state(incident),
+            error=str(error),
+        ), 409
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except LookupError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return str(error), 404
+    except ValueError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        fallback = _incident_correction_state(incident) if incident else {}
+        return render_template(
+            "incident_management_correction.html",
+            incident=incident,
+            values=_incident_correction_form_values(request.form, fallback),
+            original_snapshot=fallback,
+            error=str(error),
+        ), 400
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 
 @app.route(
     "/manager-review/incidents/<int:incident_id>/management-note",

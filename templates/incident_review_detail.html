@@ -52,6 +52,15 @@
         <tr><th>Created</th><td>{{ incident.created_at }}</td></tr>
     </table>
 
+    {% if can_correct_incident %}
+        <p>
+            <a class="button" href="{{ url_for(
+                'incident_management_correction',
+                incident_id=incident.incident_id
+            ) }}">Correct Entry</a>
+        </p>
+    {% endif %}
+
     <h3>Reviews</h3>
 
     {% if reviews %}
