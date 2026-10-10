@@ -2234,6 +2234,34 @@ class ClientStorylineTests(unittest.TestCase):
             "behaviour_occurrences", 48, 10, 2, 1
         ))
 
+    def test_behaviour_action_form_renders_abc_section_items(self):
+        self.add_behaviour_occurrence(51)
+        conn = sqlite3.connect(self.path)
+        conn.execute("""
+            UPDATE behaviour_occurrences
+            SET record_format = 'ABC',
+                status = 'In Progress',
+                antecedent_transition_activities = 1,
+                behaviour_physical_aggression = 1,
+                response_blocked_behaviour = 1
+            WHERE behaviour_occurrence_id = 51
+        """)
+        conn.commit()
+        conn.close()
+
+        self.login(2, "Program Manager")
+        response = self.client.get(
+            "/manager-review/behaviour/51/action/new"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Before the Behaviour (A)", response.data)
+        self.assertIn(b"Asked to transition between activities", response.data)
+        self.assertIn(b"Behaviour Observed (B)", response.data)
+        self.assertIn(b"Physical aggression", response.data)
+        self.assertIn(b"Staff Response (C)", response.data)
+        self.assertIn(b"Blocked behaviour", response.data)
+
     def test_behaviour_action_authorization_matches_create_link(self):
         self.add_behaviour_occurrence(49)
         cases = (

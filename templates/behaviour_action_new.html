@@ -24,7 +24,7 @@
         <tr><th>Recorded By</th><td>{{ occurrence.recorder_name }}</td></tr>
         {% if occurrence.record_format == 'ABC' %}
             {% for section in abc_sections %}
-                <tr><th>{{ section.heading }}</th><td>{% if section.items %}{{ section.items|join(', ') }}{% endif %}{% if section.other_details %} {{ section.other_details }}{% endif %}</td></tr>
+                <tr><th>{{ section.heading }}</th><td>{% if section["items"] %}{{ section["items"]|join(', ') }}{% endif %}{% if section.other_details %} {{ section.other_details }}{% endif %}</td></tr>
             {% endfor %}
         {% else %}
             <tr><th>Categories</th><td>{{ categories|join(', ') if categories else 'None recorded' }}</td></tr>
