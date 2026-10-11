@@ -275,6 +275,7 @@ class ClientStorylineTests(unittest.TestCase):
             ("outcome", "TEXT"),
             ("physically_thrown", "INTEGER"),
             ("additional_details", "TEXT"),
+            ("status", "TEXT DEFAULT 'Recorded'"),
             ("void_reason", "TEXT"),
         ):
             try:
@@ -1365,7 +1366,7 @@ class ClientStorylineTests(unittest.TestCase):
         )
         self.assertEqual(event_time, "2026-08-02T17:00:00Z")
 
-    def test_legacy_recorded_and_voided_behaviour_storyline_cards_remain_compatible(self):
+    def test_voided_behaviour_source_is_suppressed_but_audits_remain(self):
         self.add_behaviour_occurrence(61, status="Recorded")
         self.add_behaviour_occurrence(62, status="Voided")
         self.add_event(
@@ -1387,9 +1388,132 @@ class ClientStorylineTests(unittest.TestCase):
         self.login(2, "Program Manager")
         page = self.client.get("/client/1/storyline?filter=Behaviour")
         self.assertEqual(page.status_code, 200)
-        self.assertEqual(page.data.count(b"Aggression towards others"), 2)
-        self.assertIn(b"Behaviour occurrence voided", page.data)
-        self.assertIn(b"Status: Voided", page.data)
+        self.assertEqual(page.data.count(b"Aggression towards others"), 1)
+        self.assertNotIn(b"Voided Behaviour", page.data)
+        self.assertNotIn(b"Behaviour occurrence voided", page.data)
+        self.assertNotIn(b"Status: Voided", page.data)
+        conn = sqlite3.connect(self.path)
+        source = conn.execute(
+            "SELECT status FROM behaviour_occurrences "
+            "WHERE behaviour_occurrence_id = 62"
+        ).fetchone()
+        audits = conn.execute(
+            "SELECT activity_type FROM activity_log "
+            "WHERE related_table = 'behaviour_occurrences' AND related_id = 62 "
+            "ORDER BY activity_id"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(source[0], "Voided")
+        self.assertEqual(
+            [row[0] for row in audits],
+            ["behaviour_occurrence_created", "behaviour_occurrence_voided"],
+        )
+
+    def test_behaviour_void_transition_removes_storyline_entry(self):
+        occurrence_id = 70
+        self.add_behaviour_occurrence(occurrence_id)
+        self.add_event(
+            "behaviour_occurrence_created", "Live Behaviour",
+            event_datetime=self.event_utc(self.today, 10, 0),
+            related_table="behaviour_occurrences", related_id=occurrence_id
+        )
+        self.add_event("sleep_fell_asleep", "Unrelated valid event")
+
+        self.login(2, "Program Manager")
+        before = self.client.get(
+            "/client/1/storyline?filter=Behaviour"
+        ).data
+        self.assertIn(b"Live Behaviour", before)
+
+        self.login(5, "Admin")
+        voided = self.client.post(
+            f"/behaviour/occurrences/{occurrence_id}/void",
+            data={"void_reason": "Entered in error"}
+        )
+        self.assertEqual(voided.status_code, 302)
+
+        self.login(2, "Program Manager")
+        after = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"Live Behaviour", after)
+        self.assertNotIn(b"Behaviour occurrence voided", after)
+        self.assertIn(b"Unrelated valid event", after)
+        self.assertNotIn(b"Mark as Reviewed", after)
+
+        conn = sqlite3.connect(self.path)
+        source = conn.execute(
+            "SELECT status FROM behaviour_occurrences "
+            "WHERE behaviour_occurrence_id = ?", (occurrence_id,)
+        ).fetchone()
+        audits = conn.execute(
+            "SELECT activity_type FROM activity_log "
+            "WHERE related_table = 'behaviour_occurrences' AND related_id = ? "
+            "ORDER BY activity_id", (occurrence_id,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(source[0], "Voided")
+        self.assertEqual(
+            [row[0] for row in audits],
+            ["behaviour_occurrence_created", "behaviour_occurrence_voided"],
+        )
+
+    def test_voided_food_fluid_source_suppresses_creation_and_void_events(self):
+        entry_id = 71
+        event_datetime = self.event_utc(self.today, 11, 0)
+        self.add_food_fluid_source(
+            entry_id, event_datetime, item_description="Live snack"
+        )
+        self.add_event(
+            "food_fluid_entry_created", "Offered — Live snack",
+            event_datetime=event_datetime,
+            details="Outcome: Consumed",
+            related_table="food_fluid_entries", related_id=entry_id,
+            shift_id=10
+        )
+        self.add_event("sleep_fell_asleep", "Unrelated valid event")
+
+        self.login(2, "Program Manager")
+        before = self.client.get(
+            "/client/1/storyline?filter=Food%20%26%20Fluid"
+        ).data
+        self.assertIn(b"Live snack", before)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE food_fluid_entries SET status = 'Voided', "
+            "void_reason = 'Entered in error' WHERE food_fluid_entry_id = ?",
+            (entry_id,)
+        )
+        conn.commit()
+        conn.close()
+        self.add_event(
+            "food_fluid_entry_voided", "Voided Offered — Live snack",
+            event_datetime=event_datetime,
+            details="Void reason: Entered in error",
+            related_table="food_fluid_entries", related_id=entry_id,
+            shift_id=10
+        )
+
+        after = self.client.get("/client/1/storyline").data
+        self.assertNotIn(b"Live snack", after)
+        self.assertNotIn(b"Voided Offered", after)
+        self.assertIn(b"Unrelated valid event", after)
+
+        conn = sqlite3.connect(self.path)
+        source = conn.execute(
+            "SELECT status, void_reason FROM food_fluid_entries "
+            "WHERE food_fluid_entry_id = ?", (entry_id,)
+        ).fetchone()
+        audits = conn.execute(
+            "SELECT activity_type FROM activity_log "
+            "WHERE related_table = 'food_fluid_entries' AND related_id = ? "
+            "ORDER BY activity_id", (entry_id,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(source, ("Voided", "Entered in error"))
+        self.assertEqual(
+            [row[0] for row in audits],
+            ["food_fluid_entry_created", "food_fluid_entry_voided"],
+        )
 
     def test_support_worker_storyline_rehydrates_current_behaviour_record(self):
         occurrence_id = 63

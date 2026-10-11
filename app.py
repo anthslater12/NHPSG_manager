@@ -25646,7 +25646,10 @@ def client_storyline(client_id):
         event["related_id"]
         for event in events
         if (
-            event["activity_type"] == "behaviour_occurrence_created"
+            event["activity_type"] in {
+                "behaviour_occurrence_created",
+                "behaviour_occurrence_voided",
+            }
             and event["related_table"] == "behaviour_occurrences"
             and event["related_id"] is not None
         )
@@ -25874,6 +25877,22 @@ def client_storyline(client_id):
             reviewed_review_sources = set()
     for event in events:
         event = dict(event)
+        current_behaviour_occurrence = (
+            current_behaviour_occurrences.get(event["related_id"])
+            if (
+                event["activity_type"] in {
+                    "behaviour_occurrence_created",
+                    "behaviour_occurrence_voided",
+                }
+                and event["related_table"] == "behaviour_occurrences"
+            )
+            else None
+        )
+        if (
+            current_behaviour_occurrence is not None
+            and current_behaviour_occurrence.get("status") == "Voided"
+        ):
+            continue
         event["label"] = _storyline_label(event["activity_type"])
         event["worker_initials"] = (
             _storyline_worker_initials(
@@ -25913,9 +25932,7 @@ def client_storyline(client_id):
             )
         elif event["activity_type"] == "behaviour_occurrence_voided" and event["details"]:
             event["storyline_details"] = event["details"]
-        current_occurrence = current_behaviour_occurrences.get(
-            event["related_id"]
-        ) if event["activity_type"] == "behaviour_occurrence_created" else None
+        current_occurrence = current_behaviour_occurrence
         if current_occurrence is not None:
             event["storyline_details"] = format_current_behaviour_storyline_details(
                 current_occurrence
@@ -25961,6 +25978,8 @@ def client_storyline(client_id):
             else None
         )
         if current_food_fluid_entry is not None:
+            if current_food_fluid_entry.get("status") == "Voided":
+                continue
             interaction_type = current_food_fluid_entry.get("interaction_type")
             item_description = current_food_fluid_entry.get("item_description")
             event["event_datetime"] = current_food_fluid_entry.get(
