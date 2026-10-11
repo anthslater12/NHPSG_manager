@@ -1596,6 +1596,33 @@ class ClientStorylineTests(unittest.TestCase):
         )
         conn.close()
 
+    def test_canonical_incident_type_rehydrates_in_detail_and_storyline(self):
+        self.add_incident(47)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "UPDATE incident_reports SET incident_type = ? WHERE incident_id = ?",
+            ("Missing / Wandering", 47),
+        )
+        conn.commit()
+        conn.close()
+        self.add_event(
+            "incident_created",
+            "Incident created: old value",
+            related_table="incident_reports",
+            related_id=47,
+        )
+
+        self.login(2, "Program Manager")
+        detail = self.client.get("/manager-review/incidents/47")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn(b"Missing / Wandering", detail.data)
+
+        storyline = self.client.get(
+            f"/client/1/storyline?filter=Incident&date={self.today.isoformat()}"
+        )
+        self.assertEqual(storyline.status_code, 200)
+        self.assertIn(b"Incident created: Missing / Wandering", storyline.data)
+
     def test_shift_note_details_render_from_activity_log_with_safe_history(self):
         self.login()
         first_note = "First line\nSecond <line>\n" + ("Long text " * 80)

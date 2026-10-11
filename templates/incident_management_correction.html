@@ -67,15 +67,17 @@
 
         <label for="incident_type">Incident Type</label>
         <select id="incident_type" name="incident_type" required>
-            {% for incident_option in [
-                'Aggression', 'Self Injury', 'Property Damage',
-                'Medical', 'Behaviour', 'Other'
-            ] %}
+            {% for incident_option in incident_type_options %}
                 <option value="{{ incident_option }}"{% if values.incident_type == incident_option %} selected{% endif %}>
                     {{ incident_option }}
                 </option>
             {% endfor %}
         </select>
+        <small>
+            Medical / Medication includes missed medication dose, wrong dose,
+            medication given late, medication unavailable, unexpected illness,
+            or another medical incident.
+        </small>
 
         <label for="description">What occurred?</label>
         <textarea id="description" name="description" rows="6" required>{{ values.description }}</textarea>

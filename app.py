@@ -198,6 +198,16 @@ WORKER_RESOURCE_STORAGE_PATH = os.environ.get(
 
 VANCOUVER_TIMEZONE = ZoneInfo("America/Vancouver")
 
+INCIDENT_TYPES = (
+    "Aggression",
+    "Self Injury",
+    "Property Damage",
+    "Medical / Medication",
+    "Injury / Accident",
+    "Missing / Wandering",
+    "Other",
+)
+
 BEHAVIOUR_CATEGORY_FIELDS = (
     "aggression_towards_others",
     "injury_to_others",
@@ -2773,14 +2783,6 @@ def filter_incident_storyline_details(details):
     )
 
 
-INCIDENT_CORRECTION_TYPES = (
-    "Aggression",
-    "Self Injury",
-    "Property Damage",
-    "Medical",
-    "Behaviour",
-    "Other",
-)
 INCIDENT_CORRECTION_FIELDS = (
     "incident_date",
     "incident_time",
@@ -2910,13 +2912,24 @@ def _incident_correction_values_from_form(
 
     if not values["incident_date"] or not values["incident_time"]:
         raise ValueError("Incident date and time are required.")
-    if values["incident_type"] not in INCIDENT_CORRECTION_TYPES:
+    if (
+        values["incident_type"] not in INCIDENT_TYPES
+        and values["incident_type"] != incident["incident_type"]
+    ):
         raise ValueError("A valid incident type is required.")
 
     occurrence_utc = _incident_correction_occurrence_utc(
         form, incident, current_snapshot
     )
     return values, occurrence_utc
+
+
+def _incident_type_options_for_correction(current_incident_type):
+    """Return canonical options plus one stored legacy compatibility value."""
+    options = list(INCIDENT_TYPES)
+    if current_incident_type and current_incident_type not in INCIDENT_TYPES:
+        options.append(current_incident_type)
+    return tuple(options)
 
 
 def _incident_correction_original_snapshot(form):
@@ -28570,6 +28583,13 @@ def incident_new():
         medical_treatment = 1 if "medical_treatment" in request.form else 0
         follow_up_required = 1 if "follow_up_required" in request.form else 0
 
+        if incident_type not in INCIDENT_TYPES:
+            return render_template(
+                "incident_new.html",
+                error="A valid incident type is required.",
+                incident_types=INCIDENT_TYPES,
+            ), 400
+
         try:
             incident_event_datetime = convert_vancouver_occurrence_input_to_utc(
                 f"{incident_date}T{incident_time}"
@@ -28581,6 +28601,7 @@ def incident_new():
             return render_template(
                 "incident_new.html",
                 error=message,
+                incident_types=INCIDENT_TYPES,
             ), 400
 
         conn = get_db()
@@ -28662,7 +28683,10 @@ def incident_new():
 
         return redirect(url_for("incident_list"))
 
-    return render_template("incident_new.html")
+    return render_template(
+        "incident_new.html",
+        incident_types=INCIDENT_TYPES,
+    )
 
 @app.route("/incidents")
 def incident_list():
@@ -28879,6 +28903,11 @@ def incident_management_correction(incident_id):
                 incident=incident,
                 values=values,
                 original_snapshot=current_snapshot,
+                incident_type_options=(
+                    _incident_type_options_for_correction(
+                        incident["incident_type"]
+                    )
+                ),
                 error=None,
             )
 
@@ -28919,6 +28948,11 @@ def incident_management_correction(incident_id):
                 incident=incident,
                 values=values,
                 original_snapshot=current_snapshot,
+                incident_type_options=(
+                    _incident_type_options_for_correction(
+                        incident["incident_type"]
+                    )
+                ),
                 error=(
                     "No changes were detected. The Incident already matches "
                     "the information entered."
@@ -29005,6 +29039,11 @@ def incident_management_correction(incident_id):
                 if incident is not None else {},
             ),
             original_snapshot=_incident_correction_state(incident),
+            incident_type_options=(
+                _incident_type_options_for_correction(
+                    incident["incident_type"]
+                )
+            ) if incident is not None else INCIDENT_TYPES,
             error=str(error),
         ), 409
     except PermissionError:
@@ -29024,6 +29063,11 @@ def incident_management_correction(incident_id):
             incident=incident,
             values=_incident_correction_form_values(request.form, fallback),
             original_snapshot=fallback,
+            incident_type_options=(
+                _incident_type_options_for_correction(
+                    incident["incident_type"]
+                )
+            ) if incident is not None else INCIDENT_TYPES,
             error=str(error),
         ), 400
     except Exception:

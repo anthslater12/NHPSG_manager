@@ -159,12 +159,67 @@ class ActivityLogStorylineTests(unittest.TestCase):
         self.assertRegex(row[0], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
         self.assertEqual(row[1], "2026-08-03T13:00:00Z")
 
+    def test_incident_form_uses_canonical_types_and_help_text(self):
+        with self.client.session_transaction() as session:
+            session.update(user_id=7, role="Support Worker", full_name="Worker")
+
+        response = self.client.get("/incident/new")
+        self.assertEqual(response.status_code, 200)
+        for incident_type in app.INCIDENT_TYPES:
+            self.assertIn(
+                f'value="{incident_type}"'.encode("utf-8"),
+                response.data,
+            )
+        self.assertNotIn(b'value="Medical"', response.data)
+        self.assertNotIn(b'value="Behaviour"', response.data)
+        self.assertIn(
+            b"Medical / Medication includes missed medication dose, wrong dose,",
+            response.data,
+        )
+
+    def test_incident_creation_rejects_spoofed_type_and_accepts_canonical_type(self):
+        with self.client.session_transaction() as session:
+            session.update(user_id=7, role="Support Worker", full_name="Worker")
+
+        base_data = {
+            "incident_date": "2026-08-02",
+            "incident_time": "12:00",
+            "location": "Home",
+            "description": "Incident description",
+        }
+        invalid = self.client.post(
+            "/incident/new",
+            data={**base_data, "incident_type": "Medical"},
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn(b"A valid incident type is required.", invalid.data)
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM incident_reports").fetchone()[0],
+            0,
+        )
+        conn.close()
+
+        valid = self.client.post(
+            "/incident/new",
+            data={**base_data, "incident_type": "Missing / Wandering"},
+        )
+        self.assertEqual(valid.status_code, 302)
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(
+            conn.execute(
+                "SELECT incident_type FROM incident_reports"
+            ).fetchone()[0],
+            "Missing / Wandering",
+        )
+        conn.close()
+
     def test_incident_uses_active_shift_client_and_preserves_linkage(self):
         with self.client.session_transaction() as session:
             session.update(user_id=7, role="Support Worker", full_name="Worker")
         response = self.client.post("/incident/new", data={
             "incident_date": "2026-08-02", "incident_time": "12:00",
-            "location": "Home", "incident_type": "Medical",
+            "location": "Home", "incident_type": "Medical / Medication",
             "description": "Client two incident", "actions_taken": "Called nurse",
             "injury_details": "Bruise <arm>", "injury": "on",
             "follow_up_required": "on", "police_notified": "on",
@@ -181,7 +236,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row, (
             2, 7, "incident_reports", 1, 1,
-            "Incident created: Medical",
+            "Incident created: Medical / Medication",
             "Location: Home\nInjury: Yes\n"
             "Injury details: Bruise <arm>\nActions taken: Called nurse\n"
             "Description: Client two incident\nFollow-up required: Yes",
@@ -193,7 +248,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
             session.update(user_id=7, role="Support Worker", full_name="Worker")
         response = self.client.post("/incident/new", data={
             "incident_date": "2026-08-02", "incident_time": "12:00",
-            "location": "Garden", "incident_type": "Fall",
+            "location": "Garden", "incident_type": "Other",
             "description": "No injury", "actions_taken": "",
             "injury_details": "", "injury": "on",
         })
@@ -214,7 +269,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
             session.update(user_id=7, role="Support Worker", full_name="Worker")
         response = self.client.post("/incident/new", data={
             "incident_date": "2026-08-02", "incident_time": "12:00",
-            "location": "Garden", "incident_type": "Fall",
+            "location": "Garden", "incident_type": "Other",
             "description": "No injury reported", "actions_taken": "",
             "injury_details": "",
         })
@@ -232,7 +287,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
 
         future = self.client.post("/incident/new", data={
             "incident_date": "2099-01-01", "incident_time": "12:00",
-            "location": "Home", "incident_type": "Fall",
+            "location": "Home", "incident_type": "Other",
             "description": "Future incident", "actions_taken": "",
             "injury_details": "",
         })
@@ -247,7 +302,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
 
         valid = self.client.post("/incident/new", data={
             "incident_date": "2026-08-02", "incident_time": "12:00",
-            "location": "Home", "incident_type": "Fall",
+            "location": "Home", "incident_type": "Other",
             "description": "Past incident", "actions_taken": "Observed",
             "injury_details": "",
         })

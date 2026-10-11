@@ -217,6 +217,74 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Incident correction saved successfully.", response.data)
 
+    def test_legacy_incident_types_remain_selected_and_editable(self):
+        for incident_id, legacy_type in (
+            (301, "Medical"),
+            (302, "Behaviour"),
+            (303, "Fall"),
+        ):
+            with self.subTest(legacy_type=legacy_type):
+                self.add_incident(incident_id, incident_type=legacy_type)
+                self.login(2)
+                url = f"/manager-review/incidents/{incident_id}/correct"
+                form = self.client.get(url)
+                self.assertEqual(form.status_code, 200)
+                for incident_type in app.INCIDENT_TYPES:
+                    self.assertIn(
+                        f'value="{incident_type}"'.encode("utf-8"),
+                        form.data,
+                    )
+                self.assertIn(
+                    f'value="{legacy_type}" selected'.encode("utf-8"),
+                    form.data,
+                )
+                self.assertIn(
+                    b"Medical / Medication includes missed medication dose,",
+                    form.data,
+                )
+
+                response = self.client.post(
+                    url,
+                    data=self.correction_data(
+                        incident_id,
+                        description="Updated without recategorizing",
+                    ),
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    self.source(incident_id)["incident_type"],
+                    legacy_type,
+                )
+
+    def test_legacy_incident_type_can_change_only_to_canonical_value(self):
+        self.add_incident(304, incident_type="Medical")
+        self.login(2)
+        url = "/manager-review/incidents/304/correct"
+
+        arbitrary = self.client.post(
+            url,
+            data=self.correction_data(
+                304,
+                incident_type="Legacy Spoofed Type",
+            ),
+        )
+        self.assertEqual(arbitrary.status_code, 400)
+        self.assertIn(b"A valid incident type is required.", arbitrary.data)
+        self.assertEqual(self.source(304)["incident_type"], "Medical")
+
+        canonical = self.client.post(
+            url,
+            data=self.correction_data(
+                304,
+                incident_type="Injury / Accident",
+            ),
+        )
+        self.assertEqual(canonical.status_code, 302)
+        self.assertEqual(
+            self.source(304)["incident_type"],
+            "Injury / Accident",
+        )
+
     def test_non_management_roles_and_inactive_user_are_denied(self):
         for user_id in (7, 1, 5):
             with self.subTest(user_id=user_id):

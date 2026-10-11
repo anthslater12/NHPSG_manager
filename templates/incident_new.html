@@ -43,14 +43,17 @@
 
                     <option value="">Select type</option>
 
-                    {% for incident_option in [
-                        'Aggression', 'Self Injury', 'Property Damage',
-                        'Medical', 'Behaviour', 'Other'
-                    ] %}
+                    {% for incident_option in incident_types %}
                         <option value="{{ incident_option }}"{% if request.form.get('incident_type') == incident_option %} selected{% endif %}>{{ incident_option }}</option>
                     {% endfor %}
 
                 </select>
+
+                <small>
+                    Medical / Medication includes missed medication dose, wrong dose,
+                    medication given late, medication unavailable, unexpected illness,
+                    or another medical incident.
+                </small>
 
             </div>
 
