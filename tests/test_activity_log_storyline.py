@@ -64,13 +64,18 @@ class ActivityLogStorylineTests(unittest.TestCase):
                 client_id INTEGER NOT NULL,
                 shift_date TEXT NOT NULL,
                 shift_type TEXT NOT NULL,
-                status TEXT NOT NULL
+                status TEXT NOT NULL,
+                scheduled_end_time TEXT
             );
             CREATE TABLE shift_staff (
                 shift_staff_id INTEGER PRIMARY KEY,
                 shift_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
+                active INTEGER NOT NULL DEFAULT 1,
+                actual_start_time TEXT,
+                actual_end_at_utc TEXT,
+                sign_on_at TEXT,
+                sign_off_at TEXT
             );
             CREATE TABLE incident_reports (
                 incident_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,9 +97,39 @@ class ActivityLogStorylineTests(unittest.TestCase):
             CREATE TABLE activity_log ({ACTIVITY_LOG_COLUMNS});
             INSERT INTO users VALUES (7, 'worker', 'x', 'Worker', 'Support Worker', 1);
             INSERT INTO clients VALUES (1, 'One', 1), (2, 'Two', 1);
-            INSERT INTO shifts VALUES (20, 2, '2026-08-02', 'Day', 'Open');
-            INSERT INTO shift_staff VALUES (30, 20, 7, 1);
+            INSERT INTO shifts VALUES (20, 2, '2026-08-02', 'Day', 'Open', '15:00');
+            INSERT INTO shift_staff VALUES (30, 20, 7, 1, '09:00', NULL, '2026-08-02T16:00:00Z', NULL);
         """)
+        conn.commit()
+        conn.close()
+
+    def login_session(self, user_id=7, role="Support Worker"):
+        with self.client.session_transaction() as session:
+            session.update(
+                user_id=user_id,
+                role=role,
+                full_name="Worker",
+            )
+
+    def incident_form_data(self):
+        return {
+            "incident_date": "2026-08-02",
+            "incident_time": "12:00",
+            "location": "Home",
+            "incident_type": "Other",
+            "description": "Incident description",
+        }
+
+    def add_second_active_assignment(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO shifts VALUES (?, ?, ?, ?, ?, ?)",
+            (21, 1, "2026-08-02", "Afternoon", "Open", "23:00"),
+        )
+        conn.execute(
+            "INSERT INTO shift_staff VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (31, 21, 7, 1, "16:00", None, "2026-08-02T23:00:00Z", None),
+        )
         conn.commit()
         conn.close()
 
@@ -229,7 +264,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
         row = conn.execute("""
             SELECT al.client_id, al.user_id, al.related_table, al.related_id, al.storyline_visible,
                    al.summary, al.details, al.success,
-                   ir.client_id, ir.injuries, ir.injury_details
+                   ir.client_id, ir.reported_by_user_id, ir.injuries, ir.injury_details
             FROM activity_log al JOIN incident_reports ir ON ir.incident_id = al.related_id
             WHERE al.activity_type = 'incident_created'
         """).fetchone()
@@ -240,8 +275,144 @@ class ActivityLogStorylineTests(unittest.TestCase):
             "Location: Home\nInjury: Yes\n"
             "Injury details: Bruise <arm>\nActions taken: Called nurse\n"
             "Description: Client two incident\nFollow-up required: Yes",
-            1, 2, 1, "Bruise <arm>"
+            1, 2, 7, 1, "Bruise <arm>"
         ))
+
+    def test_incident_creation_uses_database_role_not_session_role(self):
+        self.login_session(role="Admin")
+        response = self.client.get("/incident/new")
+        self.assertEqual(response.status_code, 200)
+
+        self.login_session(role="Support Worker")
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)",
+            (8, "director", "x", "Director", "Director", 1),
+        )
+        conn.commit()
+        conn.close()
+
+        self.login_session(user_id=8, role="Support Worker")
+        response = self.client.get("/incident/new")
+        self.assertEqual(response.status_code, 403)
+
+    def test_inactive_database_user_cannot_create_incident(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE users SET active = 0 WHERE user_id = 7")
+        conn.commit()
+        conn.close()
+
+        self.login_session()
+        self.assertEqual(self.client.get("/incident/new").status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                "/incident/new", data=self.incident_form_data()
+            ).status_code,
+            403,
+        )
+
+    def test_inactive_or_ended_assignment_cannot_create_incident(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE shift_staff SET active = 0 WHERE shift_id = 20")
+        conn.commit()
+        conn.close()
+
+        self.login_session()
+        self.assertEqual(self.client.get("/incident/new").status_code, 403)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE shift_staff SET active = 1, actual_end_at_utc = ?", ("2026-08-02T23:00:00Z",))
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.client.get("/incident/new").status_code, 403)
+
+    def test_cancelled_or_closed_shift_cannot_create_incident(self):
+        self.login_session()
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE shifts SET status = 'Cancelled' WHERE shift_id = 20")
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.client.get("/incident/new").status_code, 403)
+
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE shifts SET status = 'Closed' WHERE shift_id = 20")
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.client.get("/incident/new").status_code, 403)
+
+    def test_multiple_active_assignments_require_selected_context(self):
+        self.add_second_active_assignment()
+
+        self.login_session()
+        self.assertEqual(self.client.get("/incident/new").status_code, 403)
+        self.assertEqual(
+            self.client.get("/incident/new?shift_id=20").status_code,
+            403,
+        )
+
+        with self.client.session_transaction() as session:
+            session["documentation_shift_id"] = 20
+        self.assertEqual(
+            self.client.get("/incident/new?shift_id=21").status_code,
+            403,
+        )
+
+        response = self.client.post(
+            "/incident/new?shift_id=21",
+            data=self.incident_form_data(),
+        )
+        self.assertEqual(response.status_code, 403)
+
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM incident_reports").fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM activity_log "
+                "WHERE activity_type = 'incident_created'"
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
+    def test_selected_active_context_allows_creation_and_preserves_linkage(self):
+        self.add_second_active_assignment()
+        self.login_session()
+        with self.client.session_transaction() as session:
+            session["documentation_shift_id"] = 20
+
+        response = self.client.get("/incident/new?shift_id=20")
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.post(
+            "/incident/new?shift_id=20",
+            data=self.incident_form_data(),
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = sqlite3.connect(self.path)
+        rows = conn.execute("""
+            SELECT ir.incident_id, ir.client_id, ir.reported_by_user_id,
+                   al.activity_type, al.user_id, al.client_id, al.shift_id,
+                   al.related_id
+            FROM incident_reports ir
+            JOIN activity_log al
+              ON al.related_table = 'incident_reports'
+             AND al.related_id = ir.incident_id
+            WHERE al.activity_type = 'incident_created'
+        """).fetchall()
+        conn.close()
+
+        self.assertEqual(rows, [(1, 2, 7, "incident_created", 7, 2, 20, 1)])
+
+    def test_wrong_shift_context_cannot_be_selected_by_tampering(self):
+        self.login_session()
+        self.assertEqual(
+            self.client.get("/incident/new?shift_id=999").status_code,
+            403,
+        )
 
     def test_incident_details_omit_blank_optional_fields_and_write_one_log_row(self):
         with self.client.session_transaction() as session:

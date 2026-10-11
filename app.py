@@ -28637,69 +28637,136 @@ def shift_activity_handover_complete(shift_id, activity_id):
 # INCIDENT REPORTS
 #####################################################################
 
+def get_incident_creation_context(conn, user_id, requested_shift_id=None):
+    """Return the one active documentation context allowed for Incidents."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only an active Support Worker may record an incident."
+        )
+
+    raw_selected_id = session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+    selected_id = _session_documentation_shift_id()
+    if raw_selected_id is not None and selected_id is None:
+        _clear_documentation_shift_id()
+        raise DocumentationContextUnavailable()
+
+    if selected_id is not None:
+        if requested_shift_id is not None and requested_shift_id != selected_id:
+            raise DocumentationContextUnavailable()
+        context = get_worker_documentation_shift_context(
+            conn, selected_id, actor["user_id"]
+        )
+    else:
+        active_contexts = [
+            context
+            for context in get_worker_documentation_assignments(
+                conn, actor["user_id"]
+            )
+            if (
+                context["documentation_access"] == DOCUMENTATION_ACCESS_ACTIVE
+                and context.get("shift_status") == "Open"
+            )
+        ]
+        if len(active_contexts) != 1:
+            raise DocumentationContextUnavailable()
+        context = active_contexts[0]
+        if (
+            requested_shift_id is not None
+            and requested_shift_id != context["shift_id"]
+        ):
+            raise DocumentationContextUnavailable()
+
+    if context is None or (
+        context["documentation_access"] != DOCUMENTATION_ACCESS_ACTIVE
+        or context.get("shift_status") != "Open"
+    ):
+        raise DocumentationContextUnavailable()
+    return actor, context
+
+
 @app.route("/incident/new", methods=["GET", "POST"])
 def incident_new():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if request.method == "POST":
-        incident_date = request.form["incident_date"]
-        incident_time = request.form["incident_time"]
-        location = request.form["location"]
-        incident_type = request.form["incident_type"]
-        description = request.form["description"]
-        actions_taken = request.form.get("actions_taken", "")
-        witnesses = request.form.get("witnesses", "")
-        injury_details = request.form.get("injury_details", "")
-
-        injuries = 1 if "injury" in request.form else 0
-        police_notified = 1 if "police_notified" in request.form else 0
-        medical_treatment = 1 if "medical_treatment" in request.form else 0
-        follow_up_required = 1 if "follow_up_required" in request.form else 0
-
-        if incident_type not in INCIDENT_TYPES:
-            return render_template(
-                "incident_new.html",
-                error="A valid incident type is required.",
-                incident_types=INCIDENT_TYPES,
-            ), 400
-
+    requested_shift_id = None
+    raw_requested_shift_id = request.args.get("shift_id")
+    if raw_requested_shift_id:
         try:
-            incident_event_datetime = convert_vancouver_occurrence_input_to_utc(
-                f"{incident_date}T{incident_time}"
+            requested_shift_id = int(raw_requested_shift_id)
+        except (TypeError, ValueError):
+            return "Access denied", 403
+
+    conn = get_db()
+    try:
+        try:
+            actor, documentation_context = get_incident_creation_context(
+                conn, session["user_id"], requested_shift_id
             )
-        except ValueError as error:
-            message = str(error)
-            if message == "Occurrence time cannot be in the future.":
-                message = "Incident date and time cannot be in the future."
-            return render_template(
-                "incident_new.html",
-                error=message,
-                incident_types=INCIDENT_TYPES,
-            ), 400
+        except PermissionError:
+            return "Access denied", 403
 
-        conn = get_db()
+        if request.method == "POST":
+            incident_date = request.form["incident_date"]
+            incident_time = request.form["incident_time"]
+            location = request.form["location"]
+            incident_type = request.form["incident_type"]
+            description = request.form["description"]
+            actions_taken = request.form.get("actions_taken", "")
+            witnesses = request.form.get("witnesses", "")
+            injury_details = request.form.get("injury_details", "")
 
-        active_shift = conn.execute("""
-            SELECT shift_id, client_id
-            FROM shift_staff
-            JOIN shifts USING (shift_id)
-            WHERE user_id = ?
-                AND active = 1
-        """, (session["user_id"],)).fetchone()
+            injuries = 1 if "injury" in request.form else 0
+            police_notified = 1 if "police_notified" in request.form else 0
+            medical_treatment = 1 if "medical_treatment" in request.form else 0
+            follow_up_required = 1 if "follow_up_required" in request.form else 0
 
-        shift_id = active_shift["shift_id"] if active_shift else None
-        client_id = active_shift["client_id"] if active_shift else None
-        if client_id is None:
-            conn.close()
-            return "An active client shift is required to record an incident.", 400
+            if incident_type not in INCIDENT_TYPES:
+                return render_template(
+                    "incident_new.html",
+                    error="A valid incident type is required.",
+                    incident_types=INCIDENT_TYPES,
+                ), 400
 
+            try:
+                incident_event_datetime = convert_vancouver_occurrence_input_to_utc(
+                    f"{incident_date}T{incident_time}"
+                )
+            except ValueError as error:
+                message = str(error)
+                if message == "Occurrence time cannot be in the future.":
+                    message = "Incident date and time cannot be in the future."
+                return render_template(
+                    "incident_new.html",
+                    error=message,
+                    incident_types=INCIDENT_TYPES,
+                ), 400
 
-        cur = conn.execute("""
-            INSERT INTO incident_reports
-            (
+            client_id = documentation_context["client_id"]
+            shift_id = documentation_context["shift_id"]
+            cur = conn.execute("""
+                INSERT INTO incident_reports
+                (
+                    client_id,
+                    reported_by_user_id,
+                    incident_date,
+                    incident_time,
+                    location,
+                    incident_type,
+                    description,
+                    actions_taken,
+                    follow_up_required,
+                    witnesses,
+                    injuries,
+                    injury_details,
+                    police_notified,
+                    medical_treatment
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
                 client_id,
-                reported_by_user_id,
+                actor["user_id"],
                 incident_date,
                 incident_time,
                 location,
@@ -28712,55 +28779,38 @@ def incident_new():
                 injury_details,
                 police_notified,
                 medical_treatment
+            ))
+
+            incident_id = cur.lastrowid
+
+            log_activity(
+                conn,
+                activity_class="INCIDENT",
+                activity_type="incident_created",
+                summary=f"Incident created: {incident_type}",
+                user_id=actor["user_id"],
+                client_id=client_id,
+                shift_id=shift_id,
+                related_table="incident_reports",
+                related_id=incident_id,
+                details=format_incident_storyline_details(
+                    location, injuries, injury_details, actions_taken,
+                    description, follow_up_required
+                ),
+                success=1,
+                event_datetime=incident_event_datetime,
+                storyline_visible=True
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            client_id,
-            session["user_id"],
-            incident_date,
-            incident_time,
-            location,
-            incident_type,
-            description,
-            actions_taken,
-            follow_up_required,
-            witnesses,
-            injuries,
-            injury_details,
-            police_notified,
-            medical_treatment
-        ))
 
-        incident_id = cur.lastrowid
+            conn.commit()
+            return redirect(url_for("incident_list"))
 
-        log_activity(
-            conn,
-            activity_class="INCIDENT",
-            activity_type="incident_created",
-            summary=f"Incident created: {incident_type}",
-            user_id=session["user_id"],
-            client_id=client_id,
-            shift_id=shift_id,
-            related_table="incident_reports",
-            related_id=incident_id,
-            details=format_incident_storyline_details(
-                location, injuries, injury_details, actions_taken,
-                description, follow_up_required
-            ),
-            success=1,
-            event_datetime=incident_event_datetime,
-            storyline_visible=True
+        return render_template(
+            "incident_new.html",
+            incident_types=INCIDENT_TYPES,
         )
-
-        conn.commit()
+    finally:
         conn.close()
-
-        return redirect(url_for("incident_list"))
-
-    return render_template(
-        "incident_new.html",
-        incident_types=INCIDENT_TYPES,
-    )
 
 @app.route("/incidents")
 def incident_list():

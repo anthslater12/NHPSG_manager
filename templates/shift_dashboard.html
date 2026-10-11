@@ -118,7 +118,7 @@
             + Activity
         </a>
         <a class="quick-button" href="/shift/{{ shift.shift_id }}/behaviour">+ Behaviour</a>
-        <a class="quick-button" href="/incident/new">+ Incident</a>
+        <a class="quick-button" href="{{ url_for('incident_new', shift_id=shift.shift_id) }}">+ Incident</a>
         <a class="quick-button" href="{{ url_for('client_storyline', client_id=shift.client_id) }}">Storyline</a>
     </div>
 </div>
