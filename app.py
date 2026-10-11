@@ -33,6 +33,7 @@ import add_behaviour_occurrences_table
 import add_behaviour_setting_events_tables
 import add_worker_resources_table
 import add_grocery_lists_tables
+import add_incident_clearances_table
 import mail_service
 
 app = Flask(__name__)
@@ -207,6 +208,15 @@ INCIDENT_TYPES = (
     "Missing / Wandering",
     "Other",
 )
+
+INCIDENT_OPEN_FILTER_SQL = """
+    NOT EXISTS (
+        SELECT 1
+        FROM incident_clearances ic
+        WHERE ic.incident_id = ir.incident_id
+          AND ic.active = 1
+    )
+"""
 
 BEHAVIOUR_CATEGORY_FIELDS = (
     "aggression_towards_others",
@@ -551,6 +561,7 @@ def get_db():
         add_sleep_events_note.migrate(conn)
         add_worker_resources_table.migrate(conn)
         add_grocery_lists_tables.migrate(conn)
+        add_incident_clearances_table.migrate(conn)
         return conn
 
     except Exception as error:
@@ -2985,6 +2996,34 @@ def get_management_incident_correction_context(conn, incident_id, user_id):
     return actor, dict(incident)
 
 
+def validate_incident_clearance_authority(conn, user_id):
+    """Return an active Program Manager allowed to clear Incidents."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Program Manager":
+        raise PermissionError(
+            "Only a Program Manager may clear or reopen Incidents."
+        )
+    return actor
+
+
+def get_active_incident_clearance(conn, incident_id):
+    return conn.execute("""
+        SELECT
+            ic.incident_clearance_id,
+            ic.incident_id,
+            ic.cleared_by_user_id,
+            ic.cleared_at_utc,
+            ic.clearance_note,
+            u.full_name AS cleared_by_name
+        FROM incident_clearances ic
+        JOIN users u ON u.user_id = ic.cleared_by_user_id
+        WHERE ic.incident_id = ?
+          AND ic.active = 1
+        ORDER BY ic.incident_clearance_id DESC
+        LIMIT 1
+    """, (incident_id,)).fetchone()
+
+
 def _incident_correction_form_values(form, fallback):
     values = {
         field: form.get(field, fallback[field])
@@ -3010,6 +3049,7 @@ def _incident_correction_audit_details(
     before,
     after,
     invalidated_review_ids,
+    invalidated_clearance_ids=(),
 ):
     lines = [
         f"Incident ID: {incident_id}",
@@ -3037,6 +3077,12 @@ def _incident_correction_audit_details(
             if invalidated_review_ids else "None"
         ),
         f"Invalidated Review count: {len(invalidated_review_ids)}",
+        "Invalidated Program Manager clearance IDs: " + (
+            ", ".join(str(value) for value in invalidated_clearance_ids)
+            if invalidated_clearance_ids else "None"
+        ),
+        f"Invalidated Program Manager clearance count: "
+        f"{len(invalidated_clearance_ids)}",
     ))
     return "\n".join(lines)
 
@@ -3078,6 +3124,32 @@ def invalidate_incident_reviews_for_management_correction(
         incident_id,
     ))
     return review_ids
+
+
+def invalidate_incident_clearances_for_management_correction(
+    conn, incident_id
+):
+    """Deactivate active Program Manager clearances after a correction."""
+    clearance_rows = conn.execute("""
+        SELECT incident_clearance_id
+        FROM incident_clearances
+        WHERE incident_id = ?
+          AND active = 1
+        ORDER BY incident_clearance_id
+    """, (incident_id,)).fetchall()
+    clearance_ids = [
+        row["incident_clearance_id"] for row in clearance_rows
+    ]
+    if not clearance_ids:
+        return clearance_ids
+
+    conn.execute("""
+        UPDATE incident_clearances
+        SET active = 0
+        WHERE incident_id = ?
+          AND active = 1
+    """, (incident_id,))
+    return clearance_ids
 
 
 def format_toileting_local_datetime_display(value):
@@ -22509,7 +22581,7 @@ def get_management_inbox(current_user_id):
         LIMIT 5
     """, (current_user_id,)).fetchall()
 
-    recent_incidents = conn.execute("""
+    recent_incidents = conn.execute(f"""
         SELECT
             ir.incident_id,
             ir.incident_type,
@@ -22518,6 +22590,7 @@ def get_management_inbox(current_user_id):
             c.client_name
         FROM incident_reports ir
         LEFT JOIN clients c ON ir.client_id = c.client_id
+        WHERE {INCIDENT_OPEN_FILTER_SQL}
         ORDER BY ir.incident_date DESC, ir.incident_time DESC
         LIMIT 5
     """).fetchall()
@@ -23262,9 +23335,10 @@ def get_dashboard_stats(current_user_id):
         )
     """, (current_user_id,)).fetchone()["count"]
 
-    open_incidents = conn.execute("""
+    open_incidents = conn.execute(f"""
         SELECT COUNT(*) AS count
-        FROM incident_reports
+        FROM incident_reports ir
+        WHERE {INCIDENT_OPEN_FILTER_SQL}
     """).fetchone()["count"]
 
     recent_activity = conn.execute("""
@@ -28814,6 +28888,15 @@ def incident_review_detail(incident_id):
         ORDER BY ack.acknowledged_at, ack.acknowledgement_id
     """, (incident_id,)).fetchall()
 
+    incident_clearance = get_active_incident_clearance(conn, incident_id)
+    if incident_clearance is not None:
+        incident_clearance = dict(incident_clearance)
+        incident_clearance["cleared_at_display"] = (
+            format_utc_database_datetime_display(
+                incident_clearance["cleared_at_utc"]
+            )
+        )
+
     management_user = (
         actor["role"] in STORYLINE_REVIEW_AUTHORITY_ROLES
     )
@@ -28864,6 +28947,10 @@ def incident_review_detail(incident_id):
         can_correct_incident=(
             actor["role"] in MANAGEMENT_CORRECTION_ROLES
         ),
+        can_manage_incident_clearance=(
+            actor["role"] == "Program Manager"
+        ),
+        incident_clearance=incident_clearance,
         management_user=management_user,
         can_create_actions=can_create_actions,
         management_notes=management_notes,
@@ -28972,6 +29059,11 @@ def incident_management_correction(incident_id):
                 conn, incident_id, actor["user_id"]
             )
         )
+        invalidated_clearance_ids = (
+            invalidate_incident_clearances_for_management_correction(
+                conn, incident_id
+            )
+        )
         conn.execute("""
             UPDATE incident_reports
             SET incident_date = ?,
@@ -29016,6 +29108,7 @@ def incident_management_correction(incident_id):
                 current_snapshot,
                 submitted_state,
                 invalidated_review_ids,
+                invalidated_clearance_ids,
             ),
             success=1,
             storyline_visible=False,
@@ -29076,6 +29169,162 @@ def incident_management_correction(incident_id):
         raise
     finally:
         conn.close()
+
+
+@app.route(
+    "/manager-review/incidents/<int:incident_id>/clear",
+    methods=["POST"]
+)
+def clear_incident(incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = validate_incident_clearance_authority(
+            conn, session["user_id"]
+        )
+        incident = conn.execute("""
+            SELECT incident_id, client_id
+            FROM incident_reports
+            WHERE incident_id = ?
+        """, (incident_id,)).fetchone()
+        if incident is None:
+            conn.rollback()
+            return "Incident not found", 404
+
+        if get_active_incident_clearance(conn, incident_id) is not None:
+            conn.rollback()
+            return "Incident is already cleared.", 409
+
+        cleared_at_utc = serialize_behaviour_utc(
+            datetime.now(timezone.utc).replace(microsecond=0)
+        )
+        conn.execute("""
+            INSERT INTO incident_clearances (
+                incident_id,
+                cleared_by_user_id,
+                cleared_at_utc,
+                clearance_note,
+                active
+            )
+            VALUES (?, ?, ?, NULL, 1)
+        """, (
+            incident_id,
+            actor["user_id"],
+            cleared_at_utc,
+        ))
+        log_activity(
+            conn,
+            activity_class="INCIDENT",
+            activity_type="incident_cleared",
+            summary="Incident cleared by Program Manager",
+            user_id=actor["user_id"],
+            client_id=incident["client_id"],
+            shift_id=None,
+            related_table="incident_reports",
+            related_id=incident_id,
+            details=(
+                f"Incident ID: {incident_id}\n"
+                f"Cleared by Program Manager user ID: {actor['user_id']}"
+            ),
+            success=1,
+            storyline_visible=False,
+            event_datetime=_latest_incident_occurrence_audit_datetime(
+                conn, incident_id
+            ),
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    flash("Incident cleared.")
+    return redirect(url_for(
+        "incident_review_detail",
+        incident_id=incident_id,
+    ))
+
+
+@app.route(
+    "/manager-review/incidents/<int:incident_id>/reopen",
+    methods=["POST"]
+)
+def reopen_incident(incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = validate_incident_clearance_authority(
+            conn, session["user_id"]
+        )
+        incident = conn.execute("""
+            SELECT incident_id, client_id
+            FROM incident_reports
+            WHERE incident_id = ?
+        """, (incident_id,)).fetchone()
+        if incident is None:
+            conn.rollback()
+            return "Incident not found", 404
+
+        clearance = get_active_incident_clearance(conn, incident_id)
+        if clearance is None:
+            conn.rollback()
+            return "Incident is already open.", 409
+
+        conn.execute("""
+            UPDATE incident_clearances
+            SET active = 0
+            WHERE incident_clearance_id = ?
+              AND active = 1
+        """, (clearance["incident_clearance_id"],))
+        log_activity(
+            conn,
+            activity_class="INCIDENT",
+            activity_type="incident_reopened",
+            summary="Incident reopened by Program Manager",
+            user_id=actor["user_id"],
+            client_id=incident["client_id"],
+            shift_id=None,
+            related_table="incident_reports",
+            related_id=incident_id,
+            details=(
+                f"Incident ID: {incident_id}\n"
+                f"Reopened by Program Manager user ID: {actor['user_id']}"
+            ),
+            success=1,
+            storyline_visible=False,
+            event_datetime=_latest_incident_occurrence_audit_datetime(
+                conn, incident_id
+            ),
+        )
+        conn.commit()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    flash("Incident reopened.")
+    return redirect(url_for(
+        "incident_review_detail",
+        incident_id=incident_id,
+    ))
 
 
 @app.route(

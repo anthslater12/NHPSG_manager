@@ -97,6 +97,8 @@ class LeaveManagerAlertTests(unittest.TestCase):
                 staff_notices=[],
                 staff_notice_outstanding_count=0,
                 active_staff=[],
+                open_incidents=0,
+                recent_incidents=[],
             )
 
         self.assertIn("Pending Leave Requests", rendered)

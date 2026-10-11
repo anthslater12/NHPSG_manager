@@ -221,7 +221,7 @@
         </p>
     </div>
 
-    <div class="card">
+    <div class="card{% if open_incidents > 0 %} manager-alert-warning{% endif %}">
         <h3>Open Incidents</h3>
         <h1>{{ open_incidents }}</h1>
 

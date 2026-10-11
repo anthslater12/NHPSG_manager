@@ -13,6 +13,7 @@ import add_behaviour_occurrences_table as behaviour_schema
 import add_behaviour_setting_events_tables as setting_events_schema
 import add_worker_resources_table as worker_resources_schema
 import add_grocery_lists_tables as grocery_lists_schema
+import add_incident_clearances_table as incident_clearances_schema
 
 
 LATER_PUBLICATION_TABLES = (
@@ -200,6 +201,7 @@ class StaffNoticePublicationTests(unittest.TestCase):
             setting_events_schema.migrate(conn)
             worker_resources_schema.migrate(conn)
             grocery_lists_schema.migrate(conn)
+            incident_clearances_schema.migrate(conn)
 
             conn.executemany("""
                 INSERT INTO users (user_id, full_name, role, active)

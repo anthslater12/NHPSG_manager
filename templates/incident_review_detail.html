@@ -52,6 +52,32 @@
         <tr><th>Created</th><td>{{ incident.created_at }}</td></tr>
     </table>
 
+    <p>
+        <strong>Program Manager Clearance:</strong>
+        {% if incident_clearance %}
+            Cleared by {{ incident_clearance.cleared_by_name }}
+            on {{ incident_clearance.cleared_at_display }}.
+        {% else %}
+            Open - no Program Manager clearance recorded.
+        {% endif %}
+    </p>
+
+    {% if can_manage_incident_clearance %}
+        {% if incident_clearance %}
+            <form method="post" action="{{ url_for(
+                'reopen_incident', incident_id=incident.incident_id
+            ) }}">
+                <button type="submit">Reopen Incident</button>
+            </form>
+        {% else %}
+            <form method="post" action="{{ url_for(
+                'clear_incident', incident_id=incident.incident_id
+            ) }}">
+                <button type="submit">Clear Incident</button>
+            </form>
+        {% endif %}
+    {% endif %}
+
     {% if can_correct_incident %}
         <p>
             <a class="button" href="{{ url_for(

@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from unittest import mock
 
 import app
 
@@ -14,6 +15,27 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
         incident_tests.IncidentManagementEngagementTests.setUp(self)
         conn = sqlite3.connect(self.path)
         try:
+            conn.execute("""
+                CREATE TABLE shift_activities (
+                    shift_activity_id INTEGER PRIMARY KEY,
+                    shift_id INTEGER NOT NULL,
+                    recorded_by_user_id INTEGER NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    activity_description TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Recorded',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE shift_notes (
+                    note_id INTEGER PRIMARY KEY,
+                    shift_date TEXT NOT NULL,
+                    shift_type TEXT NOT NULL,
+                    client_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL
+                )
+            """)
             conn.execute(
                 "ALTER TABLE acknowledgements ADD COLUMN invalidated_at_utc TEXT"
             )
@@ -33,7 +55,7 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
         app.DB_NAME = self.old_db
         self.temp.cleanup()
 
-    def login(self, user_id):
+    def login(self, user_id, session_role=None):
         roles = {
             1: "Support Worker",
             2: "Program Manager",
@@ -43,7 +65,34 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
             7: "Behaviour Consultant",
         }
         with self.client.session_transaction() as session:
-            session.update(user_id=user_id, role=roles[user_id])
+            session.update(
+                user_id=user_id,
+                role=session_role or roles[user_id],
+            )
+
+    def dashboard(self):
+        with mock.patch.object(
+            app,
+            "_load_management_staff_notice_dashboard",
+            return_value={"dashboard": [], "outstanding_count": 0},
+        ), mock.patch.object(app, "get_manager_alerts", return_value=[]), mock.patch.object(
+            app, "get_active_shift_staff", return_value=[]
+        ):
+            return self.client.get("/dashboard")
+
+    def add_clearance(self, incident_id, user_id=2, active=1):
+        migration_conn = app.get_db()
+        migration_conn.close()
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("""
+                INSERT INTO incident_clearances
+                    (incident_id, cleared_by_user_id, cleared_at_utc, active)
+                VALUES (?, ?, '2026-08-02T18:00:00Z', ?)
+            """, (incident_id, user_id, active))
+            conn.commit()
+        finally:
+            conn.close()
 
     def rows(self, sql, parameters=()):
         conn = sqlite3.connect(self.path)
@@ -216,6 +265,265 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Incident correction saved successfully.", response.data)
+
+    def test_dashboard_counts_and_lists_only_uncleared_incidents(self):
+        self.add_incident(
+            501,
+            incident_date="2026-08-04",
+            incident_time="10:00",
+            incident_type="Aggression",
+            description="Cleared incident",
+        )
+        self.add_incident(
+            502,
+            incident_date="2026-08-05",
+            incident_time="10:00",
+            incident_type="Other",
+            description="Open incident",
+        )
+        self.login(2)
+
+        initial = self.dashboard()
+        self.assertEqual(initial.status_code, 200)
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            3,
+        )
+        self.assertIn(b"Aggression", initial.data)
+        self.assertIn(b"Other", initial.data)
+        self.assertIn(b"manager-alert-warning", initial.data)
+
+        cleared = self.client.post(
+            "/manager-review/incidents/501/clear"
+        )
+        self.assertEqual(cleared.status_code, 302)
+
+        after_clear = self.dashboard()
+        self.assertEqual(after_clear.status_code, 200)
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            2,
+        )
+        self.assertNotIn(b"Aggression", after_clear.data)
+        self.assertIn(b"Other", after_clear.data)
+
+        # The all-Incident list remains separate from the dashboard's open list.
+        all_incidents = self.client.get("/incidents")
+        self.assertEqual(all_incidents.status_code, 200)
+        self.assertIn(b"Aggression", all_incidents.data)
+
+        self.assertEqual(
+            self.client.post("/manager-review/incidents/502/clear").status_code,
+            302,
+        )
+        self.assertEqual(
+            self.client.post("/manager-review/incidents/41/clear").status_code,
+            302,
+        )
+        empty = self.dashboard()
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            0,
+        )
+        self.assertNotIn(b"manager-alert-warning", empty.data)
+
+    def test_all_review_roles_leave_open_count_unchanged(self):
+        self.login(2)
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            1,
+        )
+
+        for incident_id, user_id in zip((511, 512, 513, 514), (4, 3, 7, 2)):
+            self.add_incident(incident_id)
+            self.login(user_id)
+            response = self.client.post(
+                f"/manager-review/incidents/{incident_id}/review"
+            )
+            self.assertEqual(response.status_code, 302)
+
+        self.login(2)
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            5,
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT COUNT(*) AS count FROM incident_clearances "
+                "WHERE active = 1"
+            )[0]["count"],
+            0,
+        )
+
+    def test_only_program_manager_can_clear_or_reopen_and_database_role_wins(self):
+        incident_id = 521
+        self.add_incident(incident_id)
+        url = f"/manager-review/incidents/{incident_id}"
+        clear_url = f"{url}/clear"
+        reopen_url = f"{url}/reopen"
+
+        for user_id in (4, 3, 7, 1, 5):
+            with self.subTest(user_id=user_id):
+                self.login(user_id)
+                self.assertEqual(
+                    self.client.post(clear_url).status_code,
+                    403,
+                )
+
+        # A Support Worker cannot gain clearance authority by spoofing PM.
+        self.login(1, session_role="Program Manager")
+        self.assertEqual(self.client.post(clear_url).status_code, 403)
+
+        # A database PM remains authoritative even with a stale session role.
+        self.login(2, session_role="Admin")
+        self.assertEqual(self.client.post(clear_url).status_code, 302)
+        self.assertEqual(
+            self.rows(
+                "SELECT active FROM incident_clearances "
+                "WHERE incident_id = ?",
+                (incident_id,),
+            )[0]["active"],
+            1,
+        )
+        detail = self.client.get(url)
+        self.assertIn(b"Reopen Incident", detail.data)
+        self.assertNotIn(b">Clear Incident<", detail.data)
+
+        self.login(2, session_role="Support Worker")
+        self.assertEqual(self.client.post(reopen_url).status_code, 302)
+        self.assertEqual(
+            self.rows(
+                "SELECT active FROM incident_clearances "
+                "WHERE incident_id = ?",
+                (incident_id,),
+            )[0]["active"],
+            0,
+        )
+        audit_types = self.rows(
+            "SELECT activity_type, storyline_visible FROM activity_log "
+            "WHERE related_table = 'incident_reports' AND related_id = ? "
+            "AND activity_type IN ('incident_cleared', 'incident_reopened') "
+            "ORDER BY activity_id",
+            (incident_id,),
+        )
+        self.assertEqual(
+            [(row["activity_type"], row["storyline_visible"]) for row in audit_types],
+            [("incident_cleared", 0), ("incident_reopened", 0)],
+        )
+
+    def test_program_manager_can_clear_reopen_and_clear_again(self):
+        incident_id = 522
+        self.add_incident(incident_id)
+        self.login(2)
+        clear_url = f"/manager-review/incidents/{incident_id}/clear"
+        reopen_url = f"/manager-review/incidents/{incident_id}/reopen"
+        initial_count = app.get_dashboard_stats(2)["open_incidents"]
+
+        self.assertEqual(self.client.post(clear_url).status_code, 302)
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            initial_count - 1,
+        )
+
+        self.assertEqual(self.client.post(reopen_url).status_code, 302)
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            initial_count,
+        )
+
+        self.assertEqual(self.client.post(clear_url).status_code, 302)
+        clearances = self.rows(
+            "SELECT active FROM incident_clearances "
+            "WHERE incident_id = ? ORDER BY incident_clearance_id",
+            (incident_id,),
+        )
+        self.assertEqual([row["active"] for row in clearances], [0, 1])
+        self.assertEqual(
+            sum(row["active"] for row in clearances),
+            1,
+        )
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            initial_count - 1,
+        )
+
+    def test_correction_invalidates_clearance_but_noop_preserves_it(self):
+        self.login(2)
+        corrected_id = 531
+        self.add_incident(corrected_id)
+        self.assertEqual(
+            self.client.post(
+                f"/manager-review/incidents/{corrected_id}/clear"
+            ).status_code,
+            302,
+        )
+        review_id = self.add_review(corrected_id, user_id=3)
+        response = self.client.post(
+            f"/manager-review/incidents/{corrected_id}/correct",
+            data=self.correction_data(
+                corrected_id,
+                description="Substantively corrected incident",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.rows(
+                "SELECT active FROM incident_clearances "
+                "WHERE incident_id = ?",
+                (corrected_id,),
+            )[0]["active"],
+            0,
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT active FROM acknowledgements "
+                "WHERE acknowledgement_id = ?",
+                (review_id,),
+            )[0]["active"],
+            0,
+        )
+        correction_audit = self.rows(
+            "SELECT details FROM activity_log "
+            "WHERE activity_type = 'incident_management_corrected' "
+            "AND related_id = ?",
+            (corrected_id,),
+        )[0]
+        self.assertIn("Invalidated Program Manager clearance count: 1", correction_audit["details"])
+
+        preserved_id = 532
+        self.add_incident(preserved_id)
+        self.add_creation_audit(
+            preserved_id,
+            app.convert_vancouver_occurrence_input_to_utc(
+                "2026-08-02T10:00"
+            ),
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/manager-review/incidents/{preserved_id}/clear"
+            ).status_code,
+            302,
+        )
+        before_count = app.get_dashboard_stats(2)["open_incidents"]
+        noop = self.client.post(
+            f"/manager-review/incidents/{preserved_id}/correct",
+            data=self.correction_data(preserved_id),
+        )
+        self.assertEqual(noop.status_code, 400)
+        self.assertIn(b"No changes were detected.", noop.data)
+        self.assertEqual(
+            self.rows(
+                "SELECT active FROM incident_clearances "
+                "WHERE incident_id = ?",
+                (preserved_id,),
+            )[0]["active"],
+            1,
+        )
+        self.assertEqual(
+            app.get_dashboard_stats(2)["open_incidents"],
+            before_count,
+        )
 
     def test_legacy_incident_types_remain_selected_and_editable(self):
         for incident_id, legacy_type in (
