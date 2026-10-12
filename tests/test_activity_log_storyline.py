@@ -237,7 +237,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
 
         valid = self.client.post(
             "/incident/new",
-            data={**base_data, "incident_type": "Missing / Wandering"},
+            data={**base_data, "incident_type": "Elopement / Missing / Wandering"},
         )
         self.assertEqual(valid.status_code, 302)
         conn = sqlite3.connect(self.path)
@@ -245,7 +245,7 @@ class ActivityLogStorylineTests(unittest.TestCase):
             conn.execute(
                 "SELECT incident_type FROM incident_reports"
             ).fetchone()[0],
-            "Missing / Wandering",
+            "Elopement / Missing / Wandering",
         )
         conn.close()
 

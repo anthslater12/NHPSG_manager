@@ -530,6 +530,7 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
             (301, "Medical"),
             (302, "Behaviour"),
             (303, "Fall"),
+            (304, "Missing / Wandering"),
         ):
             with self.subTest(legacy_type=legacy_type):
                 self.add_incident(incident_id, incident_type=legacy_type)

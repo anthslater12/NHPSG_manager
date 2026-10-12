@@ -205,7 +205,7 @@ INCIDENT_TYPES = (
     "Property Damage",
     "Medical / Medication",
     "Injury / Accident",
-    "Missing / Wandering",
+    "Elopement / Missing / Wandering",
     "Other",
 )
 

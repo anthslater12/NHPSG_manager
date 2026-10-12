@@ -1601,7 +1601,7 @@ class ClientStorylineTests(unittest.TestCase):
         conn = sqlite3.connect(self.path)
         conn.execute(
             "UPDATE incident_reports SET incident_type = ? WHERE incident_id = ?",
-            ("Missing / Wandering", 47),
+            ("Elopement / Missing / Wandering", 47),
         )
         conn.commit()
         conn.close()
@@ -1615,13 +1615,13 @@ class ClientStorylineTests(unittest.TestCase):
         self.login(2, "Program Manager")
         detail = self.client.get("/manager-review/incidents/47")
         self.assertEqual(detail.status_code, 200)
-        self.assertIn(b"Missing / Wandering", detail.data)
+        self.assertIn(b"Elopement / Missing / Wandering", detail.data)
 
         storyline = self.client.get(
             f"/client/1/storyline?filter=Incident&date={self.today.isoformat()}"
         )
         self.assertEqual(storyline.status_code, 200)
-        self.assertIn(b"Incident created: Missing / Wandering", storyline.data)
+        self.assertIn(b"Incident created: Elopement / Missing / Wandering", storyline.data)
 
     def test_shift_note_details_render_from_activity_log_with_safe_history(self):
         self.login()
