@@ -2845,7 +2845,9 @@ def _latest_incident_occurrence_audit_datetime(conn, incident_id):
         WHERE related_table = 'incident_reports'
           AND related_id = ?
           AND activity_type IN (
-              'incident_created', 'incident_management_corrected'
+            'incident_created',
+            'incident_management_corrected',
+            'incident_worker_corrected'
           )
           AND event_datetime IS NOT NULL
         ORDER BY activity_id DESC
@@ -2996,6 +2998,215 @@ def get_management_incident_correction_context(conn, incident_id, user_id):
     return actor, dict(incident)
 
 
+def _resolve_incident_creation_context(conn, incident):
+    """Resolve the one authoritative creation shift for an Incident."""
+    rows = conn.execute("""
+        SELECT shift_id, user_id, client_id
+        FROM activity_log
+        WHERE activity_type = 'incident_created'
+          AND related_table = 'incident_reports'
+          AND related_id = ?
+    """, (incident["incident_id"],)).fetchall()
+    if len(rows) != 1:
+        raise PermissionError("Incident creation linkage is not unambiguous.")
+
+    creation = rows[0]
+    if (
+        creation["shift_id"] is None
+        or creation["user_id"] != incident["reported_by_user_id"]
+        or creation["client_id"] != incident["client_id"]
+    ):
+        raise PermissionError("Incident creation linkage is invalid.")
+
+    shift = conn.execute("""
+        SELECT shift_id, client_id, status
+        FROM shifts
+        WHERE shift_id = ?
+    """, (creation["shift_id"],)).fetchone()
+    if shift is None or shift["client_id"] != incident["client_id"]:
+        raise PermissionError("Incident source shift linkage is invalid.")
+    return dict(creation), dict(shift)
+
+
+def get_worker_incident_correction_context(conn, shift_id, incident_id, user_id):
+    """Return the current active-shift context for worker Incident correction."""
+    actor = get_active_authenticated_user(conn, user_id)
+    if actor["role"] != "Support Worker":
+        raise PermissionError(
+            "Only the original Support Worker may correct this Incident."
+        )
+
+    incident = conn.execute("""
+        SELECT ir.*, c.client_name
+        FROM incident_reports ir
+        JOIN clients c ON c.client_id = ir.client_id
+        WHERE ir.incident_id = ?
+    """, (incident_id,)).fetchone()
+    if incident is None:
+        raise LookupError("Incident not found.")
+
+    if incident["reported_by_user_id"] != actor["user_id"]:
+        raise PermissionError(
+            "Only the original Support Worker may correct this Incident."
+        )
+
+    creation, source_shift = _resolve_incident_creation_context(
+        conn, incident
+    )
+    if creation["shift_id"] != shift_id:
+        raise PermissionError(
+            "Incident correction must use the original Incident shift."
+        )
+
+    raw_selected_id = session.get(DOCUMENTATION_CONTEXT_SESSION_KEY)
+    selected_id = _session_documentation_shift_id()
+    if raw_selected_id is not None and selected_id is None:
+        _clear_documentation_shift_id()
+        raise DocumentationContextUnavailable()
+    if selected_id != source_shift["shift_id"]:
+        raise PermissionError(
+            "Incident correction requires the selected original shift."
+        )
+
+    documentation_context = get_worker_documentation_shift_context(
+        conn, source_shift["shift_id"], actor["user_id"]
+    )
+    if documentation_context is None or (
+        documentation_context["documentation_access"] != (
+            DOCUMENTATION_ACCESS_ACTIVE
+        )
+        or documentation_context.get("shift_status") != "Open"
+        or documentation_context["client_id"] != incident["client_id"]
+    ):
+        raise PermissionError(
+            "Incident correction requires the worker's open active shift."
+        )
+
+    reviewed = conn.execute("""
+        SELECT 1
+        FROM acknowledgements
+        WHERE source_table = 'incident_reports'
+          AND source_id = ?
+          AND acknowledgement_type = 'Review'
+          AND active = 1
+        LIMIT 1
+    """, (incident_id,)).fetchone()
+    if reviewed is not None:
+        raise PermissionError(
+            "Reviewed Incidents cannot be corrected by a worker."
+        )
+    if get_active_incident_clearance(conn, incident_id) is not None:
+        raise PermissionError(
+            "Cleared Incidents cannot be corrected by a worker."
+        )
+
+    incident = dict(incident)
+    incident["_authoritative_event_datetime"] = (
+        _latest_incident_occurrence_audit_datetime(conn, incident_id)
+    )
+    return actor, documentation_context, incident, creation
+
+
+def get_worker_shift_incidents(conn, shift_id, user_id):
+    """Return this worker's unambiguously linked Incidents for one shift."""
+    required_tables = {"incident_reports", "acknowledgements", "incident_clearances"}
+    existing_tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name IN (?, ?, ?)",
+            tuple(required_tables),
+        ).fetchall()
+    }
+    if existing_tables != required_tables:
+        return []
+
+    try:
+        actor = get_active_authenticated_user(conn, user_id)
+    except PermissionError:
+        return []
+    if actor["role"] != "Support Worker":
+        return []
+    if _session_documentation_shift_id() != shift_id:
+        return []
+
+    documentation_context = get_worker_documentation_shift_context(
+        conn, shift_id, actor["user_id"]
+    )
+    if documentation_context is None or (
+        documentation_context["documentation_access"] != (
+            DOCUMENTATION_ACCESS_ACTIVE
+        )
+        or documentation_context.get("shift_status") != "Open"
+    ):
+        return []
+
+    rows = conn.execute("""
+        SELECT
+            ir.*,
+            c.client_name,
+            al.shift_id AS creation_shift_id,
+            EXISTS (
+                SELECT 1
+                FROM acknowledgements ack
+                WHERE ack.source_table = 'incident_reports'
+                  AND ack.source_id = ir.incident_id
+                  AND ack.acknowledgement_type = 'Review'
+                  AND ack.active = 1
+            ) AS has_active_review,
+            EXISTS (
+                SELECT 1
+                FROM incident_clearances ic
+                WHERE ic.incident_id = ir.incident_id
+                  AND ic.active = 1
+            ) AS has_active_clearance
+        FROM incident_reports ir
+        JOIN clients c ON c.client_id = ir.client_id
+        JOIN activity_log al
+          ON al.activity_type = 'incident_created'
+         AND al.related_table = 'incident_reports'
+         AND al.related_id = ir.incident_id
+         AND al.shift_id = ?
+         AND al.user_id = ir.reported_by_user_id
+         AND al.client_id = ir.client_id
+        JOIN shifts source_shift
+          ON source_shift.shift_id = al.shift_id
+         AND source_shift.client_id = ir.client_id
+        WHERE ir.reported_by_user_id = ?
+          AND c.active = 1
+          AND (
+              SELECT COUNT(*)
+              FROM activity_log creation_audit
+              WHERE creation_audit.activity_type = 'incident_created'
+                AND creation_audit.related_table = 'incident_reports'
+                AND creation_audit.related_id = ir.incident_id
+          ) = 1
+        ORDER BY ir.incident_date DESC, ir.incident_time DESC,
+                 ir.incident_id DESC
+    """, (shift_id, actor["user_id"])).fetchall()
+
+    incidents = []
+    for row in rows:
+        incident = dict(row)
+        incident["can_correct"] = False
+        if incident["has_active_review"]:
+            incident["correction_status"] = "Reviewed - locked"
+        elif incident["has_active_clearance"]:
+            incident["correction_status"] = "Cleared - locked"
+        else:
+            try:
+                get_worker_incident_correction_context(
+                    conn, shift_id, incident["incident_id"], actor["user_id"]
+                )
+            except (DocumentationContextUnavailable, LookupError, PermissionError):
+                incident["correction_status"] = "Not available"
+            else:
+                incident["can_correct"] = True
+                incident["correction_status"] = "Correct"
+        incidents.append(incident)
+    return incidents
+
+
 def validate_incident_clearance_authority(conn, user_id):
     """Return an active Program Manager allowed to clear Incidents."""
     actor = get_active_authenticated_user(conn, user_id)
@@ -3084,6 +3295,37 @@ def _incident_correction_audit_details(
         f"Invalidated Program Manager clearance count: "
         f"{len(invalidated_clearance_ids)}",
     ))
+    return "\n".join(lines)
+
+
+def _incident_worker_correction_audit_details(
+    incident_id,
+    client_id,
+    worker_user_id,
+    shift_id,
+    changed_fields,
+    before,
+    after,
+):
+    lines = [
+        f"Incident ID: {incident_id}",
+        f"Worker correction actor user ID: {worker_user_id}",
+        f"Original shift ID: {shift_id}",
+        f"Client ID: {client_id}",
+        "Changed fields: " + (
+            ", ".join(changed_fields) if changed_fields else "None"
+        ),
+        "Before snapshot:",
+    ]
+    lines.extend(
+        f"{field}: {before[field]!r}"
+        for field in INCIDENT_CORRECTION_STATE_FIELDS
+    )
+    lines.append("After snapshot:")
+    lines.extend(
+        f"{field}: {after[field]!r}"
+        for field in INCIDENT_CORRECTION_STATE_FIELDS
+    )
     return "\n".join(lines)
 
 
@@ -24822,6 +25064,14 @@ def shift_dashboard(shift_id):
         sleep_authorized = True
         recent_sleep_events = get_sleep_events(conn, shift_id)[:5]
 
+    worker_incidents = []
+    try:
+        worker_incidents = get_worker_shift_incidents(
+            conn, shift_id, session["user_id"]
+        )
+    except (DocumentationContextUnavailable, PermissionError):
+        pass
+
     conn.close()
 
     return render_template(
@@ -24858,7 +25108,8 @@ def shift_dashboard(shift_id):
             documentation_context_alternatives
         ),
         behaviour_in_progress_records=behaviour_in_progress_records,
-        activity_in_progress_records=activity_in_progress_records
+        activity_in_progress_records=activity_in_progress_records,
+        worker_incidents=worker_incidents
     )
     
 
@@ -25877,7 +26128,8 @@ def client_storyline(client_id):
                     "WHERE al.related_table = 'incident_reports' "
                     "AND al.related_id = ir.incident_id "
                     "AND al.activity_type IN ("
-                    "'incident_created', 'incident_management_corrected'"
+                    "'incident_created', 'incident_management_corrected', "
+                    "'incident_worker_corrected'"
                     ") AND al.event_datetime IS NOT NULL "
                     "ORDER BY al.activity_id DESC LIMIT 1"
                     ") AS _authoritative_event_datetime "
@@ -28811,6 +29063,211 @@ def incident_new():
         )
     finally:
         conn.close()
+
+@app.route(
+    "/shift/<int:shift_id>/incident/<int:incident_id>/edit",
+    methods=["GET", "POST"]
+)
+def incident_worker_correction(shift_id, incident_id):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_db()
+    incident = None
+    current_snapshot = None
+    try:
+        actor, documentation_context, incident, creation = (
+            get_worker_incident_correction_context(
+                conn, shift_id, incident_id, session["user_id"]
+            )
+        )
+        current_snapshot = _incident_correction_state(incident)
+
+        if request.method == "GET":
+            values = {
+                **current_snapshot,
+                "repeated_hour_choice": (
+                    _incident_repeated_hour_choice_for_source(incident)
+                ),
+            }
+            return render_template(
+                "incident_worker_edit.html",
+                incident=incident,
+                shift=documentation_context,
+                values=values,
+                original_snapshot=current_snapshot,
+                incident_type_options=(
+                    _incident_type_options_for_correction(
+                        incident["incident_type"]
+                    )
+                ),
+                error=None,
+            )
+
+        values = _incident_correction_form_values(
+            request.form, current_snapshot
+        )
+        submitted_snapshot, occurrence_utc = (
+            _incident_correction_values_from_form(
+                request.form, incident, current_snapshot
+            )
+        )
+        submitted_state = {
+            **submitted_snapshot,
+            "occurrence_utc": occurrence_utc,
+        }
+        original_snapshot = _incident_correction_original_snapshot(
+            request.form
+        )
+
+        conn.execute("BEGIN IMMEDIATE")
+        actor, documentation_context, incident, creation = (
+            get_worker_incident_correction_context(
+                conn, shift_id, incident_id, session["user_id"]
+            )
+        )
+        current_snapshot = _incident_correction_state(incident)
+        if current_snapshot != original_snapshot:
+            raise IncidentCorrectionStaleError(
+                "This Incident changed after the correction form was opened. "
+                "Reload the form and try again."
+            )
+
+        if current_snapshot == submitted_state:
+            conn.rollback()
+            return render_template(
+                "incident_worker_edit.html",
+                incident=incident,
+                shift=documentation_context,
+                values=values,
+                original_snapshot=current_snapshot,
+                incident_type_options=(
+                    _incident_type_options_for_correction(
+                        incident["incident_type"]
+                    )
+                ),
+                error=(
+                    "No changes were detected. The Incident already matches "
+                    "the information entered."
+                ),
+            ), 400
+
+        changed_fields = [
+            field for field in INCIDENT_CORRECTION_FIELDS
+            if current_snapshot[field] != submitted_state[field]
+        ]
+        if current_snapshot["occurrence_utc"] != submitted_state[
+            "occurrence_utc"
+        ]:
+            changed_fields.append("occurrence_utc")
+
+        conn.execute("""
+            UPDATE incident_reports
+            SET incident_date = ?,
+                incident_time = ?,
+                location = ?,
+                incident_type = ?,
+                description = ?,
+                actions_taken = ?,
+                witnesses = ?,
+                injuries = ?,
+                injury_details = ?
+            WHERE incident_id = ?
+        """, (
+            submitted_state["incident_date"],
+            submitted_state["incident_time"],
+            submitted_state["location"],
+            submitted_state["incident_type"],
+            submitted_state["description"],
+            submitted_state["actions_taken"],
+            submitted_state["witnesses"],
+            submitted_state["injuries"],
+            submitted_state["injury_details"],
+            incident_id,
+        ))
+        log_activity(
+            conn,
+            activity_class="INCIDENT",
+            activity_type="incident_worker_corrected",
+            summary="Incident corrected by Support Worker",
+            user_id=actor["user_id"],
+            client_id=incident["client_id"],
+            shift_id=creation["shift_id"],
+            related_table="incident_reports",
+            related_id=incident_id,
+            details=_incident_worker_correction_audit_details(
+                incident_id,
+                incident["client_id"],
+                actor["user_id"],
+                creation["shift_id"],
+                changed_fields,
+                current_snapshot,
+                submitted_state,
+            ),
+            success=1,
+            storyline_visible=False,
+            event_datetime=occurrence_utc,
+        )
+        conn.commit()
+        flash("Incident correction saved successfully.")
+        return redirect(url_for("shift_dashboard", shift_id=shift_id))
+    except IncidentCorrectionStaleError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return render_template(
+            "incident_worker_edit.html",
+            incident=incident,
+            shift=documentation_context if incident is not None else None,
+            values=_incident_correction_form_values(
+                request.form,
+                current_snapshot or {},
+            ),
+            original_snapshot=current_snapshot or {},
+            incident_type_options=(
+                _incident_type_options_for_correction(
+                    incident["incident_type"]
+                )
+            ) if incident is not None else INCIDENT_TYPES,
+            error=str(error),
+        ), 409
+    except DocumentationContextUnavailable:
+        if conn.in_transaction:
+            conn.rollback()
+        return _documentation_context_redirect()
+    except PermissionError:
+        if conn.in_transaction:
+            conn.rollback()
+        return "Access denied", 403
+    except LookupError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return str(error), 404
+    except ValueError as error:
+        if conn.in_transaction:
+            conn.rollback()
+        return render_template(
+            "incident_worker_edit.html",
+            incident=incident,
+            shift=documentation_context if incident is not None else None,
+            values=_incident_correction_form_values(
+                request.form,
+                current_snapshot or {},
+            ),
+            original_snapshot=current_snapshot or {},
+            incident_type_options=(
+                _incident_type_options_for_correction(
+                    incident["incident_type"]
+                )
+            ) if incident is not None else INCIDENT_TYPES,
+            error=str(error),
+        ), 400
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 
 @app.route("/incidents")
 def incident_list():

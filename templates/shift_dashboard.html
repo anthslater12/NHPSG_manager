@@ -180,6 +180,40 @@
 </div>
 {% endif %}
 
+{% if worker_incidents %}
+<div class="card">
+    <h3>Incidents this Shift</h3>
+    <table>
+        <tr>
+            <th>Time</th>
+            <th>Incident Type</th>
+            <th>Description</th>
+            <th>Status</th>
+            <th>Action</th>
+        </tr>
+        {% for incident in worker_incidents %}
+        <tr>
+            <td>{{ incident.incident_time }}</td>
+            <td>{{ incident.incident_type }}</td>
+            <td>{{ incident.description }}</td>
+            <td>{{ incident.correction_status }}</td>
+            <td>
+                {% if incident.can_correct %}
+                    <a href="{{ url_for(
+                        'incident_worker_correction',
+                        shift_id=shift.shift_id,
+                        incident_id=incident.incident_id
+                    ) }}">Correct</a>
+                {% else %}
+                    Not available
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
 <div class="card">
     <h3>Staff Notes for this Shift</h3>
 
