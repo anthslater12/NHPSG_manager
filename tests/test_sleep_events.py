@@ -1,7 +1,9 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import add_sleep_events_table
 import add_sleep_events_note
@@ -124,10 +126,26 @@ class SleepEventsTests(unittest.TestCase):
 
     def test_assigned_worker_records_fell_asleep_with_one_visible_audit(self):
         self.login(1)
-        response = self.post("fell_asleep", note="Settled")
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.post("fell_asleep", note="Settled")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type, client_id, shift_id, recorded_by_user_id FROM sleep_events"), [("fell_asleep", 2, 10, 1)])
-        self.assertEqual(self.rows("SELECT activity_type, summary, client_id, shift_id, user_id, related_table, related_id, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_fell_asleep", "Client fell asleep", 2, 10, 1, "sleep_events", 1, "2026-08-02T15:00:00Z", "Note: Settled", 1)])
+        self.assertEqual(
+            self.rows(
+                "SELECT activity_type, summary, client_id, shift_id, user_id, "
+                "related_table, related_id, activity_datetime, event_datetime, "
+                "details, storyline_visible FROM activity_log"
+            ),
+            [(
+                "sleep_fell_asleep", "Client fell asleep", 2, 10, 1,
+                "sleep_events", 1, "2026-10-20T16:00:00Z",
+                "2026-08-02T15:00:00Z", "Note: Settled", 1
+            )],
+        )
 
     def test_sleep_note_is_trimmed_and_storyline_visible(self):
         self.login(1)
@@ -189,10 +207,25 @@ class SleepEventsTests(unittest.TestCase):
 
     def test_assigned_worker_records_woke_up_without_prior_event(self):
         self.login(1)
-        response = self.post("woke_up", note="Awake and asking for breakfast")
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.post("woke_up", note="Awake and asking for breakfast")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.rows("SELECT event_type FROM sleep_events"), [("woke_up",)])
-        self.assertEqual(self.rows("SELECT activity_type, event_datetime, details, storyline_visible FROM activity_log"), [("sleep_woke_up", "2026-08-02T15:00:00Z", "Note: Awake and asking for breakfast", 1)])
+        self.assertEqual(
+            self.rows(
+                "SELECT activity_type, activity_datetime, event_datetime, "
+                "details, storyline_visible FROM activity_log"
+            ),
+            [(
+                "sleep_woke_up", "2026-10-20T16:00:00Z",
+                "2026-08-02T15:00:00Z",
+                "Note: Awake and asking for breakfast", 1
+            )],
+        )
 
     def test_wake_note_is_stored_and_logged(self):
         self.login(1)
@@ -244,7 +277,12 @@ class SleepEventsTests(unittest.TestCase):
 
     def test_eligible_own_sleep_event_shows_correct_and_saves_in_place(self):
         self.login(1)
-        self.post("fell_asleep", event_local="2026-08-02T08:00", note="Settled")
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            self.post("fell_asleep", event_local="2026-08-02T08:00", note="Settled")
         sleep_event_id = self.rows("SELECT sleep_event_id FROM sleep_events")[0][0]
         edit_url = f"/shift/10/sleep/{sleep_event_id}/edit"
 
@@ -252,10 +290,15 @@ class SleepEventsTests(unittest.TestCase):
         self.assertIn(b"Correct", page.data)
         self.assertEqual(self.client.get(edit_url).status_code, 200)
         self.assertIn(b"Correct Sleep Entry", self.client.get(edit_url).data)
-        response = self.client.post(
-            edit_url,
-            data={"event_local": "2026-08-02T09:00", "note": "Settled after correction"},
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                edit_url,
+                data={"event_local": "2026-08-02T09:00", "note": "Settled after correction"},
+            )
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.location, "/shift/10/sleep")
         result = self.client.get(response.location)
@@ -270,10 +313,24 @@ class SleepEventsTests(unittest.TestCase):
         )
         self.assertEqual(
             self.rows(
-                "SELECT activity_type, storyline_visible FROM activity_log "
+                "SELECT activity_type, storyline_visible, activity_datetime, "
+                "event_datetime FROM activity_log "
                 "ORDER BY activity_id"
             ),
-            [("sleep_fell_asleep", 1), ("sleep_event_updated", 0)],
+            [
+                ("sleep_fell_asleep", 1, "2026-10-20T16:00:00Z", "2026-08-02T15:00:00Z"),
+                ("sleep_event_updated", 0, "2026-10-20T16:00:00Z", "2026-08-02T16:00:00Z"),
+            ],
+        )
+        self.assertNotEqual(
+            self.rows(
+                "SELECT activity_datetime, event_datetime FROM activity_log "
+                "WHERE activity_type = 'sleep_event_updated'"
+            )[0][0],
+            self.rows(
+                "SELECT activity_datetime, event_datetime FROM activity_log "
+                "WHERE activity_type = 'sleep_event_updated'"
+            )[0][1],
         )
 
     def test_newly_recorded_sleep_event_is_correctable_with_sleep_authorization(self):

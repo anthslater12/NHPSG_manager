@@ -1806,6 +1806,39 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertTrue(all(position >= 0 for position in positions))
         self.assertEqual(positions, sorted(positions, reverse=False))
 
+    def test_mixed_event_modules_use_occurrence_time_for_order_and_date_filter(self):
+        self.login()
+        yesterday = self.today - timedelta(days=1)
+        mixed_events = (
+            ("incident_created", "Incident occurrence", 10),
+            ("sleep_woke_up", "Sleep occurrence", 11),
+            ("food_fluid_entry_created", "Food occurrence", 12),
+            ("toileting_event_created", "Toileting occurrence", 13),
+            ("behaviour_occurrence_created", "Behaviour occurrence", 14),
+            ("shift_activity_created", "Activity occurrence", 15),
+        )
+        for activity_type, summary, hour in mixed_events:
+            self.add_event(
+                activity_type,
+                summary,
+                when=f"{self.today} 23:00:00",
+                event_datetime=self.event_utc(yesterday, hour, 0),
+            )
+        self.add_event(
+            "incident_created",
+            "Different occurrence date",
+            when=f"{yesterday} 23:30:00",
+            event_datetime=self.event_utc(self.today, 9, 0),
+        )
+
+        page = self.client.get(
+            f"/client/1/storyline?date={yesterday.isoformat()}"
+        ).data.decode()
+        positions = [page.find(summary) for _, summary, _ in mixed_events]
+        self.assertTrue(all(position >= 0 for position in positions))
+        self.assertEqual(positions, sorted(positions, reverse=True))
+        self.assertNotIn("Different occurrence date", page)
+
     def test_authoritative_activity_start_time_controls_storyline_order(self):
         self.add_shift_activity(
             50, start_time="09:00", description="Authoritative ordering Activity"

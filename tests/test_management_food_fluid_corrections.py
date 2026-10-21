@@ -1,5 +1,7 @@
 import sqlite3
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
 import app
 from tests import test_food_fluid_corrections as worker_corrections
@@ -214,9 +216,14 @@ class ManagementFoodFluidCorrectionTests(unittest.TestCase):
         before = self.row(1)
 
         self.login(2, session_role="Program Manager")
-        response = self.client.post(
-            self.edit_url(), data=self.payload()
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                self.edit_url(), data=self.payload()
+            )
         self.assertEqual(response.status_code, 302)
         after = self.row(1)
         self.assertEqual(after["food_fluid_entry_id"], before["food_fluid_entry_id"])
@@ -245,6 +252,9 @@ class ManagementFoodFluidCorrectionTests(unittest.TestCase):
         self.assertEqual(audit["related_table"], "food_fluid_entries")
         self.assertEqual(audit["related_id"], 1)
         self.assertEqual(audit["storyline_visible"], 0)
+        self.assertEqual(audit["activity_datetime"], "2026-10-20T16:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2024-01-15T17:30:00Z")
+        self.assertNotEqual(audit["activity_datetime"], audit["event_datetime"])
         self.assertIn("Original recorder user ID: 4", audit["details"])
         self.assertIn("Previous values:", audit["details"])
         self.assertIn("New values:", audit["details"])

@@ -432,6 +432,55 @@ class PostShiftDocumentationPhase3Tests(unittest.TestCase):
             {(row[3], row[4]) for row in logs},
             set(source_ids.items())
         )
+        audit_times = {
+            row[3]: (row[0], row[1])
+            for row in conn.execute(
+                "SELECT activity_type, activity_datetime, event_datetime, "
+                "related_table FROM activity_log ORDER BY activity_id"
+            )
+        }
+        expected_audit_times = {
+            "sleep_events": (
+                "sleep_woke_up", "2026-08-06T18:59:59Z",
+                "2026-08-06T15:30:00Z"
+            ),
+            "food_fluid_entries": (
+                "food_fluid_entry_created", "2026-08-06T18:59:59Z",
+                "2026-08-06T16:30:00Z"
+            ),
+            "toileting_events": (
+                "toileting_event_created", "2026-08-06T18:59:59Z",
+                "2026-08-06T17:30:00Z"
+            ),
+            "shift_activities": (
+                "shift_activity_created", "2026-08-06T18:59:59Z",
+                "2026-08-06T18:30:00Z"
+            ),
+            "behaviour_occurrences": (
+                "behaviour_occurrence_created", "2026-08-06T18:59:59Z",
+                "2026-08-06T20:30:00Z"
+            ),
+        }
+        self.assertEqual(
+            audit_times,
+            {
+                table: (activity_type, activity_datetime)
+                for table, (activity_type, activity_datetime, _)
+                in expected_audit_times.items()
+            }
+        )
+        for table, (activity_type, activity_datetime, event_datetime) in (
+            expected_audit_times.items()
+        ):
+            audit = conn.execute(
+                "SELECT activity_datetime, event_datetime "
+                "FROM activity_log WHERE activity_type = ?",
+                (activity_type,),
+            ).fetchone()
+            self.assertEqual(audit[0], activity_datetime, table)
+            self.assertEqual(audit[1], event_datetime, table)
+            if event_datetime is not None:
+                self.assertNotEqual(audit[0], audit[1], table)
         conn.close()
 
     def test_selected_context_validation_failures_write_no_source_or_log(self):

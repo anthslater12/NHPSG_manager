@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 import app
@@ -706,10 +707,15 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
         review_id = self.add_review()
         self.add_note_and_action()
         self.login(2)
-        response = self.client.post(
-            "/manager-review/incidents/41/correct",
-            data=self.correction_data(description="Reviewed correction"),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                "/manager-review/incidents/41/correct",
+                data=self.correction_data(description="Reviewed correction"),
+            )
         self.assertEqual(response.status_code, 302)
         review = self.rows(
             "SELECT * FROM acknowledgements WHERE acknowledgement_id = ?",
@@ -725,6 +731,9 @@ class ManagementIncidentCorrectionTests(unittest.TestCase):
         )[0]
         self.assertEqual(audit["storyline_visible"], 0)
         self.assertEqual(audit["related_id"], 41)
+        self.assertEqual(audit["activity_datetime"], "2026-10-20T16:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2026-08-02T17:00:00Z")
+        self.assertNotEqual(audit["activity_datetime"], audit["event_datetime"])
         self.assertIn("Original reporter user ID: 1", audit["details"])
         self.assertIn("Correction reason: Corrected by management", audit["details"])
         self.assertIn("Before snapshot:", audit["details"])

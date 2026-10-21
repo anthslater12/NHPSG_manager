@@ -1,8 +1,9 @@
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import add_toileting_events_table
 import app
@@ -181,10 +182,15 @@ class ManagementToiletingCorrectionTests(unittest.TestCase):
         conn.close()
         self.add_review()
         self.login()
-        response = self.client.post(
-            "/manager-review/toileting/1/correct",
-            data=self.correction_data(),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                "/manager-review/toileting/1/correct",
+                data=self.correction_data(),
+            )
         self.assertEqual(response.status_code, 302)
         self.assertIn("/manager-review/toileting/2", response.location)
         conn = self.db()
@@ -196,7 +202,8 @@ class ManagementToiletingCorrectionTests(unittest.TestCase):
             "invalidation_reason FROM acknowledgements WHERE source_id = 1"
         ).fetchone()
         audit = conn.execute(
-            "SELECT activity_type, storyline_visible FROM activity_log "
+            "SELECT activity_type, storyline_visible, activity_datetime, "
+            "event_datetime FROM activity_log "
             "WHERE activity_type = 'management_toileting_event_updated'"
         ).fetchone()
         conn.close()
@@ -217,6 +224,9 @@ class ManagementToiletingCorrectionTests(unittest.TestCase):
             "Toileting event corrected by management",
         )
         self.assertEqual(audit["storyline_visible"], 0)
+        self.assertEqual(audit["activity_datetime"], "2026-10-20T16:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2026-08-06T18:00:00Z")
+        self.assertNotEqual(audit["activity_datetime"], audit["event_datetime"])
 
     def test_each_management_role_can_get_and_post_correction(self):
         for event_id, user_id, role in (

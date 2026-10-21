@@ -1,6 +1,9 @@
 import sqlite3
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
+import app
 from tests import test_food_fluid_checkpoint_4 as checkpoint_4
 
 
@@ -258,10 +261,15 @@ class FoodFluidCorrectionTests(unittest.TestCase):
         conn.close()
 
         self.login(4)
-        response = self.client.post(
-            "/shift/10/food-fluid/1/edit",
-            data=self.correction_payload(),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                "/shift/10/food-fluid/1/edit",
+                data=self.correction_payload(),
+            )
         self.assertEqual(response.status_code, 302)
 
         storyline = self.client.get(
@@ -283,6 +291,11 @@ class FoodFluidCorrectionTests(unittest.TestCase):
         updated_audit = self.activity_rows()[-1]
         self.assertEqual(updated_audit["activity_type"], "food_fluid_event_updated")
         self.assertEqual(updated_audit["storyline_visible"], 0)
+        self.assertEqual(updated_audit["activity_datetime"], "2026-10-20T16:00:00Z")
+        self.assertEqual(updated_audit["event_datetime"], "2024-01-15T18:00:00Z")
+        self.assertNotEqual(
+            updated_audit["activity_datetime"], updated_audit["event_datetime"]
+        )
 
     def test_correction_allows_retrospective_event_before_actual_start(self):
         conn = self.connect()

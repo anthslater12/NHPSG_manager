@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 import app
@@ -198,6 +199,37 @@ class IncidentWorkerCorrectionTests(unittest.TestCase):
         self.assertEqual(self.source()["description"], "Incident details")
         self.assertEqual(self.worker_audit_count(), 0)
 
+    def test_incident_creation_audit_separates_action_and_occurrence_time(self):
+        self.login()
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                "/incident/new",
+                data={
+                    "incident_date": "2026-08-02",
+                    "incident_time": "11:00",
+                    "location": "Community Centre",
+                    "incident_type": "Medical / Medication",
+                    "description": "New incident details",
+                    "actions_taken": "Called nurse",
+                    "witnesses": "Worker",
+                    "injury_details": "",
+                },
+            )
+        self.assertEqual(response.status_code, 302)
+        audit = self.rows("""
+            SELECT activity_datetime, event_datetime, related_id
+            FROM activity_log
+            WHERE activity_type = 'incident_created'
+              AND related_id = 42
+        """)[0]
+        self.assertEqual(audit["activity_datetime"], "2026-10-20T16:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2026-08-02T18:00:00Z")
+        self.assertNotEqual(audit["activity_datetime"], audit["event_datetime"])
+
     def set_ambiguous_source(self, choice):
         event_datetime = app.convert_vancouver_occurrence_input_to_utc(
             "2025-11-02T01:30",
@@ -324,10 +356,15 @@ class IncidentWorkerCorrectionTests(unittest.TestCase):
         )
         self.assertEqual(self.client.get(url).status_code, 200)
 
-        response = self.client.post(
-            url,
-            data=self.correction_data(description="Corrected description"),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                url,
+                data=self.correction_data(description="Corrected description"),
+            )
         self.assertEqual(response.status_code, 302)
         self.assertIn("/shift/10", response.location)
 
@@ -341,7 +378,8 @@ class IncidentWorkerCorrectionTests(unittest.TestCase):
 
         audits = self.rows("""
             SELECT activity_type, user_id, client_id, shift_id,
-                   related_table, related_id, storyline_visible, details
+                   related_table, related_id, storyline_visible, details,
+                   activity_datetime, event_datetime
             FROM activity_log
             WHERE activity_type = 'incident_worker_corrected'
         """)
@@ -354,6 +392,11 @@ class IncidentWorkerCorrectionTests(unittest.TestCase):
             (1, 1, 10, "incident_reports", 41, 0),
         )
         self.assertIn("description", audits[0]["details"])
+        self.assertEqual(audits[0]["activity_datetime"], "2026-10-20T16:00:00Z")
+        self.assertEqual(audits[0]["event_datetime"], "2026-08-02T17:00:00Z")
+        self.assertNotEqual(
+            audits[0]["activity_datetime"], audits[0]["event_datetime"]
+        )
 
         creation = self.rows("""
             SELECT user_id, client_id, shift_id, related_table, related_id
