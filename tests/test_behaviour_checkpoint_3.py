@@ -3,7 +3,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from werkzeug.datastructures import MultiDict
+from unittest import mock
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,6 +138,39 @@ class BehaviourCheckpointThreeTests(unittest.TestCase):
         self.assertEqual(audit[7], "Status: Voided")
         self.assertNotIn("Entered twice", audit[7])
         self.assertNotIn("private original note", audit[7])
+
+    def test_void_audit_preserves_occurrence_time_separately_from_action_time(self):
+        conn = sqlite3.connect(self.path)
+        conn.executescript("""
+            ALTER TABLE activity_log ADD COLUMN storyline_visible
+                INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE activity_log ADD COLUMN event_datetime TEXT;
+        """)
+        conn.commit()
+        conn.close()
+
+        occurrence_id = self.insert_occurrence()
+        self.login(2)
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 18, 0, tzinfo=timezone.utc),
+        ):
+            response = self.void(occurrence_id, "Entered twice")
+        self.assertEqual(response.status_code, 302)
+
+        conn = sqlite3.connect(self.path)
+        audit = conn.execute("""
+            SELECT activity_datetime, event_datetime
+            FROM activity_log
+            WHERE activity_type = 'behaviour_occurrence_voided'
+        """).fetchone()
+        conn.close()
+        self.assertEqual(audit, (
+            "2026-10-20T18:00:00Z",
+            "2024-01-08T15:30:00Z",
+        ))
+        self.assertNotEqual(audit[0], audit[1])
 
     def test_reason_input_and_repeated_void_are_rejected_without_extra_audit(self):
         occurrence_id = self.insert_occurrence()

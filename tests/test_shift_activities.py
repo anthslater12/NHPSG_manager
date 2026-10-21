@@ -251,6 +251,18 @@ class ShiftActivitiesTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def add_activity_log_timestamp_columns(self):
+        conn = sqlite3.connect(self.database_path)
+        try:
+            conn.executescript("""
+                ALTER TABLE activity_log ADD COLUMN storyline_visible
+                    INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE activity_log ADD COLUMN event_datetime TEXT;
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
     def insert_activity(self, shift_id=10, user_id=1, description="Existing"):
         conn = sqlite3.connect(self.database_path)
         try:
@@ -837,19 +849,25 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
 
     def test_save_updates_activity_keeps_in_progress_and_audits_once(self):
+        self.add_activity_log_timestamp_columns()
         activity_id = self.insert_in_progress_activity()
         self.login(1)
         edit_url = f"/shift/10/activity/{activity_id}/edit"
-        response = self.client.post(
-            edit_url,
-            data=self.edit_payload(
-                activity_id,
-                action="save",
-                end_time="10:00",
-                t_selected="1",
-                activity_description="Updated draft",
-            ),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                edit_url,
+                data=self.edit_payload(
+                    activity_id,
+                    action="save",
+                    end_time="10:00",
+                    t_selected="1",
+                    activity_description="Updated draft",
+                ),
+            )
         self.assertEqual(response.status_code, 302)
         self.assertIn(f"/shift/10/activity/{activity_id}/edit", response.location)
         row = self.activity_row(activity_id)
@@ -860,7 +878,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         self.assertEqual(row["version_number"], 2)
         self.assertIsNone(row["completed_at_utc"])
         audits = self.rows("""
-            SELECT activity_type, details
+            SELECT activity_type, details, activity_datetime, event_datetime
             FROM activity_log ORDER BY activity_id
         """)
         self.assertEqual([audit["activity_type"] for audit in audits], [
@@ -868,6 +886,11 @@ class ShiftActivitiesTests(unittest.TestCase):
         ])
         self.assertIn("activity_description", audits[1]["details"])
         self.assertIn("Resulting version: 2", audits[1]["details"])
+        self.assertEqual(audits[1]["activity_datetime"], "2026-10-20T16:00:00Z")
+        self.assertEqual(audits[1]["event_datetime"], "2026-08-03T16:00:00Z")
+        self.assertNotEqual(
+            audits[1]["activity_datetime"], audits[1]["event_datetime"]
+        )
 
     def test_creator_can_correct_completed_activity_without_replacing_it(self):
         activity_id = self.insert_in_progress_activity(
@@ -1186,19 +1209,25 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
 
     def test_save_and_complete_persists_final_values_and_one_completion_audit(self):
+        self.add_activity_log_timestamp_columns()
         activity_id = self.insert_in_progress_activity(description="Draft")
         self.login(1)
-        response = self.client.post(
-            f"/shift/10/activity/{activity_id}/edit",
-            data=self.edit_payload(
-                activity_id,
-                action="complete",
-                end_time="11:00",
-                a_selected=None,
-                t_selected="1",
-                activity_description="Final activity",
-            ),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 17, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                f"/shift/10/activity/{activity_id}/edit",
+                data=self.edit_payload(
+                    activity_id,
+                    action="complete",
+                    end_time="11:00",
+                    a_selected=None,
+                    t_selected="1",
+                    activity_description="Final activity",
+                ),
+            )
         self.assertEqual(response.status_code, 302)
         self.assertIn("/shift/10/activity", response.location)
         row = self.activity_row(activity_id)
@@ -1214,12 +1243,18 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
         self.assertEqual(row["version_number"], 2)
         audits = self.rows(
-            "SELECT activity_type, details FROM activity_log ORDER BY activity_id"
+            "SELECT activity_type, details, activity_datetime, event_datetime "
+            "FROM activity_log ORDER BY activity_id"
         )
         self.assertEqual([audit["activity_type"] for audit in audits], [
             "shift_activity_created", "shift_activity_completed"
         ])
         self.assertIn("Status: In Progress -> Completed", audits[1]["details"])
+        self.assertEqual(audits[1]["activity_datetime"], "2026-10-20T17:00:00Z")
+        self.assertEqual(audits[1]["event_datetime"], "2026-08-03T16:00:00Z")
+        self.assertNotEqual(
+            audits[1]["activity_datetime"], audits[1]["event_datetime"]
+        )
 
     def test_invalid_completion_does_not_partially_persist(self):
         activity_id = self.insert_in_progress_activity()
@@ -1328,6 +1363,7 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
 
     def test_same_client_worker_can_complete_handover_and_preserves_original_context(self):
+        self.add_activity_log_timestamp_columns()
         conn = sqlite3.connect(self.database_path)
         try:
             conn.execute(
@@ -1359,13 +1395,18 @@ class ShiftActivitiesTests(unittest.TestCase):
         self.assertIn(b'name="action" value="complete"', response.data)
         self.assertNotIn(b'name="start_time"', response.data)
 
-        response = self.client.post(
-            handover_url,
-            data=self.handover_payload(
-                end_time="15:25",
-                closing_shift_id="11",
-            ),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 18, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                handover_url,
+                data=self.handover_payload(
+                    end_time="15:25",
+                    closing_shift_id="11",
+                ),
+            )
         self.assertEqual(response.status_code, 302)
         self.assertIn("/shift/11/activity", response.location)
 
@@ -1388,6 +1429,11 @@ class ShiftActivitiesTests(unittest.TestCase):
         """)[0]
         self.assertEqual(audit["user_id"], 2)
         self.assertEqual(audit["shift_id"], 10)
+        self.assertEqual(audit["activity_datetime"], "2026-10-20T18:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2026-08-03T21:40:00Z")
+        self.assertNotEqual(
+            audit["activity_datetime"], audit["event_datetime"]
+        )
         self.assertIn("Shift ID: 10", audit["details"])
         self.assertIn("Closing worker shift ID: 11", audit["details"])
         self.assertIn("Completion actor user ID: 2", audit["details"])

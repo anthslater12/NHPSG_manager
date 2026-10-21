@@ -9748,7 +9748,7 @@ def _behaviour_occurrence_edit_impl(
                         f"Resulting version: {resulting_version}"
                     ),
                     success=1, storyline_visible=True,
-                    event_datetime=completed_at_utc
+                    event_datetime=occurrence_utc
                 )
             else:
                 update_details = "Changed fields:\n" + change_text
@@ -9916,7 +9916,8 @@ def behaviour_occurrence_void(occurrence_id):
                 client_id=occurrence["client_id"],
                 related_table="behaviour_occurrences",
                 related_id=occurrence_id,
-                details="Status: Voided", success=1, storyline_visible=True
+                details="Status: Voided", success=1, storyline_visible=True,
+                event_datetime=occurrence["occurred_at_utc"]
             )
             conn.commit()
         except Exception:
@@ -11004,6 +11005,7 @@ def get_shift_activity_edit_context(
 
     activity = conn.execute("""
         SELECT sa.*, s.client_id AS activity_client_id,
+               s.shift_date,
                c.client_name, c.active AS client_active,
                s.status AS current_shift_status
         FROM shift_activities sa
@@ -25809,6 +25811,7 @@ def management_sleep_correction(sleep_event_id):
                 details=details,
                 success=1,
                 storyline_visible=False,
+                event_datetime=event_datetime,
             )
             conn.commit()
         except Exception:
@@ -28714,6 +28717,9 @@ def shift_activity_edit(shift_id, activity_id):
                 details=details,
                 success=1,
                 storyline_visible=True,
+                event_datetime=shift_activity_start_to_utc(
+                    current["shift_date"], candidate["start_time"]
+                ),
             )
             conn.commit()
         except Exception:
@@ -28863,6 +28869,9 @@ def shift_activity_handover_complete(shift_id, activity_id):
                 details=details,
                 success=1,
                 storyline_visible=True,
+                event_datetime=shift_activity_start_to_utc(
+                    current["activity_shift_date"], current["start_time"]
+                ),
             )
             conn.commit()
         except Exception:
@@ -31168,6 +31177,9 @@ def management_activity_correction(activity_id):
                 details=details,
                 success=1,
                 storyline_visible=False,
+                event_datetime=shift_activity_start_to_utc(
+                    current["shift_date"], candidate["start_time"]
+                ),
             )
             conn.commit()
         except Exception:
@@ -32133,7 +32145,8 @@ def void_food_fluid_entry(entry_id):
                 details=format_food_fluid_void_storyline_details(
                     entry["outcome"], void_reason
                 ),
-                success=1
+                success=1,
+                event_datetime=entry["event_at_utc"],
             )
             conn.commit()
         except Exception:

@@ -1,5 +1,7 @@
 import sqlite3
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
 import app
 
@@ -205,13 +207,18 @@ class ManagementSleepCorrectionTests(unittest.TestCase):
             "SELECT * FROM sleep_events WHERE sleep_event_id = 1"
         )
         self.login(2, "Admin")
-        response = self.client.post(
-            self.edit_url(1),
-            data=self.correction_data(
-                event_local="2026-08-02T09:00",
-                note="Management corrected note"
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 14, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                self.edit_url(1),
+                data=self.correction_data(
+                    event_local="2026-08-02T09:00",
+                    note="Management corrected note"
+                )
             )
-        )
         self.assertEqual(response.status_code, 302)
         after = self.row(
             "SELECT * FROM sleep_events WHERE sleep_event_id = 1"
@@ -235,6 +242,11 @@ class ManagementSleepCorrectionTests(unittest.TestCase):
         self.assertEqual(audit["related_table"], "sleep_events")
         self.assertEqual(audit["related_id"], 1)
         self.assertEqual(audit["storyline_visible"], 0)
+        self.assertEqual(audit["activity_datetime"], "2026-10-20T14:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2026-08-02T16:00:00Z")
+        self.assertNotEqual(
+            audit["activity_datetime"], audit["event_datetime"]
+        )
         self.assertIn("Changed fields: event_datetime, note", audit["details"])
         self.assertIn("Settled after music", audit["details"])
         self.assertIn("Management corrected note", audit["details"])

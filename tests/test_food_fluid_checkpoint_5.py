@@ -1,5 +1,7 @@
 import sqlite3
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
 from tests import test_food_fluid_checkpoint_4 as checkpoint_4
 
@@ -63,6 +65,18 @@ class FoodFluidCheckpoint5Tests(unittest.TestCase):
         result = dict(row) if row is not None else None
         conn.close()
         return result
+
+    def add_activity_log_timestamp_columns(self):
+        conn = self.connect()
+        try:
+            conn.executescript("""
+                ALTER TABLE activity_log ADD COLUMN storyline_visible
+                    INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE activity_log ADD COLUMN event_datetime TEXT;
+            """)
+            conn.commit()
+        finally:
+            conn.close()
 
     def void(self, entry_id, reason="Incorrect entry", **kwargs):
         return self.client.post(
@@ -198,8 +212,14 @@ class FoodFluidCheckpoint5Tests(unittest.TestCase):
             "submission_token",
         )
 
+        self.add_activity_log_timestamp_columns()
         self.login(2, session_role="Director")
-        response = self.void(1, "  Wrong client meal  ")
+        with mock.patch.object(
+            checkpoint_4.app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc),
+        ):
+            response = self.void(1, "  Wrong client meal  ")
         self.assertEqual(response.status_code, 302)
         after = self.row(1)
 
@@ -230,6 +250,11 @@ class FoodFluidCheckpoint5Tests(unittest.TestCase):
         self.assertEqual(activity["shift_id"], 10)
         self.assertEqual(activity["related_table"], "food_fluid_entries")
         self.assertEqual(activity["related_id"], 1)
+        self.assertEqual(activity["activity_datetime"], "2026-10-20T15:00:00Z")
+        self.assertEqual(activity["event_datetime"], before["event_at_utc"])
+        self.assertNotEqual(
+            activity["activity_datetime"], activity["event_datetime"]
+        )
         self.assertIn("Wrong client meal", activity["details"])
 
     def test_activity_failure_rolls_back_entry_and_log(self):

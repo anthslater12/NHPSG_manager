@@ -1,5 +1,7 @@
 import sqlite3
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
 import app
 
@@ -61,7 +63,8 @@ class BehaviourLifecyclePhaseFourTests(BehaviourLifecyclePhaseTwoTests):
     def activity_rows(self):
         conn = sqlite3.connect(self.path)
         rows = conn.execute(
-            "SELECT activity_type, details FROM activity_log ORDER BY activity_id"
+            "SELECT activity_type, details, activity_datetime, event_datetime "
+            "FROM activity_log ORDER BY activity_id"
         ).fetchall()
         conn.close()
         return rows
@@ -105,10 +108,15 @@ class BehaviourLifecyclePhaseFourTests(BehaviourLifecyclePhaseTwoTests):
         payload = self.edit_payload(occurrence)
         payload["notes"] = "Final unsaved notes"
         payload["aggression_towards_others"] = "1"
-        response = self.client.post(
-            f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit",
-            data=payload,
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 8, 3, 18, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                f"/shift/10/behaviour/{occurrence['behaviour_occurrence_id']}/edit",
+                data=payload,
+            )
         self.assertEqual(response.status_code, 302)
         completed = self.row()
         self.assertEqual(completed["status"], "Completed")
@@ -130,6 +138,19 @@ class BehaviourLifecyclePhaseFourTests(BehaviourLifecyclePhaseTwoTests):
         self.assertIn("New status: Completed", rows[1][1])
         self.assertIn("Completion actor user ID: 1", rows[1][1])
         self.assertIn("Resulting version: 2", rows[1][1])
+        self.assertEqual(rows[1][2], "2026-08-03T18:00:00Z")
+        self.assertEqual(rows[1][3], "2026-08-03T14:00:00Z")
+        self.assertNotEqual(rows[1][2], rows[1][3])
+
+        self.login()
+        storyline = self.client.get(
+            "/client/1/storyline?filter=Behaviour&date=2026-08-03"
+        )
+        self.assertEqual(storyline.status_code, 200)
+        self.assertIn(b"07:00", storyline.data)
+        self.assertEqual(
+            storyline.data.count(b'class="storyline-event"'), 1
+        )
 
     def test_save_and_complete_abc_requires_final_sections_and_duration(self):
         occurrence = self.create_in_progress()

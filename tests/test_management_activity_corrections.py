@@ -1,8 +1,9 @@
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import app
 
@@ -192,16 +193,21 @@ class ManagementActivityCorrectionTests(unittest.TestCase):
         activity_id = self.insert_completed_activity(user_id=2)
         before = self.activity_row(activity_id)
         self.login(6, "Admin")
-        response = self.client.post(
-            f"/manager-review/activities/{activity_id}/correct",
-            data=self.correction_payload(
-                activity_id,
-                version=2,
-                start_time="16:20",
-                end_time="16:30",
-                activity_description="Historical correction",
-            ),
-        )
+        with mock.patch.object(
+            app,
+            "get_application_now_utc",
+            return_value=datetime(2026, 10, 20, 19, 0, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                f"/manager-review/activities/{activity_id}/correct",
+                data=self.correction_payload(
+                    activity_id,
+                    version=2,
+                    start_time="16:20",
+                    end_time="16:30",
+                    activity_description="Historical correction",
+                ),
+            )
         self.assertEqual(response.status_code, 302)
         after = self.activity_row(activity_id)
         self.assertEqual(after["shift_activity_id"], before["shift_activity_id"])
@@ -220,6 +226,11 @@ class ManagementActivityCorrectionTests(unittest.TestCase):
         self.assertEqual(audit["shift_id"], 10)
         self.assertEqual(audit["related_id"], activity_id)
         self.assertEqual(audit["storyline_visible"], 0)
+        self.assertEqual(audit["activity_datetime"], "2026-10-20T19:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2026-08-03T23:20:00Z")
+        self.assertNotEqual(
+            audit["activity_datetime"], audit["event_datetime"]
+        )
         self.assertIn("Original recorder user ID: 2", audit["details"])
         self.assertIn("09:00", audit["details"])
         self.assertIn("16:20", audit["details"])
