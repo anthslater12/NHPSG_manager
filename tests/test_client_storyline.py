@@ -1151,6 +1151,11 @@ class ClientStorylineTests(unittest.TestCase):
             event_datetime="invalid UTC timestamp",
         )
         self.add_event(
+            "sleep_woke_up", "Canonical UTC fallback",
+            when=f"{selected}T08:30:00Z",
+            event_datetime="invalid UTC timestamp",
+        )
+        self.add_event(
             "sleep_woke_up", "After local midnight",
             when=f"{selected} 01:00:00",
             event_datetime=self.event_utc(selected, 1, 0),
@@ -1162,6 +1167,7 @@ class ClientStorylineTests(unittest.TestCase):
         self.assertNotIn(b"Before local midnight", page)
         self.assertIn(b"At local midnight", page)
         self.assertIn(b"Legacy local fallback", page)
+        self.assertIn(b"Canonical UTC fallback", page)
         self.assertIn(b"After local midnight", page)
 
     def test_empty_and_filtered_empty_states_render(self):

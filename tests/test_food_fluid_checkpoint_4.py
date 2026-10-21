@@ -365,7 +365,7 @@ class FoodFluidCheckpoint4Tests(unittest.TestCase):
         self.assertEqual(view["related_id"], 1)
         self.assertRegex(
             view["activity_datetime"],
-            r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$",
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
         )
         self.assertIn(b"Manager User", response.data)
 

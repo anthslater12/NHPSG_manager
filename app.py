@@ -2655,6 +2655,8 @@ def _storyline_local_datetime(event_datetime, activity_datetime):
     except (TypeError, ValueError):
         pass
     try:
+        if isinstance(activity_datetime, str) and activity_datetime.endswith("Z"):
+            return behaviour_utc_to_vancouver(activity_datetime)
         return datetime.strptime(
             activity_datetime,
             "%Y-%m-%d %H:%M:%S"
@@ -4570,7 +4572,7 @@ def get_food_fluid_view_history(conn, entry_id):
           AND al.related_table = 'food_fluid_entries'
           AND al.related_id = ?
           AND al.success = 1
-        ORDER BY al.activity_datetime ASC, al.activity_id ASC
+        ORDER BY datetime(al.activity_datetime) ASC, al.activity_id ASC
     """, (entry_id,)).fetchall()
 
 
@@ -9953,10 +9955,12 @@ def log_activity(
     event_datetime=None
 ):
     
-    local_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    activity_now = serialize_behaviour_utc(
+        get_application_now_utc().replace(microsecond=0)
+    )
 
     values = (
-        local_now,
+        activity_now,
         activity_class,
         activity_type,
         user_id,
@@ -22845,7 +22849,7 @@ def get_management_inbox(current_user_id):
             u.full_name
         FROM activity_log al
         LEFT JOIN users u ON al.user_id = u.user_id
-        ORDER BY al.activity_datetime DESC
+        ORDER BY datetime(al.activity_datetime) DESC
         LIMIT 5
     """).fetchall()
 
@@ -23586,7 +23590,7 @@ def get_dashboard_stats(current_user_id):
     recent_activity = conn.execute("""
         SELECT COUNT(*) AS count
         FROM activity_log
-        WHERE activity_datetime >= datetime('now', '-1 day')
+        WHERE datetime(activity_datetime) >= datetime('now', '-1 day')
     """).fetchone()["count"]
 
     conn.close()
@@ -35153,7 +35157,7 @@ def action_detail(action_id):
             )
         )
 
-        ORDER BY al.activity_datetime
+        ORDER BY datetime(al.activity_datetime)
     """, (action_id, action_id)).fetchall()
 
     source_context = get_action_source_context(
@@ -40947,7 +40951,7 @@ def activity_log():
         FROM activity_log al
         LEFT JOIN users u ON al.user_id = u.user_id
         LEFT JOIN clients c ON al.client_id = c.client_id
-        ORDER BY al.activity_datetime DESC
+        ORDER BY datetime(al.activity_datetime) DESC
         LIMIT 200
     """).fetchall()
 

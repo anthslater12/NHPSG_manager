@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -542,6 +543,34 @@ class ShiftActivitiesTests(unittest.TestCase):
         )
         self.assertTrue(all(e["recorded_by_user_id"] == 1 for e in entries))
         self.assertTrue(all(e["created_at"] for e in entries))
+
+    def test_retrospective_activity_separates_audit_and_occurrence_time(self):
+        self.login(1)
+        conn = sqlite3.connect(self.database_path)
+        conn.executescript("""
+            ALTER TABLE activity_log ADD COLUMN storyline_visible
+                INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE activity_log ADD COLUMN event_datetime TEXT;
+        """)
+        conn.commit()
+        conn.close()
+        frozen_now = datetime(2026, 10, 18, 18, 0, tzinfo=timezone.utc)
+        with mock.patch.object(app, "get_application_now_utc", return_value=frozen_now):
+            response = self.post_activity(
+                start_time="09:00", end_time="10:00",
+                activity_description="Retrospective activity"
+            )
+        self.assertEqual(response.status_code, 302)
+        audit = self.rows("""
+            SELECT activity_datetime, event_datetime
+            FROM activity_log
+            WHERE activity_type = 'shift_activity_created'
+        """)[0]
+        self.assertEqual(audit["activity_datetime"], "2026-10-18T18:00:00Z")
+        self.assertEqual(audit["event_datetime"], "2026-08-03T16:00:00Z")
+        self.assertNotEqual(
+            audit["activity_datetime"], audit["event_datetime"]
+        )
 
     def test_activity_form_has_explicit_recorded_and_in_progress_actions(self):
         self.login(1)

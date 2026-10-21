@@ -1,7 +1,9 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import add_activity_log_storyline_visibility as storyline_migration
 import add_activity_log_event_datetime as event_datetime_migration
@@ -183,16 +185,38 @@ class ActivityLogStorylineTests(unittest.TestCase):
 
     def test_log_activity_preserves_write_time_and_stores_canonical_event_time(self):
         conn = sqlite3.connect(self.path)
-        app.log_activity(
-            conn, "SLEEP", "sleep_woke_up", "Client woke up", user_id=7,
-            client_id=2, event_datetime="2026-08-03T13:00:00Z"
-        )
+        frozen_now = datetime(2026, 10, 18, 18, 0, tzinfo=timezone.utc)
+        with mock.patch.object(app, "get_application_now_utc", return_value=frozen_now):
+            app.log_activity(
+                conn, "SLEEP", "sleep_woke_up", "Client woke up", user_id=7,
+                client_id=2, event_datetime="2026-08-03T13:00:00Z"
+            )
         row = conn.execute(
             "SELECT activity_datetime, event_datetime FROM activity_log"
         ).fetchone()
         conn.close()
-        self.assertRegex(row[0], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        self.assertEqual(row[0], "2026-10-18T18:00:00Z")
         self.assertEqual(row[1], "2026-08-03T13:00:00Z")
+
+    def test_log_activity_without_event_uses_canonical_utc_audit_time(self):
+        conn = sqlite3.connect(self.path)
+        frozen_now = datetime(2026, 10, 18, 18, 0, tzinfo=timezone.utc)
+        with mock.patch.object(app, "get_application_now_utc", return_value=frozen_now):
+            app.log_activity(
+                conn, "LOGIN", "user_login", "User logged in", user_id=7
+            )
+        row = conn.execute(
+            "SELECT activity_datetime, event_datetime FROM activity_log"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row, ("2026-10-18T18:00:00Z", None))
+
+    def test_application_clock_requests_utc_explicitly(self):
+        real_datetime = app.datetime
+        with mock.patch.object(app, "datetime", wraps=real_datetime) as datetime_class:
+            now = app.get_application_now_utc()
+        datetime_class.now.assert_called_once_with(timezone.utc)
+        self.assertIs(now.tzinfo, timezone.utc)
 
     def test_incident_form_uses_canonical_types_and_help_text(self):
         with self.client.session_transaction() as session:
