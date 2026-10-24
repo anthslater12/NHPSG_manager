@@ -176,6 +176,18 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
         conn.close()
         return rows
 
+    def create_weekly_snapshot(self, list_id, week_start="2026-09-14"):
+        conn = self.connect()
+        snapshot_id = app.create_grocery_list_snapshot(
+            conn,
+            list_id,
+            "WEEKLY",
+            1,
+            week_start=week_start,
+        )
+        conn.close()
+        return snapshot_id
+
     def test_first_content_mutation_snapshots_baseline_once_per_week(self):
         list_id = self.create_list()
         section_id = self.add_section(list_id)
@@ -229,6 +241,328 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
             [row["week_start"] for row in self.weekly_rows(list_id)],
             ["2026-09-21", "2026-09-14"],
         )
+
+    def test_first_midweek_get_initializes_without_resetting_purchased(self):
+        list_id = self.create_list()
+        section_id = self.add_section(list_id)
+        first_item_id = self.add_item(
+            section_id,
+            item_name="Milk",
+            stock_text="2",
+            needed_text="1",
+            purchased=1,
+        )
+        second_item_id = self.add_item(
+            section_id,
+            item_name="Bread",
+            display_order=1,
+            stock_text="5",
+            needed_text="3",
+            purchased=0,
+        )
+        self.login(1)
+        wednesday = datetime(2026, 9, 16, 19, tzinfo=timezone.utc)
+
+        with patch("app.get_application_now_utc", return_value=wednesday):
+            first = self.client.get("/client/10/grocery-list")
+            second = self.client.get("/client/10/grocery-list")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(self.snapshot_count(list_id), 1)
+        conn = self.connect()
+        snapshot_items = conn.execute(
+            "SELECT item_name, stock_text, needed_text, purchased "
+            "FROM grocery_list_snapshot_items "
+            "WHERE snapshot_section_id IN ("
+            "SELECT snapshot_section_id FROM grocery_list_snapshot_sections "
+            "WHERE snapshot_id = (SELECT snapshot_id "
+            "FROM grocery_list_snapshots WHERE grocery_list_id = ?)) "
+            "ORDER BY display_order, snapshot_item_id",
+            (list_id,),
+        ).fetchall()
+        live_items = conn.execute(
+            "SELECT item_id, stock_text, needed_text, purchased "
+            "FROM grocery_list_items WHERE item_id IN (?, ?) "
+            "ORDER BY display_order, item_id",
+            (first_item_id, second_item_id),
+        ).fetchall()
+        week_start = conn.execute(
+            "SELECT week_start FROM grocery_list_snapshots "
+            "WHERE grocery_list_id = ?",
+            (list_id,),
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(week_start, "2026-09-14")
+        self.assertEqual(
+            [tuple(row) for row in snapshot_items],
+            [("Milk", "2", "1", 1), ("Bread", "5", "3", 0)],
+        )
+        self.assertEqual(
+            [tuple(row)[1:] for row in live_items],
+            [("2", "1", 1), ("5", "3", 0)],
+        )
+
+    def test_sunday_without_current_week_snapshot_does_not_reset_purchased(self):
+        list_id = self.create_list()
+        section_id = self.add_section(list_id)
+        item_id = self.add_item(section_id, purchased=1)
+        self.login(1)
+        sunday_before_midnight = datetime(
+            2026, 9, 21, 6, 59, tzinfo=timezone.utc
+        )
+
+        with patch(
+            "app.get_application_now_utc",
+            return_value=sunday_before_midnight,
+        ):
+            response = self.client.get("/client/10/grocery-list")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [row["week_start"] for row in self.weekly_rows(list_id)],
+            ["2026-09-14"],
+        )
+        conn = self.connect()
+        self.assertEqual(
+            conn.execute(
+                "SELECT purchased FROM grocery_list_items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_monday_transition_snapshots_prior_state_and_resets_once(self):
+        list_id = self.create_list()
+        section_id = self.add_section(list_id)
+        first_item_id = self.add_item(
+            section_id,
+            item_name="Milk",
+            stock_text="2",
+            needed_text="1",
+            purchased=1,
+        )
+        second_item_id = self.add_item(
+            section_id,
+            item_name="Bread",
+            display_order=1,
+            stock_text="5",
+            needed_text="3",
+            purchased=0,
+        )
+        self.create_weekly_snapshot(list_id)
+        self.login(1)
+        sunday_before_midnight = datetime(
+            2026, 9, 21, 6, 59, tzinfo=timezone.utc
+        )
+        monday = datetime(2026, 9, 21, 7, tzinfo=timezone.utc)
+
+        with patch(
+            "app.get_application_now_utc",
+            return_value=sunday_before_midnight,
+        ):
+            before_monday = self.client.get("/client/10/grocery-list")
+        self.assertEqual(before_monday.status_code, 200)
+
+        with patch("app.get_application_now_utc", return_value=monday):
+            first = self.client.get("/client/10/grocery-list")
+            second = self.client.get("/client/10/grocery-list")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(self.snapshot_count(list_id), 2)
+        conn = self.connect()
+        snapshot_items = conn.execute(
+            "SELECT item_name, stock_text, needed_text, purchased "
+            "FROM grocery_list_snapshot_items "
+            "WHERE snapshot_section_id IN ("
+            "SELECT snapshot_section_id FROM grocery_list_snapshot_sections "
+            "WHERE snapshot_id = (SELECT snapshot_id "
+            "FROM grocery_list_snapshots WHERE grocery_list_id = ? "
+            "AND week_start = '2026-09-21')) "
+            "ORDER BY display_order, snapshot_item_id",
+            (list_id,),
+        ).fetchall()
+        live_items = conn.execute(
+            "SELECT item_id, stock_text, needed_text, purchased "
+            "FROM grocery_list_items WHERE item_id IN (?, ?) "
+            "ORDER BY display_order, item_id",
+            (first_item_id, second_item_id),
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual(
+            [tuple(row) for row in snapshot_items],
+            [("Milk", "2", "1", 1), ("Bread", "5", "3", 0)],
+        )
+        self.assertEqual(
+            [tuple(row)[1:] for row in live_items],
+            [("2", "1", 0), ("5", "3", 0)],
+        )
+
+    def test_monday_get_with_unpurchased_items_is_still_once_only(self):
+        list_id = self.create_list()
+        section_id = self.add_section(list_id)
+        item_id = self.add_item(
+            section_id,
+            stock_text="Full",
+            needed_text="",
+            purchased=0,
+        )
+        self.login(1)
+        monday = datetime(2026, 9, 21, 7, tzinfo=timezone.utc)
+
+        with patch("app.get_application_now_utc", return_value=monday):
+            self.assertEqual(
+                self.client.get("/client/10/grocery-list").status_code,
+                200,
+            )
+            self.assertEqual(
+                self.client.get("/client/10/grocery-list").status_code,
+                200,
+            )
+
+        self.assertEqual(self.snapshot_count(list_id), 1)
+        conn = self.connect()
+        self.assertEqual(
+            conn.execute(
+                "SELECT purchased FROM grocery_list_items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
+    def test_vancouver_monday_boundary_creates_next_week_snapshot(self):
+        list_id = self.create_list()
+        section_id = self.add_section(list_id)
+        self.add_item(section_id, purchased=1)
+        self.login(1)
+        just_before_monday = datetime(2026, 9, 21, 6, 59, tzinfo=timezone.utc)
+        at_monday = datetime(2026, 9, 21, 7, tzinfo=timezone.utc)
+
+        with patch(
+            "app.get_application_now_utc",
+            return_value=just_before_monday,
+        ):
+            self.assertEqual(
+                self.client.get("/client/10/grocery-list").status_code,
+                200,
+            )
+        self.assertEqual(
+            [row["week_start"] for row in self.weekly_rows(list_id)],
+            ["2026-09-14"],
+        )
+
+        with patch("app.get_application_now_utc", return_value=at_monday):
+            self.assertEqual(
+                self.client.get("/client/10/grocery-list").status_code,
+                200,
+            )
+        self.assertEqual(
+            [row["week_start"] for row in self.weekly_rows(list_id)],
+            ["2026-09-21", "2026-09-14"],
+        )
+
+    def test_first_week_mutations_roll_over_before_applying_changes(self):
+        monday = datetime(2026, 9, 21, 7, tzinfo=timezone.utc)
+
+        toggle_list = self.create_list()
+        toggle_section = self.add_section(toggle_list)
+        toggle_item = self.add_item(
+            toggle_section,
+            item_name="Toggle",
+            stock_text="Old stock",
+            needed_text="Old need",
+            purchased=0,
+        )
+        edit_list = self.create_list(client_id=20, title="Edit List")
+        edit_section = self.add_section(edit_list, name="Old Section")
+        edit_item = self.add_item(
+            edit_section,
+            item_name="Old item",
+            stock_text="Old stock",
+            needed_text="Old need",
+            purchased=1,
+        )
+        conn = self.connect()
+        conn.execute("UPDATE clients SET active = 1 WHERE client_id = 30")
+        conn.commit()
+        conn.close()
+        rename_list = self.create_list(client_id=30, title="Rename List")
+        rename_section = self.add_section(rename_list, name="Old Section")
+        rename_item = self.add_item(rename_section, purchased=1)
+        self.create_weekly_snapshot(toggle_list)
+        self.create_weekly_snapshot(edit_list)
+        self.create_weekly_snapshot(rename_list)
+
+        self.login(1)
+        with patch("app.get_application_now_utc", return_value=monday):
+            toggle_response = self.client.post(
+                f"/client/10/grocery-list/items/{toggle_item}/purchased",
+                data={"purchased": "1"},
+            )
+            edit_response = self.client.post(
+                f"/client/20/grocery-list/items/{edit_item}/edit",
+                data={
+                    "item_name": "New item",
+                    "stock_text": "New stock",
+                    "needed_text": "New need",
+                },
+            )
+            rename_response = self.client.post(
+                f"/client/30/grocery-list/sections/{rename_section}/rename",
+                data={"name": "New Section"},
+            )
+
+        self.assertEqual(toggle_response.status_code, 302)
+        self.assertEqual(edit_response.status_code, 302)
+        self.assertEqual(rename_response.status_code, 302)
+        conn = self.connect()
+        toggle_snapshot = conn.execute(
+            "SELECT purchased FROM grocery_list_snapshot_items "
+            "WHERE item_name = 'Toggle'"
+        ).fetchone()[0]
+        edit_snapshot = conn.execute(
+            "SELECT item_name, stock_text, needed_text, purchased "
+            "FROM grocery_list_snapshot_items WHERE item_name = 'Old item'"
+        ).fetchone()
+        rename_snapshot = conn.execute(
+            "SELECT name FROM grocery_list_snapshot_sections "
+            "WHERE name = 'Old Section' AND snapshot_id IN ("
+            "SELECT snapshot_id FROM grocery_list_snapshots "
+            "WHERE grocery_list_id = ?)"
+            , (rename_list,)
+        ).fetchone()[0]
+        live_items = conn.execute(
+            "SELECT item_id, item_name, stock_text, needed_text, purchased "
+            "FROM grocery_list_items WHERE item_id IN (?, ?, ?) "
+            "ORDER BY item_id",
+            (toggle_item, edit_item, rename_item),
+        ).fetchall()
+        live_section = conn.execute(
+            "SELECT name FROM grocery_list_sections WHERE section_id = ?",
+            (rename_section,),
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(toggle_snapshot, 0)
+        self.assertEqual(tuple(edit_snapshot), ("Old item", "Old stock", "Old need", 1))
+        self.assertEqual(rename_snapshot, "Old Section")
+        self.assertEqual(
+            [tuple(row)[1:] for row in live_items],
+            [
+                ("Toggle", "Old stock", "Old need", 1),
+                ("New item", "New stock", "New need", 0),
+                ("Milk", "Low", "2 cartons", 0),
+            ],
+        )
+        self.assertEqual(live_section, "New Section")
+        self.assertEqual(self.snapshot_count(toggle_list), 2)
+        self.assertEqual(self.snapshot_count(edit_list), 2)
+        self.assertEqual(self.snapshot_count(rename_list), 2)
 
     def test_item_edit_purchased_delete_and_section_delete_snapshot_before_change(self):
         list_id = self.create_list()
@@ -382,6 +716,8 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
     def test_failed_content_mutation_rolls_back_new_weekly_snapshot(self):
         list_id = self.create_list()
         self.add_section(list_id, name="Existing")
+        section_id = self.add_section(list_id, name="Keep")
+        item_id = self.add_item(section_id, purchased=1)
         self.login(1)
         with patch(
             "app.get_application_now_utc",
@@ -393,8 +729,91 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.snapshot_count(list_id), 0)
+        conn = self.connect()
+        self.assertEqual(
+            conn.execute(
+                "SELECT purchased FROM grocery_list_items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
 
-    def test_views_and_share_changes_do_not_create_history(self):
+    def test_failed_monday_get_rolls_back_snapshot_and_reset(self):
+        list_id = self.create_list()
+        section_id = self.add_section(list_id)
+        item_id = self.add_item(section_id, purchased=1)
+        self.create_weekly_snapshot(list_id)
+        conn = self.connect()
+        conn.execute(
+            """
+            CREATE TRIGGER fail_weekly_rollover
+            BEFORE INSERT ON grocery_list_snapshot_items
+            BEGIN
+                SELECT RAISE(ABORT, 'forced weekly rollover failure');
+            END;
+            """
+        )
+        conn.commit()
+        conn.close()
+        self.login(1)
+
+        with patch(
+            "app.get_application_now_utc",
+            return_value=datetime(2026, 9, 21, 7, tzinfo=timezone.utc),
+        ):
+            response = self.client.get("/client/10/grocery-list")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.snapshot_count(list_id), 1)
+        conn = self.connect()
+        self.assertEqual(
+            conn.execute(
+                "SELECT purchased FROM grocery_list_items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
+    def test_failed_first_week_mutation_rolls_back_rollover_and_mutation(self):
+        list_id = self.create_list()
+        self.add_section(list_id, name="Existing")
+        keep_section_id = self.add_section(list_id, name="Keep")
+        item_id = self.add_item(keep_section_id, purchased=1)
+        self.create_weekly_snapshot(list_id)
+        self.login(1)
+
+        with patch(
+            "app.get_application_now_utc",
+            return_value=datetime(2026, 9, 21, 7, tzinfo=timezone.utc),
+        ):
+            response = self.client.post(
+                "/client/10/grocery-list/sections/new",
+                data={"name": "Existing"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.snapshot_count(list_id), 1)
+        conn = self.connect()
+        self.assertEqual(
+            conn.execute(
+                "SELECT purchased FROM grocery_list_items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM grocery_list_sections "
+                "WHERE grocery_list_id = ?",
+                (list_id,),
+            ).fetchone()[0],
+            2,
+        )
+        conn.close()
+
+    def test_views_and_share_changes_do_not_create_additional_history(self):
         list_id = self.create_list()
         self.share(list_id, 5, "VIEW")
         self.login(5)
@@ -403,7 +822,7 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
             self.client.get("/client/10/grocery-list/history").status_code,
             200,
         )
-        self.assertEqual(self.snapshot_count(list_id), 0)
+        self.assertEqual(self.snapshot_count(list_id), 1)
 
         self.login(1)
         response = self.client.post(
@@ -411,7 +830,39 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
             data={"user_id": 7, "permission": "EDIT"},
         )
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(self.snapshot_count(list_id), 0)
+        self.assertEqual(self.snapshot_count(list_id), 1)
+
+    def test_view_only_access_can_trigger_rollover_with_request_provenance(self):
+        list_id = self.create_list()
+        section_id = self.add_section(list_id)
+        item_id = self.add_item(section_id, purchased=1)
+        self.create_weekly_snapshot(list_id)
+        self.share(list_id, 5, "VIEW")
+        self.login(5)
+
+        with patch(
+            "app.get_application_now_utc",
+            return_value=datetime(2026, 9, 21, 7, tzinfo=timezone.utc),
+        ):
+            response = self.client.get("/client/10/grocery-list")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.snapshot_count(list_id), 2)
+        conn = self.connect()
+        current_snapshot = conn.execute(
+            "SELECT captured_by_user_id FROM grocery_list_snapshots "
+            "WHERE grocery_list_id = ? AND week_start = '2026-09-21'",
+            (list_id,),
+        ).fetchone()
+        self.assertEqual(current_snapshot["captured_by_user_id"], 5)
+        self.assertEqual(
+            conn.execute(
+                "SELECT purchased FROM grocery_list_items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
 
     def test_history_access_and_cross_client_isolation(self):
         first_list = self.create_list()

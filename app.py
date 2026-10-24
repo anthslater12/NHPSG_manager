@@ -10251,7 +10251,7 @@ def ensure_grocery_list_weekly_snapshot(
     captured_by_user_id,
     now_utc=None,
 ):
-    """Ensure one weekly baseline exists for the current Vancouver week."""
+    """Ensure the current Vancouver week has a safe weekly state."""
     if now_utc is None:
         now_utc = get_application_now_utc()
     elif isinstance(now_utc, str):
@@ -10263,23 +10263,67 @@ def ensure_grocery_list_weekly_snapshot(
         raise ValueError("now_utc must include a UTC offset.")
 
     week_start = get_grocery_list_week_start(now_utc).isoformat()
-    existing = conn.execute(
-        "SELECT snapshot_id FROM grocery_list_snapshots "
-        "WHERE grocery_list_id = ? "
-        "AND snapshot_kind = 'WEEKLY' "
-        "AND week_start = ?",
-        (grocery_list_id, week_start),
-    ).fetchone()
-    if existing is not None:
-        return existing["snapshot_id"]
+    started_transaction = not conn.in_transaction
+    savepoint = "grocery_list_weekly_rollover"
+    if started_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    else:
+        conn.execute(f"SAVEPOINT {savepoint}")
 
-    return create_grocery_list_snapshot(
-        conn,
-        grocery_list_id,
-        "WEEKLY",
-        captured_by_user_id,
-        week_start=week_start,
-    )
+    try:
+        latest = conn.execute(
+            "SELECT snapshot_id, week_start "
+            "FROM grocery_list_snapshots "
+            "WHERE grocery_list_id = ? "
+            "AND snapshot_kind = 'WEEKLY' "
+            "ORDER BY week_start DESC, snapshot_id DESC "
+            "LIMIT 1",
+            (grocery_list_id,),
+        ).fetchone()
+        if latest is not None and latest["week_start"] >= week_start:
+            if started_transaction:
+                conn.commit()
+            else:
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return latest["snapshot_id"]
+
+        snapshot_id = create_grocery_list_snapshot(
+            conn,
+            grocery_list_id,
+            "WEEKLY",
+            captured_by_user_id,
+            week_start=week_start,
+        )
+        if latest is not None and latest["week_start"] < week_start:
+            conn.execute(
+                """
+                UPDATE grocery_list_items
+                SET purchased = 0
+                WHERE section_id IN (
+                    SELECT section_id
+                    FROM grocery_list_sections
+                    WHERE grocery_list_id = ?
+                )
+                """,
+                (grocery_list_id,),
+            )
+
+        if started_transaction:
+            conn.commit()
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return snapshot_id
+    except BaseException:
+        if started_transaction:
+            if conn.in_transaction:
+                conn.rollback()
+        else:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except sqlite3.Error:
+                pass
+        raise
 
 
 def get_grocery_list_week_start(now_utc=None):
@@ -38905,6 +38949,11 @@ def client_grocery_list(client_id):
             grocery_list["grocery_list_id"],
         )
         actor = access["actor"]
+        ensure_grocery_list_weekly_snapshot(
+            conn,
+            grocery_list["grocery_list_id"],
+            actor["user_id"],
+        )
 
         sections = []
         section_rows = conn.execute("""

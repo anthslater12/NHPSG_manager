@@ -276,7 +276,7 @@ class GroceryListEmailPreviewTests(unittest.TestCase):
         self.assertIn(b"- Chicken tenders | Needed: 1 bag", body)
         self.assertNotIn(b"None", body)
 
-    def test_preview_requires_recipients_and_does_not_create_snapshot(self):
+    def test_preview_requires_recipients_and_does_not_create_email_snapshot(self):
         list_id = self.create_list()
         self.login(1)
         response = self.client.post(
@@ -285,7 +285,9 @@ class GroceryListEmailPreviewTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Add at least one email recipient", response.data)
-        self.assertEqual(self.snapshot_rows(list_id), [])
+        rows = self.snapshot_rows(list_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["snapshot_kind"], "WEEKLY")
 
     def test_recipient_from_another_list_is_not_included(self):
         first_list = self.create_list()
@@ -441,6 +443,14 @@ class GroceryListEmailPreviewTests(unittest.TestCase):
             """
             CREATE TRIGGER fail_email_snapshot
             BEFORE INSERT ON grocery_list_snapshot_items
+            WHEN EXISTS (
+                SELECT 1
+                FROM grocery_list_snapshot_sections AS sections
+                JOIN grocery_list_snapshots AS snapshots
+                  ON snapshots.snapshot_id = sections.snapshot_id
+                WHERE sections.snapshot_section_id = NEW.snapshot_section_id
+                  AND snapshots.snapshot_kind = 'EMAIL'
+            )
             BEGIN
                 SELECT RAISE(ABORT, 'forced email snapshot failure');
             END;
@@ -457,7 +467,13 @@ class GroceryListEmailPreviewTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"could not be prepared", response.data)
         self.assertNotIn(b"Grocery List Email Preview", response.data)
-        self.assertEqual(self.snapshot_rows(list_id), [])
+        self.assertEqual(
+            [
+                row for row in self.snapshot_rows(list_id)
+                if row["snapshot_kind"] == "EMAIL"
+            ],
+            [],
+        )
 
     def test_preview_does_not_send_email_or_require_shift_context(self):
         list_id = self.create_list()
