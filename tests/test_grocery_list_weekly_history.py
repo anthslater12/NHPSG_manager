@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -543,6 +544,46 @@ class GroceryListWeeklyHistoryTests(unittest.TestCase):
         self.assertNotIn(b"Add Item", response.data)
         self.assertNotIn(b"Mark Purchased", response.data)
         self.assertNotIn(b"Share Grocery List", response.data)
+
+        tables = re.findall(
+            rb'<table class="grocery-history-table">(.*?)</table>',
+            response.data,
+            re.DOTALL,
+        )
+        self.assertEqual(len(tables), 2)
+        expected_columns = [
+            b"grocery-history-column-item",
+            b"grocery-history-column-stock",
+            b"grocery-history-column-needed",
+            b"grocery-history-column-purchased",
+        ]
+        expected_headers = [
+            b"Item",
+            b"Current Stock",
+            b"Amount Needed",
+            b"Purchased",
+        ]
+        for table in tables:
+            self.assertEqual(
+                re.findall(rb'<col class="([^"]+)"', table),
+                expected_columns,
+            )
+            self.assertEqual(
+                re.findall(rb'<th scope="col">([^<]+)</th>', table),
+                expected_headers,
+            )
+            rows = re.findall(rb"<tr>(.*?)</tr>", table, re.DOTALL)
+            self.assertGreaterEqual(len(rows), 2)
+            for row in rows[1:]:
+                self.assertEqual(len(re.findall(rb"<td(?: [^>]*)?>", row)), 4)
+
+        self.assertEqual(
+            [
+                re.findall(rb'<col class="([^"]+)"', table)
+                for table in tables
+            ],
+            [expected_columns] * len(tables),
+        )
         self.assertEqual(
             self.client.post(
                 f"/client/10/grocery-list/history/{snapshot_id}"

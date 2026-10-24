@@ -1718,6 +1718,34 @@ td,th{
     table-layout: fixed;
 }
 
+.grocery-history-table-scroll table {
+    min-width: 760px;
+    table-layout: fixed;
+}
+
+.grocery-history-table {
+    --grocery-history-item-column-width: 40%;
+    --grocery-history-stock-column-width: 20%;
+    --grocery-history-needed-column-width: 20%;
+    --grocery-history-purchased-column-width: 20%;
+}
+
+.grocery-history-table .grocery-history-column-item {
+    width: var(--grocery-history-item-column-width);
+}
+
+.grocery-history-table .grocery-history-column-stock {
+    width: var(--grocery-history-stock-column-width);
+}
+
+.grocery-history-table .grocery-history-column-needed {
+    width: var(--grocery-history-needed-column-width);
+}
+
+.grocery-history-table .grocery-history-column-purchased {
+    width: var(--grocery-history-purchased-column-width);
+}
+
 .grocery-items-table-view {
     --grocery-item-column-width: 40%;
     --grocery-stock-column-width: 20%;

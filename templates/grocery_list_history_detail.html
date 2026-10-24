@@ -13,13 +13,20 @@
         <section>
             <h3>{{ section.name }}</h3>
             {% if section["items"] %}
-            <table>
+            <div class="table-scroll grocery-history-table-scroll">
+            <table class="grocery-history-table">
+                <colgroup>
+                    <col class="grocery-history-column-item">
+                    <col class="grocery-history-column-stock">
+                    <col class="grocery-history-column-needed">
+                    <col class="grocery-history-column-purchased">
+                </colgroup>
                 <thead>
                     <tr>
-                        <th>Item</th>
-                        <th>Current Stock</th>
-                        <th>Amount Needed</th>
-                        <th>Purchased</th>
+                        <th scope="col">Item</th>
+                        <th scope="col">Current Stock</th>
+                        <th scope="col">Amount Needed</th>
+                        <th scope="col">Purchased</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -33,6 +40,7 @@
                 {% endfor %}
                 </tbody>
             </table>
+            </div>
             {% else %}
                 <p>No items in this section.</p>
             {% endif %}
