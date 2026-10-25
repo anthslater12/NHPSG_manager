@@ -518,6 +518,72 @@ class ActivityLogStorylineTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Audit", response.data)
 
+    def test_activity_log_shows_utc_and_vancouver_times_without_changing_data(self):
+        conn = sqlite3.connect(self.path)
+        conn.executemany(
+            """
+            INSERT INTO activity_log
+            (activity_datetime, activity_class, activity_type, summary,
+             event_datetime)
+            VALUES (?, 'ADMIN', 'audit_time_test', ?, ?)
+            """,
+            [
+                (
+                    "2026-07-01T00:15:32Z",
+                    "PDT audit",
+                    "2026-08-02T12:00:00Z",
+                ),
+                (
+                    "2026-01-01T00:15:32Z",
+                    "PST audit",
+                    "2026-02-02T12:00:00Z",
+                ),
+            ],
+        )
+        conn.commit()
+        before = conn.execute(
+            """
+            SELECT activity_datetime, event_datetime
+            FROM activity_log
+            WHERE activity_type = 'audit_time_test'
+            ORDER BY activity_id
+            """
+        ).fetchall()
+        conn.close()
+
+        self.login_session(role="Admin")
+        response = self.client.get("/activity-log")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.data
+        self.assertIn(b"<th>Audit Time (UTC)</th>", body)
+        self.assertIn(b"<th>Vancouver Time</th>", body)
+        self.assertLess(
+            body.index(b"<th>Audit Time (UTC)</th>"),
+            body.index(b"<th>Vancouver Time</th>"),
+        )
+        self.assertIn(b"2026-07-01T00:15:32Z", body)
+        self.assertIn(b"2026-06-30 17:15", body)
+        self.assertIn(b"2026-01-01T00:15:32Z", body)
+        self.assertIn(b"2025-12-31 16:15", body)
+
+        conn = sqlite3.connect(self.path)
+        after = conn.execute(
+            """
+            SELECT activity_datetime, event_datetime
+            FROM activity_log
+            WHERE activity_type = 'audit_time_test'
+            ORDER BY activity_id
+            """
+        ).fetchall()
+        conn.close()
+        self.assertEqual(after, before)
+
+    def test_activity_log_requires_management_permissions(self):
+        self.login_session(role="Support Worker")
+        response = self.client.get("/activity-log")
+        self.assertEqual(response.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

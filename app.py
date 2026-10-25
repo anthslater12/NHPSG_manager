@@ -41005,7 +41005,7 @@ def activity_log():
 
     conn = get_db()
 
-    logs = conn.execute("""
+    log_rows = conn.execute("""
         SELECT
             al.*,
             u.full_name,
@@ -41018,6 +41018,14 @@ def activity_log():
     """).fetchall()
 
     conn.close()
+
+    logs = []
+    for row in log_rows:
+        log = dict(row)
+        log["vancouver_datetime"] = format_utc_database_datetime_display(
+            row["activity_datetime"]
+        )
+        logs.append(log)
 
     return render_template("activity_log.html", logs=logs)
 

@@ -10,7 +10,8 @@
     {% if logs %}
         <table>
             <tr>
-                <th>Date/Time</th>
+                <th>Audit Time (UTC)</th>
+                <th>Vancouver Time</th>
                 <th>User</th>
                 <th>Shift</th>
 				<th>Class</th>
@@ -21,6 +22,8 @@
             {% for log in logs %}
             <tr>
 				<td>{{ log.activity_datetime }}</td>
+
+				<td>{{ log.vancouver_datetime }}</td>
 
 				<td>{{ log.full_name or "" }}</td>
 
